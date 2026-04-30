@@ -2,10 +2,11 @@
 
 Rust CLI for monitoring Polymarket crypto up/down markets.
 
-Current scope: data-only monitoring for 5-minute BTC markets. The runtime
-discovers the current and next Polymarket event, subscribes to both outcome
-tokens over the CLOB market websocket, streams Chainlink BTC/USD from
-Polymarket RTDS, and rolls forward without operator action.
+Current scope: data-only monitoring for whitelisted 5-minute crypto markets.
+The runtime discovers the current and next Polymarket event for each
+whitelisted asset, subscribes to every outcome token over the CLOB market
+websocket, streams the matching Chainlink price from Polymarket RTDS, and
+rolls forward without operator action.
 
 There is no trading path yet. No orders are created, signed, or posted.
 
@@ -34,7 +35,7 @@ Telegram is optional and currently only scaffolded for future decision alerts.
 ## Commands
 
 ```bash
-# Check Gamma discovery for current + next BTC 5m slots.
+# Check Gamma discovery for current + next whitelisted 5m slots.
 cargo run -- doctor
 
 # Run the live data monitor until interrupted.
@@ -47,7 +48,7 @@ cargo run -- monitor --max-runtime-seconds 15
 Useful overrides:
 
 ```bash
-cargo run -- monitor --asset btc --slot-seconds 300 --lookahead-slots 1
+cargo run -- monitor --assets btc,eth,sol,xrp,doge,hype,bnb --slot-seconds 300 --lookahead-slots 1
 cargo run -- monitor --price-feed chainlink
 ```
 
@@ -56,6 +57,7 @@ cargo run -- monitor --price-feed chainlink
 | name | default | purpose |
 |---|---|---|
 | `RUST_LOG` | `wiggler=info,info` | Tracing filter |
+| `WIGGLER_ASSETS` | `btc,eth,sol,xrp,doge,hype,bnb` | Comma-separated asset whitelist |
 | `POLYMARKET_GAMMA_BASE_URL` | `https://gamma-api.polymarket.com` | Market discovery |
 | `POLYMARKET_CLOB_MARKET_WS_URL` | `wss://ws-subscriptions-clob.polymarket.com/ws/market` | Orderbook websocket |
 | `POLYMARKET_RTDS_WS_URL` | `wss://ws-live-data.polymarket.com` | Chainlink/Binance crypto price websocket |

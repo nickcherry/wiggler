@@ -33,13 +33,26 @@ JSON-encoded strings, so parsing for those fields is isolated in
 ## Outcome Tokens
 
 The CLOB market websocket subscribes by token asset IDs, not by event slug.
-For BTC 5-minute markets there are two token IDs:
+The same convention is currently used for the whitelisted crypto assets:
+
+```text
+btc-updown-5m-{slot_start_unix_seconds}
+eth-updown-5m-{slot_start_unix_seconds}
+sol-updown-5m-{slot_start_unix_seconds}
+xrp-updown-5m-{slot_start_unix_seconds}
+doge-updown-5m-{slot_start_unix_seconds}
+hype-updown-5m-{slot_start_unix_seconds}
+bnb-updown-5m-{slot_start_unix_seconds}
+```
+
+For 5-minute up/down markets there are two token IDs:
 
 - `Up`
 - `Down`
 
-The monitor subscribes to current and next slot tokens so rollover can happen
-without waiting for the next slot to be discovered at the boundary.
+The monitor subscribes to current and next slot tokens for every whitelisted
+asset so rollover can happen without waiting for the next slot to be discovered
+at the boundary.
 
 ## Orderbook Feed
 
@@ -73,7 +86,7 @@ Unknown events are logged at debug level with the raw payload.
 
 ## Underlying Price Feed
 
-The BTC 5-minute market description says resolution uses Chainlink BTC/USD,
+The 5-minute crypto market descriptions say resolution uses Chainlink streams,
 not spot exchange prices. The monitor therefore defaults to RTDS Chainlink:
 
 ```text
@@ -89,7 +102,7 @@ Subscription shape:
     {
       "topic": "crypto_prices_chainlink",
       "type": "*",
-      "filters": "{\"symbol\":\"btc/usd\"}"
+                  "filters": "{\"symbol\":\"btc/usd\"}"
     }
   ]
 }
@@ -97,14 +110,25 @@ Subscription shape:
 
 RTDS requires text `PING` messages every 5 seconds to keep the connection open.
 
+For a multi-asset whitelist, the monitor opens one RTDS connection per asset and
+filters ticks by the exact expected Chainlink symbol:
+
+- `btc/usd`
+- `eth/usd`
+- `sol/usd`
+- `xrp/usd`
+- `doge/usd`
+- `hype/usd`
+- `bnb/usd`
+
 ## Slot Line
 
 This repo calls the boundary price the `slot line`. It is the price that the
 final Chainlink tick must finish above/equal to for `Up`, or below for `Down`.
 
-The current monitor captures a slot line only when it observes a Chainlink tick
-crossing the slot start. If the process starts after the current slot began, it
-does not invent a line for that slot. It will capture the next slot line once
-it observes the boundary.
+The current monitor captures a slot line only when it observes that asset's
+Chainlink tick crossing the slot start. If the process starts after the current
+slot began, it does not invent a line for that slot. It will capture the next
+slot line once it observes the boundary.
 
 That behavior is intentional. A stale or guessed line is worse than no line.

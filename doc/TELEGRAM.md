@@ -33,6 +33,7 @@ Decision messages must include:
 
 - timestamp
 - market slug
+- asset
 - slot start/end
 - side/outcome
 - market price and book depth

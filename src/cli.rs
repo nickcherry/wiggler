@@ -1,6 +1,6 @@
 use clap::{Parser, Subcommand};
 
-use crate::domain::asset::Asset;
+use crate::domain::asset::{Asset, DEFAULT_ASSET_WHITELIST};
 use crate::polymarket::rtds::PriceFeedSource;
 
 #[derive(Debug, Parser)]
@@ -21,9 +21,15 @@ pub enum Command {
 
 #[derive(Clone, Debug, Parser)]
 pub struct DoctorArgs {
-    /// Asset family to inspect.
-    #[arg(long, default_value_t = Asset::Btc)]
-    pub asset: Asset,
+    /// Comma-separated asset whitelist to inspect.
+    #[arg(
+        long,
+        alias = "asset",
+        value_delimiter = ',',
+        env = "WIGGLER_ASSETS",
+        default_value = DEFAULT_ASSET_WHITELIST
+    )]
+    pub assets: Vec<Asset>,
 
     /// Slot width in seconds. Current production target is 300.
     #[arg(long, default_value_t = 300)]
@@ -36,9 +42,15 @@ pub struct DoctorArgs {
 
 #[derive(Clone, Debug, Parser)]
 pub struct MonitorArgs {
-    /// Asset family to monitor.
-    #[arg(long, default_value_t = Asset::Btc)]
-    pub asset: Asset,
+    /// Comma-separated asset whitelist to monitor.
+    #[arg(
+        long,
+        alias = "asset",
+        value_delimiter = ',',
+        env = "WIGGLER_ASSETS",
+        default_value = DEFAULT_ASSET_WHITELIST
+    )]
+    pub assets: Vec<Asset>,
 
     /// Slot width in seconds. Current production target is 300.
     #[arg(long, default_value_t = 300)]

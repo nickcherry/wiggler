@@ -14,7 +14,7 @@ use crate::{
     cli::MonitorArgs,
     config::RuntimeConfig,
     domain::{
-        asset::Asset,
+        asset::{Asset, format_assets, normalize_assets},
         market::{MonitoredMarket, Outcome, OutcomeToken},
         orderbook::OrderBookSet,
         time::{MarketSlot, duration_from_seconds},
@@ -33,9 +33,10 @@ pub async fn run(args: MonitorArgs, config: RuntimeConfig) -> Result<()> {
     }
 
     let gamma = GammaClient::new(config.gamma_base_url.clone());
+    let assets = normalize_assets(args.assets.clone());
     let watchset_config = WatchsetConfig {
         ws_endpoint: config.clob_market_ws_url.clone(),
-        asset: args.asset,
+        assets: assets.clone(),
         duration,
         lookahead_slots: args.lookahead_slots,
     };
@@ -43,12 +44,17 @@ pub async fn run(args: MonitorArgs, config: RuntimeConfig) -> Result<()> {
     let (price_tx, mut price_rx) = mpsc::channel::<PriceTick>(1024);
     let (market_tx, mut market_rx) = mpsc::channel::<MarketWsEvent>(4096);
 
-    let price_handle = tokio::spawn(run_price_feed(
-        config.rtds_ws_url.clone(),
-        args.asset,
-        args.price_feed,
-        price_tx,
-    ));
+    let price_handles = assets
+        .iter()
+        .map(|asset| {
+            tokio::spawn(run_price_feed(
+                config.rtds_ws_url.clone(),
+                *asset,
+                args.price_feed,
+                price_tx.clone(),
+            ))
+        })
+        .collect::<Vec<_>>();
 
     let mut market_handle: Option<JoinHandle<()>> = None;
     let mut subscribed_asset_ids = Vec::<String>::new();
@@ -71,7 +77,7 @@ pub async fn run(args: MonitorArgs, config: RuntimeConfig) -> Result<()> {
     .await?;
 
     info!(
-        asset = %args.asset,
+        assets = format_assets(&assets),
         slot_seconds = args.slot_seconds,
         price_feed = %args.price_feed,
         "monitor started"
@@ -112,7 +118,9 @@ pub async fn run(args: MonitorArgs, config: RuntimeConfig) -> Result<()> {
         }
     }
 
-    price_handle.abort();
+    for handle in price_handles {
+        handle.abort();
+    }
     if let Some(handle) = market_handle {
         handle.abort();
     }
@@ -128,8 +136,13 @@ async fn refresh_watchset(
     market_handle: &mut Option<JoinHandle<()>>,
     market_tx: mpsc::Sender<MarketWsEvent>,
 ) -> Result<()> {
-    let markets =
-        fetch_watchset(gamma, config.asset, config.duration, config.lookahead_slots).await?;
+    let markets = fetch_watchset(
+        gamma,
+        &config.assets,
+        config.duration,
+        config.lookahead_slots,
+    )
+    .await?;
     state.replace_markets(markets.clone());
 
     let next_asset_ids = asset_ids_for_markets(&markets);
@@ -163,33 +176,36 @@ async fn refresh_watchset(
 
 async fn fetch_watchset(
     gamma: &GammaClient,
-    asset: Asset,
+    assets: &[Asset],
     duration: chrono::TimeDelta,
     lookahead_slots: u32,
 ) -> Result<Vec<MonitoredMarket>> {
     let current_slot = MarketSlot::current(Utc::now(), duration)?;
     let mut markets = Vec::new();
 
-    for offset in 0..=lookahead_slots {
-        let slot = current_slot.offset(i64::from(offset))?;
-        match gamma.fetch_slot_market(asset, &slot).await {
-            Ok(Some(market)) => {
-                debug!(
-                    slug = market.slug,
-                    start = %market.slot.start(),
-                    end = %market.slot.end(),
-                    token_count = market.tokens.len(),
-                    "discovered market"
-                );
-                markets.push(market);
-            }
-            Ok(None) => {
-                let slug = slot.slug(asset)?;
-                debug!(slug, "market not yet available");
-            }
-            Err(error) => {
-                let slug = slot.slug(asset)?;
-                warn!(slug, error = %error, "failed to fetch market");
+    for asset in assets {
+        for offset in 0..=lookahead_slots {
+            let slot = current_slot.offset(i64::from(offset))?;
+            match gamma.fetch_slot_market(*asset, &slot).await {
+                Ok(Some(market)) => {
+                    debug!(
+                        asset = %asset,
+                        slug = market.slug,
+                        start = %market.slot.start(),
+                        end = %market.slot.end(),
+                        token_count = market.tokens.len(),
+                        "discovered market"
+                    );
+                    markets.push(market);
+                }
+                Ok(None) => {
+                    let slug = slot.slug(*asset)?;
+                    debug!(asset = %asset, slug, "market not yet available");
+                }
+                Err(error) => {
+                    let slug = slot.slug(*asset)?;
+                    warn!(asset = %asset, slug, error = %error, "failed to fetch market");
+                }
             }
         }
     }
@@ -200,7 +216,7 @@ async fn fetch_watchset(
 #[derive(Clone)]
 struct WatchsetConfig {
     ws_endpoint: String,
-    asset: Asset,
+    assets: Vec<Asset>,
     duration: chrono::TimeDelta,
     lookahead_slots: u32,
 }
@@ -235,7 +251,7 @@ struct MonitorState {
     markets_by_slug: HashMap<String, MonitoredMarket>,
     markets_by_asset_id: HashMap<String, (String, OutcomeToken)>,
     books: OrderBookSet,
-    latest_price: Option<PriceTick>,
+    latest_prices: HashMap<Asset, PriceTick>,
     slot_lines: HashMap<String, SlotLine>,
     initial_books_seen: HashSet<String>,
     event_counts: EventCounts,
@@ -268,8 +284,11 @@ impl MonitorState {
     }
 
     fn apply_price_tick(&mut self, tick: PriceTick) {
-        if let Some(previous) = &self.latest_price {
+        if let Some(previous) = self.latest_prices.get(&tick.asset).cloned() {
             for (slug, market) in &self.markets_by_slug {
+                if market.asset != tick.asset {
+                    continue;
+                }
                 if self.slot_lines.contains_key(slug) {
                     continue;
                 }
@@ -286,6 +305,7 @@ impl MonitorState {
                         },
                     );
                     info!(
+                        asset = %tick.asset,
                         slug,
                         line_price = %tick.value,
                         observed_at = %tick.exchange_timestamp,
@@ -295,7 +315,7 @@ impl MonitorState {
             }
         }
 
-        self.latest_price = Some(tick);
+        self.latest_prices.insert(tick.asset, tick);
     }
 
     fn apply_market_event(&mut self, event: MarketWsEvent) {
@@ -456,9 +476,10 @@ impl MonitorState {
             }
 
             let line = self.slot_lines.get(&market.slug);
+            let latest_price = self.latest_prices.get(&market.asset);
             let distance_bps = self
-                .latest_price
-                .as_ref()
+                .latest_prices
+                .get(&market.asset)
                 .zip(line)
                 .and_then(|(tick, line)| distance_bps(tick.value, line.price));
 
@@ -467,8 +488,9 @@ impl MonitorState {
 
             info!(
                 slug = market.slug,
+                asset = %market.asset,
                 seconds_to_end = (market.slot.end() - now).num_seconds(),
-                latest_price = ?self.latest_price.as_ref().map(|tick| tick.value.to_string()),
+                latest_price = ?latest_price.map(|tick| tick.value.to_string()),
                 line_price = ?line.map(|line| line.price.to_string()),
                 line_observed_at = ?line.map(|line| line.observed_at),
                 distance_bps = ?distance_bps.map(|value| value.round_dp(4).to_string()),
@@ -573,11 +595,50 @@ mod tests {
 
         let mut state = MonitorState::default();
         state.replace_markets(vec![market]);
-        state.apply_price_tick(price_tick(start - TimeDelta::milliseconds(50), "67000"));
-        state.apply_price_tick(price_tick(start + TimeDelta::milliseconds(200), "67001"));
+        state.apply_price_tick(price_tick(
+            Asset::Btc,
+            start - TimeDelta::milliseconds(50),
+            "67000",
+        ));
+        state.apply_price_tick(price_tick(
+            Asset::Btc,
+            start + TimeDelta::milliseconds(200),
+            "67001",
+        ));
 
         let line = state.slot_lines.get("btc-updown-5m-1777564200").unwrap();
         assert_eq!(line.price, Decimal::new(67_001, 0));
+    }
+
+    #[test]
+    fn line_capture_is_scoped_to_tick_asset() {
+        let start = Utc.with_ymd_and_hms(2026, 4, 30, 15, 50, 0).unwrap();
+        let eth_market = MonitoredMarket {
+            asset: Asset::Eth,
+            event_id: "event".to_string(),
+            market_id: "market".to_string(),
+            slug: "eth-updown-5m-1777564200".to_string(),
+            title: "Ethereum Up or Down".to_string(),
+            condition_id: "0xabc".to_string(),
+            slot: MarketSlot::from_start(start, TimeDelta::minutes(5)).unwrap(),
+            tokens: vec![],
+            resolution_source: None,
+        };
+
+        let mut state = MonitorState::default();
+        state.replace_markets(vec![eth_market]);
+        state.apply_price_tick(price_tick(
+            Asset::Btc,
+            start - TimeDelta::milliseconds(50),
+            "67000",
+        ));
+        state.apply_price_tick(price_tick(
+            Asset::Btc,
+            start + TimeDelta::milliseconds(200),
+            "67001",
+        ));
+
+        assert!(!state.slot_lines.contains_key("eth-updown-5m-1777564200"));
     }
 
     #[test]
@@ -608,10 +669,11 @@ mod tests {
         }
     }
 
-    fn price_tick(timestamp: chrono::DateTime<Utc>, value: &str) -> PriceTick {
+    fn price_tick(asset: Asset, timestamp: chrono::DateTime<Utc>, value: &str) -> PriceTick {
         PriceTick {
+            asset,
             source: PriceFeedSource::Chainlink,
-            symbol: "btc/usd".to_string(),
+            symbol: asset.chainlink_symbol().to_string(),
             value: value.parse().unwrap(),
             exchange_timestamp: timestamp,
             received_at: timestamp,

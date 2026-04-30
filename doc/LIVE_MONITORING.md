@@ -3,10 +3,10 @@
 ## Runtime Flow
 
 1. Compute the current UTC slot from wall clock time.
-2. Build the current and next Polymarket slugs.
+2. Build the current and next Polymarket slugs for every whitelisted asset.
 3. Fetch those events from Gamma.
 4. Subscribe to every discovered `Up` and `Down` CLOB token.
-5. Stream Chainlink BTC/USD from RTDS.
+5. Stream each whitelisted asset's Chainlink price from RTDS.
 6. Maintain in-memory orderbooks per token.
 7. Refresh the watchset every 10 seconds.
 8. If the token set changes, reconnect the CLOB websocket with the new set.
@@ -14,7 +14,8 @@
 
 ## Rollover
 
-The monitor watches the current slot and one future slot by default.
+The monitor watches the current slot and one future slot for every whitelisted
+asset by default.
 
 On each refresh, it recomputes the current slot from `Utc::now()`. When time
 crosses a 5-minute boundary, the watchset naturally becomes:
@@ -33,7 +34,7 @@ All live state is in memory:
 - watched markets by slug
 - token-to-market lookup
 - orderbook per CLOB token asset ID
-- latest underlying price tick
+- latest underlying price tick per asset
 - captured slot line per watched slug
 
 No database is used. If future logic needs a short local cache, prefer a simple

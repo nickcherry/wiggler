@@ -32,6 +32,7 @@ impl fmt::Display for PriceFeedSource {
 
 #[derive(Clone, Debug)]
 pub struct PriceTick {
+    pub asset: Asset,
     pub source: PriceFeedSource,
     pub symbol: String,
     pub value: Decimal,
@@ -98,13 +99,13 @@ async fn connect_price_feed_once(
                             continue;
                         }
 
-                        if let Some(tick) = parse_price_message(&text, source)? {
+                        if let Some(tick) = parse_price_message(&text, source, asset)? {
                             tx.send(tick).await.context("send RTDS price tick")?;
                         }
                     }
                     Message::Binary(bytes) => {
                         let text = String::from_utf8(bytes.to_vec()).context("binary RTDS message was not UTF-8")?;
-                        if let Some(tick) = parse_price_message(&text, source)? {
+                        if let Some(tick) = parse_price_message(&text, source, asset)? {
                             tx.send(tick).await.context("send RTDS price tick")?;
                         }
                     }
@@ -145,6 +146,7 @@ pub fn subscription_message(asset: Asset, source: PriceFeedSource) -> Value {
 pub fn parse_price_message(
     text: &str,
     source_filter: PriceFeedSource,
+    asset_filter: Asset,
 ) -> Result<Option<PriceTick>> {
     let trimmed = text.trim();
     if trimmed.is_empty() || trimmed == "PONG" {
@@ -160,13 +162,25 @@ pub fn parse_price_message(
     }
 
     let payload: PricePayload = serde_json::from_value(message.payload)?;
+    if payload.symbol != expected_symbol(asset_filter, source_filter) {
+        return Ok(None);
+    }
+
     Ok(Some(PriceTick {
+        asset: asset_filter,
         source,
         symbol: payload.symbol,
         value: payload.value,
         exchange_timestamp: payload.timestamp,
         received_at: message.timestamp,
     }))
+}
+
+fn expected_symbol(asset: Asset, source: PriceFeedSource) -> &'static str {
+    match source {
+        PriceFeedSource::Chainlink => asset.chainlink_symbol(),
+        PriceFeedSource::Binance => asset.binance_symbol(),
+    }
 }
 
 fn source_from_topic(topic: &str) -> Option<PriceFeedSource> {
@@ -216,6 +230,7 @@ mod tests {
                 }
             }"#,
             PriceFeedSource::Chainlink,
+            crate::domain::asset::Asset::Btc,
         )
         .unwrap()
         .unwrap();
