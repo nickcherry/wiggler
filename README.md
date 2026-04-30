@@ -16,6 +16,7 @@ There is no trading path yet. No orders are created, signed, or posted.
 - [CLI](./doc/CLI.md): command contract and examples.
 - [Polymarket](./doc/POLYMARKET.md): discovery, CLOB websocket, RTDS price feed, and slot naming.
 - [Live Monitoring](./doc/LIVE_MONITORING.md): long-running monitor behavior and rollover model.
+- [Operations](./doc/OPERATIONS.md): systemd, journald retention, and runtime guardrails.
 - [Telegram](./doc/TELEGRAM.md): current notification surface and future decision alerts.
 - [Coding Conventions](./doc/CODING_CONVENTIONS.md): Rust structure, numbers, tests, and dependency rules.
 - [Documentation](./doc/DOCUMENTATION.md): what to document and where.

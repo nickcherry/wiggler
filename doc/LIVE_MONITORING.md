@@ -52,6 +52,14 @@ Future decision code must check freshness before acting:
 
 The scaffold does not make decisions, so it only logs the available state.
 
+## Logging
+
+Info-level logging is designed to be safe for long-running operation. It logs
+periodic summaries and lifecycle events, while high-volume websocket churn stays
+at debug level. Production should run with `RUST_LOG=wiggler=info,info`.
+
+See [OPERATIONS.md](./OPERATIONS.md) for systemd and journald retention.
+
 ## Failure Behavior
 
 - Gamma refresh failures are logged and retried on the next refresh.

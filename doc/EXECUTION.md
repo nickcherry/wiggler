@@ -20,6 +20,9 @@ cargo run -- monitor --max-runtime-seconds 15
 Use the shortest live monitor run that proves the changed behavior. Do not
 leave long-running sessions active after validation.
 
+For production deploy changes, check [OPERATIONS.md](./OPERATIONS.md) and keep
+logging under systemd/journald retention rather than app-managed files.
+
 ## Live-System Caution
 
 `monitor` talks to public Polymarket websockets. It does not write to external

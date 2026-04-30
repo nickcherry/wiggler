@@ -1,0 +1,36 @@
+[Unit]
+Description=wiggler Polymarket monitor
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=wiggler
+Group=wiggler
+WorkingDirectory=/opt/wiggler
+ExecStart=/opt/wiggler/bin/wiggler monitor
+Restart=always
+RestartSec=3
+
+Environment=RUST_LOG=wiggler=info,info
+Environment=WIGGLER_ASSETS=btc,eth,sol,xrp,doge,hype,bnb
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=wiggler
+LogRateLimitIntervalSec=30s
+LogRateLimitBurst=2000
+
+MemoryMax=1G
+MemoryHigh=768M
+TasksMax=128
+LimitNOFILE=65536
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/wiggler/tmp
+
+[Install]
+WantedBy=multi-user.target
