@@ -9,11 +9,12 @@
 5. Stream each whitelisted asset's Chainlink price from RTDS.
 6. Maintain in-memory orderbooks per token.
 7. Maintain a bounded in-memory price history for runtime vol buckets.
-8. Load the production runtime probability-table bundle.
-9. Refresh the watchset every 10 seconds.
-10. If the token set changes, reconnect the CLOB websocket with the new set.
-11. Emit status logs every 15 seconds.
-12. Evaluate every `WIGGLER_EVALUATION_INTERVAL_MS` and log each evaluation.
+8. Maintain a per-market in-memory price path from the same RTDS price source.
+9. Load the production runtime probability-table bundle.
+10. Refresh the watchset every 10 seconds.
+11. If the token set changes, reconnect the CLOB websocket with the new set.
+12. Emit status logs every 15 seconds.
+13. Evaluate every `WIGGLER_EVALUATION_INTERVAL_MS` and log each evaluation.
 
 ## Rollover
 
@@ -39,6 +40,7 @@ All live state is in memory:
 - orderbook per CLOB token asset ID
 - latest underlying price tick per asset
 - recent underlying price history per asset
+- current-market price path per watched slug
 - captured slot line per watched slug
 
 Orderbooks for tokens that leave the active watchset are pruned on refresh.
@@ -54,6 +56,8 @@ Shadow decision code checks freshness before logging an eligible decision:
 - orderbook update age
 - current slot line availability
 - market still active/open
+- last-60-second path is not retracing against the current leading side
+- current lead has not decayed enough to fail the adjusted edge gate
 - enough executable ask depth at expected execution price
 - no local pending/positioned state for the market
 - no remote open orders or historical trades for the market before live submit
@@ -72,13 +76,14 @@ periodic summaries, shadow evaluations, and lifecycle events, while high-volume
 websocket churn stays at debug level. Production should run with
 `RUST_LOG=wiggler=info,info`.
 
-Shadow evaluations include a `decision` and `skip_reason`. A fresh process will
+Evaluations include `mode`, `decision`, and `skip_reason`. A fresh process will
 usually skip with `insufficient_price_history` until the 30-minute runtime vol
-lookback is warm.
+lookback is warm; current-market path gaps can also produce
+`insufficient_path_history`.
 
 Live trading uses the same evaluator twice: once for the logged decision and
-again immediately before order submission. If the second evaluation fails, no
-order is sent.
+again immediately before order submission. If the second evaluation fails, if
+the side flips, or if retracing appears, no order is sent.
 
 See [OPERATIONS.md](./OPERATIONS.md) for systemd and journald retention.
 

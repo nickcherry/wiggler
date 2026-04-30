@@ -63,8 +63,8 @@ WIGGLER_ASSETS=btc,eth,sol,xrp,doge cargo run -- monitor
 ```
 
 `--asset btc` is accepted as an alias for `--assets btc`.
-HYPE and BNB remain supported but are not in the default whitelist; include
-them explicitly with `--assets ...` when ready.
+HYPE and BNB are intentionally outside the production tradable whitelist and
+the checked-in runtime bundle.
 
 Side effects:
 
@@ -72,7 +72,7 @@ Side effects:
 - Opens one RTDS websocket per whitelisted asset for the configured price source.
 - Opens one CLOB market websocket for the full token watchset.
 - Emits JSON logs to stdout/stderr through tracing.
-- Logs shadow trade evaluations and skip reasons.
+- Logs every trade evaluation, would-trade, and skip reason.
 - Places live orders only when `WIGGLER_LIVE_TRADING=true`.
 
 ## Output
@@ -91,8 +91,9 @@ Per-event book, best-bid/ask, and trade churn is logged at debug level.
 
 `trade evaluation` logs include the market id, token ids, line/current prices,
 remaining-time bucket, distance from line, vol bin, runtime cell sample count,
-`p_win_lower`, executable ask edge, positive-EV depth, decision, skip reason,
-and runtime hashes.
+`p_win`, `p_win_lower`, path-state fields, executable ask edge, positive-EV
+depth, decision, skip reason, runtime hashes, training input hash, and price
+source/resolution-source fields for basis auditing.
 
 ## Destructive Commands
 

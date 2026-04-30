@@ -1,11 +1,11 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     future,
     time::Duration,
 };
 
 use anyhow::{Context, Result, bail};
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, TimeDelta, Utc};
 use rust_decimal::{Decimal, prelude::ToPrimitive};
 use tokio::{sync::mpsc, task::JoinHandle, time};
 use tracing::{debug, info, warn};
@@ -297,10 +297,12 @@ struct MonitorState {
     books: OrderBookSet,
     latest_prices: HashMap<Asset, PriceTick>,
     price_history: HashMap<Asset, PriceHistory>,
+    price_paths: HashMap<String, MarketPricePath>,
     slot_lines: HashMap<String, SlotLine>,
     positioned_markets: HashSet<String>,
     pending_markets: HashSet<String>,
     shadow_decision_markets: HashSet<String>,
+    resolved_markets: HashSet<String>,
     initial_books_seen: HashSet<String>,
     event_counts: EventCounts,
 }
@@ -333,6 +335,13 @@ impl MonitorState {
 
         self.slot_lines
             .retain(|slug, _| active_slugs.contains(slug));
+        self.price_paths
+            .retain(|slug, _| active_slugs.contains(slug));
+        self.resolved_markets.retain(|condition_id| {
+            markets
+                .iter()
+                .any(|market| market.condition_id == *condition_id)
+        });
         self.initial_books_seen
             .retain(|asset_id| active_asset_ids.contains(asset_id));
         self.books.retain_only(&active_asset_ids);
@@ -375,7 +384,31 @@ impl MonitorState {
             }
         }
 
+        self.record_market_price_paths(&tick);
         self.latest_prices.insert(tick.asset, tick);
+    }
+
+    fn record_market_price_paths(&mut self, tick: &PriceTick) {
+        for (slug, market) in &self.markets_by_slug {
+            if market.asset != tick.asset {
+                continue;
+            }
+            if tick.exchange_timestamp < market.slot.start()
+                || tick.exchange_timestamp >= market.slot.end()
+            {
+                continue;
+            }
+
+            let Some(line) = self.slot_lines.get(slug) else {
+                continue;
+            };
+
+            self.price_paths.entry(slug.clone()).or_default().push(
+                tick.exchange_timestamp,
+                tick.value,
+                line.price,
+            );
+        }
     }
 
     fn apply_market_event(&mut self, event: MarketWsEvent) {
@@ -500,6 +533,9 @@ impl MonitorState {
                 let condition_id = raw.get("market").and_then(|value| value.as_str());
                 if condition_id.is_some_and(|condition_id| self.is_watched_condition(condition_id))
                 {
+                    if let Some(condition_id) = condition_id {
+                        self.resolved_markets.insert(condition_id.to_string());
+                    }
                     info!(
                         slug = raw
                             .get("slug")
@@ -591,8 +627,15 @@ impl MonitorState {
                     warn!(slug = market.slug, "live trading enabled without executor");
                     continue;
                 };
-                self.execute_live_trade(market, runtime_bundle, config, executor, telegram)
-                    .await;
+                self.execute_live_trade(
+                    market,
+                    runtime_bundle,
+                    config,
+                    executor,
+                    telegram,
+                    &prepared,
+                )
+                .await;
             } else if self
                 .shadow_decision_markets
                 .insert(market.condition_id.clone())
@@ -649,12 +692,36 @@ impl MonitorState {
                     runtime.find_cell(remaining_bucket, vol_bin, side_leading, abs_d_bps)
                 },
             );
-        let edge_summary = runtime
-            .zip(cell)
-            .zip(book)
-            .map(|((runtime, cell), book)| summarize_asks(runtime, cell, &book.asks()));
+        let path_state = self
+            .price_paths
+            .get(&market.slug)
+            .zip(latest_tick)
+            .zip(line)
+            .zip(side_leading)
+            .zip(abs_d_bps_f64)
+            .and_then(
+                |((((path, tick), line), side_leading), current_abs_d_bps)| {
+                    path.state(
+                        tick.exchange_timestamp,
+                        tick.value,
+                        line.price,
+                        side_leading,
+                        current_abs_d_bps,
+                    )
+                },
+            );
+        let edge_penalty_applied = path_state.as_ref().is_some_and(edge_penalty_applies);
+        let required_edge = runtime
+            .zip(path_state.as_ref())
+            .and_then(|(runtime, state)| required_edge_probability(runtime, state));
+        let edge_summary = runtime.zip(cell).zip(book).zip(required_edge).map(
+            |(((runtime, cell), book), required_edge)| {
+                summarize_asks(runtime, cell, &book.asks(), required_edge)
+            },
+        );
         let already_positioned = self.positioned_markets.contains(&market.condition_id)
             || self.pending_markets.contains(&market.condition_id);
+        let market_resolved = self.resolved_markets.contains(&market.condition_id);
         let skip_reason = self.trade_skip_reason(
             market.asset,
             runtime,
@@ -671,22 +738,25 @@ impl MonitorState {
             book_age_ms,
             vol_bps_per_sqrt_min,
             cell,
+            path_state.as_ref(),
+            required_edge,
             best_ask.as_ref(),
             edge_summary.as_ref(),
             already_positioned,
+            market_resolved,
             config,
         );
         let decision = if skip_reason.is_some() {
             "skip"
-        } else if config.live_trading {
-            "live_trade"
         } else {
-            "shadow_trade"
+            "would_trade"
         };
 
         if emit_log {
             info!(
                 event = "trade_evaluation",
+                timestamp = %now.to_rfc3339(),
+                mode = if config.live_trading { "live" } else { "shadow" },
                 asset = %market.asset,
                 market_id = market.market_id,
                 condition_id = market.condition_id,
@@ -694,41 +764,65 @@ impl MonitorState {
                 up_token_id = ?self.token_for_outcome(market, Outcome::Up).map(|token| token.asset_id.as_str()),
                 down_token_id = ?self.token_for_outcome(market, Outcome::Down).map(|token| token.asset_id.as_str()),
                 buy_token_id = ?token.map(|token| token.asset_id.as_str()),
+                buy_outcome = ?buy_outcome.as_ref().map(outcome_label),
                 line_price = ?line.map(|line| line.price.to_string()),
                 line_observed_at = ?line.map(|line| line.observed_at),
                 current_price = ?latest_tick.map(|tick| tick.value.to_string()),
+                price_source = ?latest_tick.map(|tick| tick.source.to_string()),
+                price_symbol = ?latest_tick.map(|tick| tick.symbol.as_str()),
+                market_resolution_source = ?market.resolution_source.as_deref(),
                 current_received_at = ?latest_tick.map(|tick| tick.received_at),
                 current_exchange_timestamp = ?latest_tick.map(|tick| tick.exchange_timestamp),
                 price_age_ms = ?price_age_ms,
                 price_exchange_age_ms = ?price_exchange_age_ms,
                 orderbook_age_ms = ?book_age_ms,
                 remaining_sec,
-                remaining_bucket = ?remaining_bucket,
+                remaining_sec_bucket = ?remaining_bucket,
                 d_bps = ?d_bps.map(|value| value.round_dp(6).to_string()),
                 abs_d_bps = ?abs_d_bps.map(|value| value.round_dp(6).to_string()),
                 side_leading = ?side_leading.map(SideLeading::as_str),
                 vol_bps_per_sqrt_min = ?vol_bps_per_sqrt_min,
                 vol_bin = ?vol_bin.map(|bin| bin.as_str()),
+                matched_remaining_sec_bucket = ?cell.map(|cell| cell.remaining_sec),
+                matched_vol_bin = ?cell.map(|cell| cell.vol_bin.as_str()),
+                matched_side_leading = ?cell.map(|cell| cell.side_leading.as_str()),
+                matched_abs_d_bps_min = ?cell.map(|cell| cell.abs_d_bps_min),
+                matched_abs_d_bps_max = ?cell.and_then(|cell| cell.abs_d_bps_max),
                 cell_sample_count = ?cell.map(|cell| cell.sample_count),
+                p_win = ?cell.map(|cell| cell.p_win),
                 p_win_lower = ?cell.map(|cell| cell.p_win_lower),
+                return_last_60s_bps = ?path_state.as_ref().map(|state| state.return_last_60s_bps),
+                retracing_60s = ?path_state.as_ref().map(|state| state.retracing_60s),
+                max_abs_d_bps_so_far = ?path_state.as_ref().map(|state| state.max_abs_d_bps_so_far),
+                lead_decay_ratio = ?path_state.as_ref().map(|state| state.lead_decay_ratio),
+                edge_penalty_applied,
                 best_ask = ?best_ask.as_ref().map(|level| level.price.to_string()),
                 best_ask_size = ?best_ask.as_ref().map(|level| level.size.to_string()),
                 best_ask_fee = ?edge_summary.as_ref().and_then(|summary| summary.best_fee),
                 best_ask_edge = ?edge_summary.as_ref().and_then(|summary| summary.best_edge),
+                selected_size = ?edge_summary.as_ref().map(|summary| summary.positive_ev_depth_shares),
+                weighted_avg_price = ?edge_summary.as_ref().and_then(|summary| summary.weighted_avg_price),
+                all_in_cost = ?edge_summary.as_ref().and_then(|summary| summary.best_all_in_cost),
+                edge = ?edge_summary.as_ref().and_then(|summary| summary.best_edge),
                 positive_ev_depth_shares = ?edge_summary.as_ref().map(|summary| summary.positive_ev_depth_shares),
                 positive_ev_depth_usdc = ?edge_summary.as_ref().map(|summary| summary.positive_ev_depth_usdc),
+                positive_ev_depth = ?edge_summary.as_ref().map(|summary| summary.positive_ev_depth_shares),
                 max_acceptable_price = ?edge_summary.as_ref().and_then(|summary| summary.max_acceptable_price),
+                fee_rate = ?runtime.map(AssetRuntime::fee_rate),
                 min_edge_probability = ?runtime.map(AssetRuntime::min_edge_probability),
+                required_edge = ?required_edge,
                 min_order_usdc = config.min_order_usdc,
                 max_position_usdc = ?runtime.map(AssetRuntime::max_position_usdc),
                 max_order_usdc = config.max_order_usdc,
                 already_positioned,
+                market_resolved,
                 decision,
                 skip_reason = ?skip_reason,
                 live_trading = config.live_trading,
                 config_hash = ?runtime.map(AssetRuntime::runtime_config_hash),
                 source_config_hash = ?runtime.map(AssetRuntime::source_config_hash),
-                input_hash = ?runtime.map(AssetRuntime::training_input_hash),
+                training_input_hash = ?runtime.map(AssetRuntime::training_input_hash),
+                training_label_source_kind = ?runtime.and_then(AssetRuntime::training_label_source_kind),
                 "trade evaluation"
             );
         }
@@ -771,6 +865,7 @@ impl MonitorState {
         config: &RuntimeConfig,
         executor: &LiveTradeExecutor,
         telegram: &TelegramClient,
+        initial_prepared: &PreparedTrade,
     ) {
         if self.pending_markets.contains(&market.condition_id)
             || self.positioned_markets.contains(&market.condition_id)
@@ -797,7 +892,7 @@ impl MonitorState {
             }
         }
 
-        let Some(prepared) = self.evaluate_trade(market, runtime_bundle, config, Utc::now(), false)
+        let Some(prepared) = self.evaluate_trade(market, runtime_bundle, config, Utc::now(), true)
         else {
             info!(
                 event = "live_execution_skipped",
@@ -808,6 +903,20 @@ impl MonitorState {
             );
             return;
         };
+        if !pre_submit_matches_initial(initial_prepared, &prepared) {
+            info!(
+                event = "live_execution_skipped",
+                slug = market.slug,
+                condition_id = market.condition_id,
+                initial_outcome = ?initial_prepared.outcome,
+                pre_submit_outcome = ?prepared.outcome,
+                initial_token_id = initial_prepared.token_id.as_str(),
+                pre_submit_token_id = prepared.token_id.as_str(),
+                skip_reason = "pre_submit_side_flip",
+                "live execution skipped"
+            );
+            return;
+        }
 
         self.pending_markets.insert(market.condition_id.clone());
         if let Err(error) = telegram.send_message(&prepared.telegram_text(true)).await {
@@ -823,6 +932,20 @@ impl MonitorState {
             amount_usdc: prepared.amount_usdc,
             max_price: prepared.max_price,
         };
+        info!(
+            event = "live_order_submit",
+            timestamp = %Utc::now().to_rfc3339(),
+            mode = "live",
+            asset = %request.asset,
+            slug = request.slug.as_str(),
+            condition_id = request.condition_id.as_str(),
+            token_id = request.token_id.as_str(),
+            outcome = ?request.outcome,
+            amount_usdc = request.amount_usdc,
+            max_price = request.max_price,
+            decision = "submitted",
+            "submitting live order"
+        );
         let result = executor.execute(&request).await;
         self.pending_markets.remove(&market.condition_id);
 
@@ -831,21 +954,31 @@ impl MonitorState {
                 if response.success {
                     self.positioned_markets.insert(market.condition_id.clone());
                 }
+                let decision = if response.has_fill() {
+                    "filled"
+                } else if response.success {
+                    "submitted"
+                } else {
+                    "rejected"
+                };
                 info!(
                     event = "live_order_response",
+                    timestamp = %Utc::now().to_rfc3339(),
+                    mode = "live",
                     slug = market.slug,
                     condition_id = market.condition_id,
-                    token_id = request.token_id,
+                    token_id = request.token_id.as_str(),
                     outcome = ?request.outcome,
                     amount_usdc = request.amount_usdc,
                     max_price = request.max_price,
-                    order_id = response.order_id,
-                    status = response.status,
+                    order_id = response.order_id.as_str(),
+                    status = response.status.as_str(),
                     success = response.success,
                     error_msg = ?response.error_msg,
-                    making_amount = response.making_amount,
-                    taking_amount = response.taking_amount,
+                    making_amount = response.making_amount.as_str(),
+                    taking_amount = response.taking_amount.as_str(),
                     trade_ids = ?response.trade_ids,
+                    decision,
                     "live order response"
                 );
                 if let Err(error) = telegram
@@ -866,8 +999,11 @@ impl MonitorState {
             Err(error) => {
                 warn!(
                     event = "live_order_error",
+                    timestamp = %Utc::now().to_rfc3339(),
+                    mode = "live",
                     slug = market.slug,
                     condition_id = market.condition_id,
+                    decision = "rejected",
                     error = %error,
                     "live order failed"
                 );
@@ -904,9 +1040,12 @@ impl MonitorState {
         book_age_ms: Option<i64>,
         vol_bps_per_sqrt_min: Option<f64>,
         cell: Option<&RuntimeCell>,
+        path_state: Option<&PathState>,
+        required_edge: Option<f64>,
         best_ask: Option<&PriceLevel>,
         edge_summary: Option<&EdgeSummary>,
         already_positioned: bool,
+        market_resolved: bool,
         config: &RuntimeConfig,
     ) -> Option<&'static str> {
         if !config.tradable_assets.contains(&asset) {
@@ -941,6 +1080,9 @@ impl MonitorState {
         {
             return Some("too_close_to_line");
         }
+        if market_resolved {
+            return Some("market_closed_or_resolved");
+        }
         if already_positioned {
             return Some("already_positioned");
         }
@@ -961,6 +1103,15 @@ impl MonitorState {
         }
         if cell.is_none() {
             return Some("no_matching_config_cell");
+        }
+        let Some(path_state) = path_state else {
+            return Some("insufficient_path_history");
+        };
+        if path_state.max_abs_d_bps_so_far <= 0.0 || required_edge.is_none() {
+            return Some("invalid_path_lead");
+        }
+        if path_state.retracing_60s {
+            return Some("retracing_60s");
         }
         if best_ask.is_none() {
             return Some("order_book_missing_asks");
@@ -1017,6 +1168,10 @@ impl MonitorState {
             .values()
             .any(|market| market.condition_id == condition_id)
     }
+}
+
+fn pre_submit_matches_initial(initial: &PreparedTrade, pre_submit: &PreparedTrade) -> bool {
+    initial.outcome == pre_submit.outcome && initial.token_id == pre_submit.token_id
 }
 
 #[derive(Default)]
@@ -1123,16 +1278,150 @@ fn duration_ms(duration: Duration) -> i64 {
     duration.as_millis().try_into().unwrap_or(i64::MAX)
 }
 
+const MAX_MARKET_PATH_SECONDS: i64 = 300;
+const PATH_LOOKBACK_SECONDS: i64 = 60;
+const MAX_PATH_LOOKBACK_DRIFT_SECONDS: i64 = 30;
+const LEAD_DECAY_PENALTY_THRESHOLD: f64 = 0.75;
+const LEAD_DECAY_EDGE_PENALTY: f64 = 0.005;
+
+#[derive(Clone, Debug, Default)]
+struct MarketPricePath {
+    samples: VecDeque<PathSample>,
+    max_abs_d_bps_so_far: f64,
+}
+
+impl MarketPricePath {
+    fn push(&mut self, timestamp: DateTime<Utc>, price: Decimal, line_price: Decimal) {
+        if self
+            .samples
+            .back()
+            .is_some_and(|sample| sample.timestamp == timestamp && sample.price == price)
+        {
+            return;
+        }
+
+        if let Some(abs_d_bps) = distance_bps(price, line_price)
+            .map(decimal_abs)
+            .and_then(|value| value.to_f64())
+        {
+            self.max_abs_d_bps_so_far = self.max_abs_d_bps_so_far.max(abs_d_bps);
+        }
+
+        self.samples.push_back(PathSample { timestamp, price });
+        let cutoff = timestamp - TimeDelta::seconds(MAX_MARKET_PATH_SECONDS);
+        while self
+            .samples
+            .front()
+            .is_some_and(|sample| sample.timestamp < cutoff)
+        {
+            self.samples.pop_front();
+        }
+    }
+
+    fn state(
+        &self,
+        current_time: DateTime<Utc>,
+        current_price: Decimal,
+        line_price: Decimal,
+        side_leading: SideLeading,
+        current_abs_d_bps: f64,
+    ) -> Option<PathState> {
+        let price_60s_ago =
+            self.price_near(current_time - TimeDelta::seconds(PATH_LOOKBACK_SECONDS))?;
+        let previous_price = price_60s_ago.price.to_f64()?;
+        let current_price_f64 = current_price.to_f64()?;
+        if previous_price <= 0.0 {
+            return None;
+        }
+
+        let return_last_60s_bps = 10_000.0 * (current_price_f64 / previous_price - 1.0);
+        let retracing_60s = match side_leading {
+            SideLeading::UpLeading => return_last_60s_bps < 0.0,
+            SideLeading::DownLeading => return_last_60s_bps > 0.0,
+        };
+        let max_abs_d_bps_so_far = self
+            .max_abs_d_bps_so_far
+            .max(distance_bps(current_price, line_price)?.to_f64()?.abs())
+            .max(current_abs_d_bps);
+        let lead_decay_ratio = if max_abs_d_bps_so_far > 0.0 {
+            current_abs_d_bps / max_abs_d_bps_so_far
+        } else {
+            0.0
+        };
+
+        Some(PathState {
+            return_last_60s_bps,
+            retracing_60s,
+            max_abs_d_bps_so_far,
+            lead_decay_ratio,
+        })
+    }
+
+    fn price_near(&self, target: DateTime<Utc>) -> Option<PathSample> {
+        let sample = self
+            .samples
+            .iter()
+            .min_by_key(|sample| (sample.timestamp - target).num_milliseconds().abs())
+            .copied()?;
+        let drift_ms = (sample.timestamp - target).num_milliseconds().abs();
+        if drift_ms > TimeDelta::seconds(MAX_PATH_LOOKBACK_DRIFT_SECONDS).num_milliseconds() {
+            return None;
+        }
+
+        Some(sample)
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct PathSample {
+    timestamp: DateTime<Utc>,
+    price: Decimal,
+}
+
+#[derive(Clone, Debug)]
+struct PathState {
+    return_last_60s_bps: f64,
+    retracing_60s: bool,
+    max_abs_d_bps_so_far: f64,
+    lead_decay_ratio: f64,
+}
+
+fn edge_penalty_applies(path_state: &PathState) -> bool {
+    path_state.lead_decay_ratio < LEAD_DECAY_PENALTY_THRESHOLD
+}
+
+fn required_edge_probability(runtime: &AssetRuntime, path_state: &PathState) -> Option<f64> {
+    if path_state.max_abs_d_bps_so_far <= 0.0 {
+        return None;
+    }
+
+    Some(
+        runtime.min_edge_probability()
+            + if edge_penalty_applies(path_state) {
+                LEAD_DECAY_EDGE_PENALTY
+            } else {
+                0.0
+            },
+    )
+}
+
 #[derive(Clone, Debug, Default)]
 struct EdgeSummary {
     best_fee: Option<f64>,
+    best_all_in_cost: Option<f64>,
     best_edge: Option<f64>,
     positive_ev_depth_shares: f64,
     positive_ev_depth_usdc: f64,
+    weighted_avg_price: Option<f64>,
     max_acceptable_price: Option<f64>,
 }
 
-fn summarize_asks(runtime: &AssetRuntime, cell: &RuntimeCell, asks: &[PriceLevel]) -> EdgeSummary {
+fn summarize_asks(
+    runtime: &AssetRuntime,
+    cell: &RuntimeCell,
+    asks: &[PriceLevel],
+    required_edge: f64,
+) -> EdgeSummary {
     let mut summary = EdgeSummary::default();
 
     for (index, level) in asks.iter().enumerate() {
@@ -1144,18 +1433,22 @@ fn summarize_asks(runtime: &AssetRuntime, cell: &RuntimeCell, asks: &[PriceLevel
         };
 
         let fee = runtime.fee_rate() * ask * (1.0 - ask);
-        let edge = cell.p_win_lower - (ask + fee);
+        let all_in_cost = ask + fee;
+        let edge = cell.p_win_lower - all_in_cost;
         if index == 0 {
             summary.best_fee = Some(fee);
+            summary.best_all_in_cost = Some(all_in_cost);
             summary.best_edge = Some(edge);
         }
 
-        if edge < runtime.min_edge_probability() {
+        if edge < required_edge {
             break;
         }
 
         summary.positive_ev_depth_shares += size;
         summary.positive_ev_depth_usdc += size * ask;
+        summary.weighted_avg_price =
+            Some(summary.positive_ev_depth_usdc / summary.positive_ev_depth_shares);
         summary.max_acceptable_price = Some(ask);
     }
 
@@ -1164,21 +1457,27 @@ fn summarize_asks(runtime: &AssetRuntime, cell: &RuntimeCell, asks: &[PriceLevel
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use chrono::{TimeDelta, TimeZone, Utc};
     use rust_decimal::Decimal;
 
     use crate::{
+        config::{LiveOrderType, PolymarketSignatureType, RuntimeConfig},
         domain::{
             asset::Asset,
             market::{MonitoredMarket, Outcome, OutcomeToken},
-            orderbook::PriceLevel,
+            orderbook::{PriceLevel, TokenBook},
             time::MarketSlot,
         },
         polymarket::rtds::{PriceFeedSource, PriceTick},
         runtime::{RuntimeBundle, SideLeading, VolBin},
     };
 
-    use super::{MonitorState, asset_ids_for_markets, distance_bps, summarize_asks};
+    use super::{
+        MarketPricePath, MonitorState, PathState, PreparedTrade, SlotLine, asset_ids_for_markets,
+        distance_bps, pre_submit_matches_initial, required_edge_probability, summarize_asks,
+    };
 
     #[test]
     fn asset_ids_are_sorted_and_deduped() {
@@ -1285,12 +1584,390 @@ mod tests {
                     size: Decimal::new(30, 0),
                 },
             ],
+            runtime.min_edge_probability(),
         );
 
         assert!((summary.best_fee.unwrap() - 0.01152).abs() < 0.000001);
+        assert!((summary.best_all_in_cost.unwrap() - 0.81152).abs() < 0.000001);
         assert!(summary.best_edge.unwrap() > runtime.min_edge_probability());
         assert_eq!(summary.positive_ev_depth_shares, 30.0);
+        assert!((summary.weighted_avg_price.unwrap() - 0.8266666666666667).abs() < 0.000001);
         assert_eq!(summary.max_acceptable_price, Some(0.84));
+    }
+
+    #[test]
+    fn executable_depth_rejects_level_that_only_raw_p_win_would_accept() {
+        let (runtime, cell) = btc_runtime_and_cell();
+        assert!(cell.p_win > cell.p_win_lower);
+
+        let summary = summarize_asks(
+            runtime,
+            cell,
+            &[PriceLevel {
+                price: Decimal::new(842, 3),
+                size: Decimal::new(10, 0),
+            }],
+            runtime.min_edge_probability(),
+        );
+
+        assert!(cell.p_win - summary.best_all_in_cost.unwrap() >= runtime.min_edge_probability());
+        assert!(summary.best_edge.unwrap() < runtime.min_edge_probability());
+        assert_eq!(summary.positive_ev_depth_shares, 0.0);
+    }
+
+    #[test]
+    fn executable_depth_stops_at_first_bad_level() {
+        let (runtime, cell) = btc_runtime_and_cell();
+        let summary = summarize_asks(
+            runtime,
+            cell,
+            &[
+                PriceLevel {
+                    price: Decimal::new(80, 2),
+                    size: Decimal::new(10, 0),
+                },
+                PriceLevel {
+                    price: Decimal::new(85, 2),
+                    size: Decimal::new(20, 0),
+                },
+                PriceLevel {
+                    price: Decimal::new(86, 2),
+                    size: Decimal::new(30, 0),
+                },
+            ],
+            runtime.min_edge_probability(),
+        );
+
+        assert_eq!(summary.positive_ev_depth_shares, 10.0);
+        assert_eq!(summary.max_acceptable_price, Some(0.80));
+    }
+
+    #[test]
+    fn path_rule_skips_up_leader_retracing_over_last_60s() {
+        let state = path_state("101", "100.5", SideLeading::UpLeading);
+        assert!(state.return_last_60s_bps < 0.0);
+        assert!(state.retracing_60s);
+    }
+
+    #[test]
+    fn path_rule_skips_down_leader_retracing_over_last_60s() {
+        let state = path_state("99", "99.5", SideLeading::DownLeading);
+        assert!(state.return_last_60s_bps > 0.0);
+        assert!(state.retracing_60s);
+    }
+
+    #[test]
+    fn path_rule_allows_up_leader_extending_over_last_60s() {
+        let state = path_state("100", "101", SideLeading::UpLeading);
+        assert!(state.return_last_60s_bps > 0.0);
+        assert!(!state.retracing_60s);
+    }
+
+    #[test]
+    fn path_rule_allows_down_leader_extending_over_last_60s() {
+        let state = path_state("100", "99", SideLeading::DownLeading);
+        assert!(state.return_last_60s_bps < 0.0);
+        assert!(!state.retracing_60s);
+    }
+
+    #[test]
+    fn lead_decay_penalty_increases_required_edge() {
+        let (runtime, _) = btc_runtime_and_cell();
+        let decayed = PathState {
+            return_last_60s_bps: 1.0,
+            retracing_60s: false,
+            max_abs_d_bps_so_far: 100.0,
+            lead_decay_ratio: 0.74,
+        };
+        let intact = PathState {
+            lead_decay_ratio: 0.75,
+            ..decayed.clone()
+        };
+        let invalid = PathState {
+            max_abs_d_bps_so_far: 0.0,
+            ..decayed.clone()
+        };
+
+        assert!(
+            (required_edge_probability(runtime, &decayed).unwrap()
+                - (runtime.min_edge_probability() + 0.005))
+                .abs()
+                < 0.000001
+        );
+        assert_eq!(
+            required_edge_probability(runtime, &intact),
+            Some(runtime.min_edge_probability())
+        );
+        assert_eq!(required_edge_probability(runtime, &invalid), None);
+    }
+
+    #[test]
+    fn skip_reason_rejects_unwhitelisted_and_missing_runtime_assets() {
+        let state = MonitorState::default();
+        let config = test_config(false);
+
+        assert_eq!(
+            state.trade_skip_reason(
+                Asset::Bnb,
+                None,
+                120,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                false,
+                false,
+                &config,
+            ),
+            Some("asset_not_in_tradable_whitelist")
+        );
+        assert_eq!(
+            state.trade_skip_reason(
+                Asset::Btc,
+                None,
+                120,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                false,
+                false,
+                &config,
+            ),
+            Some("asset_not_in_runtime_bundle")
+        );
+    }
+
+    #[test]
+    fn skip_reason_rejects_remaining_seconds_below_minimum() {
+        let state = MonitorState::default();
+        let config = test_config(false);
+        let (runtime, _) = btc_runtime_and_cell();
+
+        assert_eq!(
+            state.trade_skip_reason(
+                Asset::Btc,
+                Some(runtime),
+                59,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                false,
+                false,
+                &config,
+            ),
+            Some("remaining_sec_below_min")
+        );
+    }
+
+    #[test]
+    fn skip_reason_applies_retracing_and_invalid_path_gates() {
+        let config = test_config(false);
+        let state = MonitorState::default();
+        let (runtime, cell) = btc_runtime_and_cell();
+        let token = OutcomeToken {
+            outcome: Outcome::Up,
+            asset_id: "up-token".to_string(),
+        };
+        let book = TokenBook::default();
+        let retracing = PathState {
+            return_last_60s_bps: -1.0,
+            retracing_60s: true,
+            max_abs_d_bps_so_far: 10.0,
+            lead_decay_ratio: 1.0,
+        };
+        let invalid = PathState {
+            retracing_60s: false,
+            max_abs_d_bps_so_far: 0.0,
+            ..retracing.clone()
+        };
+
+        assert_eq!(
+            state.trade_skip_reason(
+                Asset::Btc,
+                Some(runtime),
+                120,
+                Some(&SlotLine {
+                    price: Decimal::new(100, 0),
+                    observed_at: Utc::now(),
+                }),
+                Some(&price_tick(Asset::Btc, Utc::now(), "101")),
+                Some(0),
+                Some(0),
+                Some(Decimal::new(100, 0)),
+                Some(100.0),
+                Some(SideLeading::UpLeading),
+                Some(&token),
+                Some(&book),
+                Some(0),
+                Some(1.0),
+                Some(cell),
+                Some(&retracing),
+                Some(runtime.min_edge_probability()),
+                None,
+                None,
+                false,
+                false,
+                &config,
+            ),
+            Some("retracing_60s")
+        );
+        assert_eq!(
+            state.trade_skip_reason(
+                Asset::Btc,
+                Some(runtime),
+                120,
+                Some(&SlotLine {
+                    price: Decimal::new(100, 0),
+                    observed_at: Utc::now(),
+                }),
+                Some(&price_tick(Asset::Btc, Utc::now(), "101")),
+                Some(0),
+                Some(0),
+                Some(Decimal::new(100, 0)),
+                Some(100.0),
+                Some(SideLeading::UpLeading),
+                Some(&token),
+                Some(&book),
+                Some(0),
+                Some(1.0),
+                Some(cell),
+                Some(&invalid),
+                None,
+                None,
+                None,
+                false,
+                false,
+                &config,
+            ),
+            Some("invalid_path_lead")
+        );
+    }
+
+    #[test]
+    fn skip_reason_rejects_stale_price_and_book() {
+        let state = MonitorState::default();
+        let config = test_config(false);
+        let (runtime, cell) = btc_runtime_and_cell();
+        let token = OutcomeToken {
+            outcome: Outcome::Up,
+            asset_id: "up-token".to_string(),
+        };
+        let book = TokenBook::default();
+        let path_state = PathState {
+            return_last_60s_bps: 1.0,
+            retracing_60s: false,
+            max_abs_d_bps_so_far: 100.0,
+            lead_decay_ratio: 1.0,
+        };
+
+        assert_eq!(
+            state.trade_skip_reason(
+                Asset::Btc,
+                Some(runtime),
+                120,
+                Some(&SlotLine {
+                    price: Decimal::new(100, 0),
+                    observed_at: Utc::now(),
+                }),
+                Some(&price_tick(Asset::Btc, Utc::now(), "101")),
+                Some(20_001),
+                Some(0),
+                Some(Decimal::new(100, 0)),
+                Some(100.0),
+                Some(SideLeading::UpLeading),
+                Some(&token),
+                Some(&book),
+                Some(0),
+                Some(1.0),
+                Some(cell),
+                Some(&path_state),
+                Some(runtime.min_edge_probability()),
+                None,
+                None,
+                false,
+                false,
+                &config,
+            ),
+            Some("stale_current_price")
+        );
+        assert_eq!(
+            state.trade_skip_reason(
+                Asset::Btc,
+                Some(runtime),
+                120,
+                Some(&SlotLine {
+                    price: Decimal::new(100, 0),
+                    observed_at: Utc::now(),
+                }),
+                Some(&price_tick(Asset::Btc, Utc::now(), "101")),
+                Some(0),
+                Some(0),
+                Some(Decimal::new(100, 0)),
+                Some(100.0),
+                Some(SideLeading::UpLeading),
+                Some(&token),
+                Some(&book),
+                Some(10_001),
+                Some(1.0),
+                Some(cell),
+                Some(&path_state),
+                Some(runtime.min_edge_probability()),
+                None,
+                None,
+                false,
+                false,
+                &config,
+            ),
+            Some("stale_order_book")
+        );
+    }
+
+    #[test]
+    fn pre_submit_recompute_rejects_side_flip() {
+        let initial = prepared_trade(Outcome::Up, "up-token");
+        let same = prepared_trade(Outcome::Up, "up-token");
+        let flipped = prepared_trade(Outcome::Down, "down-token");
+
+        assert!(pre_submit_matches_initial(&initial, &same));
+        assert!(!pre_submit_matches_initial(&initial, &flipped));
     }
 
     fn market_with_tokens(asset_ids: Vec<&str>) -> MonitoredMarket {
@@ -1310,6 +1987,91 @@ mod tests {
                 })
                 .collect(),
             resolution_source: None,
+        }
+    }
+
+    fn btc_runtime_and_cell() -> (
+        &'static crate::runtime::AssetRuntime,
+        &'static crate::runtime::RuntimeCell,
+    ) {
+        let bundle = Box::leak(Box::new(
+            RuntimeBundle::load(
+                std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .join("runtime/wiggler-prod-v1"),
+            )
+            .unwrap(),
+        ));
+        let runtime = bundle.config_for(Asset::Btc).unwrap();
+        let cell = runtime
+            .find_cell(60, VolBin::Low, SideLeading::UpLeading, 2.5)
+            .unwrap();
+        (runtime, cell)
+    }
+
+    fn path_state(previous_price: &str, current_price: &str, side: SideLeading) -> PathState {
+        let start = Utc.with_ymd_and_hms(2026, 4, 30, 15, 50, 0).unwrap();
+        let line = Decimal::new(100, 0);
+        let current = current_price.parse::<Decimal>().unwrap();
+        let mut path = MarketPricePath::default();
+        path.push(start, previous_price.parse().unwrap(), line);
+        path.push(start + TimeDelta::seconds(60), current, line);
+        let current_abs_d_bps = distance_bps(current, line)
+            .unwrap()
+            .abs()
+            .to_string()
+            .parse::<f64>()
+            .unwrap();
+
+        path.state(
+            start + TimeDelta::seconds(60),
+            current,
+            line,
+            side,
+            current_abs_d_bps,
+        )
+        .unwrap()
+    }
+
+    fn test_config(live_trading: bool) -> RuntimeConfig {
+        RuntimeConfig {
+            gamma_base_url: "https://gamma-api.polymarket.com".to_string(),
+            clob_api_url: "https://clob-v2.polymarket.com".to_string(),
+            clob_market_ws_url: "wss://ws-subscriptions-clob.polymarket.com/ws/market".to_string(),
+            rtds_ws_url: "wss://ws-live-data.polymarket.com".to_string(),
+            live_trading,
+            tradable_assets: vec![Asset::Btc, Asset::Eth, Asset::Sol, Asset::Xrp, Asset::Doge],
+            min_order_usdc: 1.0,
+            max_order_usdc: 25.0,
+            live_order_type: LiveOrderType::Fak,
+            evaluation_interval: Duration::from_millis(1_000),
+            polymarket_private_key: None,
+            polymarket_api_key: None,
+            polymarket_api_secret: None,
+            polymarket_api_passphrase: None,
+            polymarket_api_nonce: None,
+            polymarket_signature_type: PolymarketSignatureType::Eoa,
+            polymarket_funder_address: None,
+            price_stale_after: Duration::from_millis(20_000),
+            orderbook_stale_after: Duration::from_millis(10_000),
+            min_abs_d_bps: 0.01,
+            telegram_bot_token: None,
+            telegram_chat_id: None,
+        }
+    }
+
+    fn prepared_trade(outcome: Outcome, token_id: &str) -> PreparedTrade {
+        PreparedTrade {
+            asset: Asset::Btc,
+            slug: "slug".to_string(),
+            condition_id: "condition".to_string(),
+            token_id: token_id.to_string(),
+            outcome,
+            amount_usdc: 10.0,
+            max_price: 0.8,
+            remaining_sec: 120,
+            d_bps: Some("1".to_string()),
+            p_win_lower: Some(0.9),
+            best_edge: Some(0.05),
         }
     }
 

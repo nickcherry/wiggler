@@ -24,7 +24,7 @@
   - Public for crypto prices, no auth.
 - Telegram Bot API
   - Optional.
-  - Not used for trade decisions yet because the runtime does not make decisions yet.
+  - Used for startup, shadow/would-trade, live intent, and live response notifications when configured.
 
 ## Current Shape
 

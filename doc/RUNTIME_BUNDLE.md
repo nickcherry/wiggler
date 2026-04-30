@@ -44,15 +44,26 @@ Every `WIGGLER_EVALUATION_INTERVAL_MS`, for each active 5-minute market, the mon
 - distance from line in bps
 - 30-minute realized vol from in-memory one-minute price samples
 - leading side and corresponding Up/Down token
+- current 5-minute price path from the same live price source
 - executable ask-level edge using `p_win_lower`
 
 The evaluator skips when data is missing or stale, the market is outside the
 60-240 second trading window, the price is too close to the line, no runtime
-cell matches, or there is no positive-EV executable ask depth.
+cell matches, the last-60-second price path is retracing against the leading
+side, max path lead is unavailable, or there is no positive-EV executable ask
+depth.
 
-`WIGGLER_LIVE_TRADING=false` logs `decision="shadow_trade"` when all gates
-pass. `WIGGLER_LIVE_TRADING=true` logs `decision="live_trade"` and can place a
-live Polymarket order after a second pre-submit evaluation.
+The base executable-edge gate is `risk_defaults.min_edge_probability`. If the
+current absolute lead has decayed below 75% of the max absolute lead observed
+so far in the current 5-minute market, the evaluator adds a 0.005 probability
+edge penalty before walking asks.
+
+`WIGGLER_LIVE_TRADING=false` logs `mode="shadow"` and `decision="would_trade"`
+when all gates pass, but it never submits orders. `WIGGLER_LIVE_TRADING=true`
+logs `mode="live"`, repeats the full evaluation immediately before submit, and
+submits only when the recomputed outcome token still matches the initial
+decision. Live order lifecycle logs use `decision="submitted"`,
+`decision="filled"`, or `decision="rejected"`.
 
 Live order sizing is the minimum of:
 
@@ -73,4 +84,6 @@ vol = sqrt(mean(r_i_bps^2))
 
 The monitor requires a full lookback window of minute samples, so fresh
 processes will log `skip_reason="insufficient_price_history"` until warmup is
-complete.
+complete. Path-state also needs a recent price sample from approximately 60
+seconds ago in the current market, so early or gapped path data can log
+`skip_reason="insufficient_path_history"`.

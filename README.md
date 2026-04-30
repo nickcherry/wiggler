@@ -10,9 +10,10 @@ RTDS, loads the production probability-table bundle, and evaluates executable
 ask depth against EV/risk/staleness gates.
 
 Live trading is off by default. With `WIGGLER_LIVE_TRADING=false`, eligible
-decisions are shadow-logged. With `WIGGLER_LIVE_TRADING=true`, the monitor uses
-the official Polymarket Rust CLOB SDK to sign and post taker-only FAK/FOK market
-orders with explicit price limits.
+decisions are logged as would-trades and no orders are submitted. With
+`WIGGLER_LIVE_TRADING=true`, the monitor uses the official Polymarket Rust CLOB
+SDK to sign and post taker-only FAK/FOK marketable limit orders with explicit
+price limits after a second pre-submit evaluation.
 
 ## Docs
 

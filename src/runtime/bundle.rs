@@ -97,6 +97,13 @@ impl AssetRuntime {
         &self.config.source.training_input_hash
     }
 
+    pub fn training_label_source_kind(&self) -> Option<&str> {
+        self.config
+            .training
+            .as_ref()
+            .map(|training| training.label_source_kind.as_str())
+    }
+
     pub fn fee_rate(&self) -> f64 {
         self.config.fee.taker_fee_rate
     }
@@ -199,12 +206,19 @@ struct RuntimeConfigFile {
     risk_defaults: RiskDefaults,
     cells: Vec<RuntimeCell>,
     runtime_config_hash: String,
+    #[serde(default)]
+    training: Option<TrainingConfig>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
 struct SourceConfig {
     config_hash: String,
     training_input_hash: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct TrainingConfig {
+    label_source_kind: String,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -243,6 +257,7 @@ pub struct RuntimeCell {
     pub abs_d_bps_min: f64,
     pub abs_d_bps_max: Option<f64>,
     pub sample_count: u64,
+    pub p_win: f64,
     pub p_win_lower: f64,
 }
 
@@ -387,6 +402,8 @@ fn validate_config(config: &RuntimeConfigFile, manifest: &ManifestRuntimeConfig)
             || cell
                 .abs_d_bps_max
                 .is_some_and(|max| !max.is_finite() || max <= cell.abs_d_bps_min)
+            || !cell.p_win.is_finite()
+            || !(0.0..=1.0).contains(&cell.p_win)
             || !cell.p_win_lower.is_finite()
             || !(0.0..=1.0).contains(&cell.p_win_lower)
     }) {
