@@ -6,7 +6,7 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
-use rust_decimal::Decimal;
+use rust_decimal::{Decimal, prelude::ToPrimitive};
 use tokio::{sync::mpsc, task::JoinHandle, time};
 use tracing::{debug, info, warn};
 
@@ -16,7 +16,7 @@ use crate::{
     domain::{
         asset::{Asset, format_assets, normalize_assets},
         market::{MonitoredMarket, Outcome, OutcomeToken},
-        orderbook::OrderBookSet,
+        orderbook::{OrderBookSet, PriceLevel, TokenBook},
         time::{MarketSlot, duration_from_seconds},
     },
     polymarket::{
@@ -24,6 +24,7 @@ use crate::{
         market_ws::{MarketWsEvent, run_market_feed},
         rtds::{PriceTick, run_price_feed},
     },
+    runtime::{AssetRuntime, PriceHistory, RuntimeBundle, RuntimeCell, SideLeading},
 };
 
 pub async fn run(args: MonitorArgs, config: RuntimeConfig) -> Result<()> {
@@ -34,6 +35,18 @@ pub async fn run(args: MonitorArgs, config: RuntimeConfig) -> Result<()> {
 
     let gamma = GammaClient::new(config.gamma_base_url.clone());
     let assets = normalize_assets(args.assets.clone());
+    let runtime_bundle = RuntimeBundle::load(&args.runtime_bundle_dir).with_context(|| {
+        format!(
+            "load runtime bundle from {}",
+            args.runtime_bundle_dir.display()
+        )
+    })?;
+    if config.live_trading {
+        bail!(
+            "WIGGLER_LIVE_TRADING=true requested, but live order execution is not implemented yet"
+        );
+    }
+
     let watchset_config = WatchsetConfig {
         ws_endpoint: config.clob_market_ws_url.clone(),
         assets: assets.clone(),
@@ -78,6 +91,11 @@ pub async fn run(args: MonitorArgs, config: RuntimeConfig) -> Result<()> {
 
     info!(
         assets = format_assets(&assets),
+        tradable_assets = format_assets(&config.tradable_assets),
+        runtime_assets = format_assets(&runtime_bundle.assets()),
+        runtime_bundle_dir = %args.runtime_bundle_dir.display(),
+        runtime_manifest_version = runtime_bundle.manifest_version(),
+        live_trading = config.live_trading,
         slot_seconds = args.slot_seconds,
         price_feed = %args.price_feed,
         "monitor started"
@@ -108,6 +126,7 @@ pub async fn run(args: MonitorArgs, config: RuntimeConfig) -> Result<()> {
             }
             _ = status_interval.tick() => {
                 state.log_status();
+                state.log_trade_evaluations(&runtime_bundle, &config);
             }
             Some(tick) = price_rx.recv() => {
                 state.apply_price_tick(tick);
@@ -252,6 +271,7 @@ struct MonitorState {
     markets_by_asset_id: HashMap<String, (String, OutcomeToken)>,
     books: OrderBookSet,
     latest_prices: HashMap<Asset, PriceTick>,
+    price_history: HashMap<Asset, PriceHistory>,
     slot_lines: HashMap<String, SlotLine>,
     initial_books_seen: HashSet<String>,
     event_counts: EventCounts,
@@ -284,6 +304,11 @@ impl MonitorState {
     }
 
     fn apply_price_tick(&mut self, tick: PriceTick) {
+        self.price_history
+            .entry(tick.asset)
+            .or_default()
+            .push(tick.exchange_timestamp, tick.value);
+
         if let Some(previous) = self.latest_prices.get(&tick.asset).cloned() {
             for (slug, market) in &self.markets_by_slug {
                 if market.asset != tick.asset {
@@ -507,6 +532,226 @@ impl MonitorState {
         }
     }
 
+    fn log_trade_evaluations(&self, runtime_bundle: &RuntimeBundle, config: &RuntimeConfig) {
+        let now = Utc::now();
+        for market in self.markets_by_slug.values() {
+            if now < market.slot.start() || now >= market.slot.end() {
+                continue;
+            }
+
+            self.log_trade_evaluation(market, runtime_bundle, config, now);
+        }
+    }
+
+    fn log_trade_evaluation(
+        &self,
+        market: &MonitoredMarket,
+        runtime_bundle: &RuntimeBundle,
+        config: &RuntimeConfig,
+        now: DateTime<Utc>,
+    ) {
+        let runtime = runtime_bundle.config_for(market.asset);
+        let line = self.slot_lines.get(&market.slug);
+        let latest_tick = self.latest_prices.get(&market.asset);
+        let remaining_sec = (market.slot.end() - now).num_seconds();
+        let d_bps = latest_tick
+            .zip(line)
+            .and_then(|(tick, line)| distance_bps(tick.value, line.price));
+        let abs_d_bps = d_bps.map(decimal_abs);
+        let abs_d_bps_f64 = abs_d_bps.and_then(|value| value.to_f64());
+        let side_leading = d_bps.and_then(side_for_distance);
+        let buy_outcome = side_leading.map(outcome_for_side);
+        let token = buy_outcome
+            .clone()
+            .and_then(|outcome| self.token_for_outcome(market, outcome));
+        let book = token.and_then(|token| self.books.book(&token.asset_id));
+        let best_ask = book.and_then(TokenBook::best_ask);
+        let price_age_ms = latest_tick.map(|tick| age_ms(now, tick.received_at));
+        let book_age_ms = book.and_then(|book| book.last_timestamp.map(|ts| age_ms(now, ts)));
+        let remaining_bucket = runtime.and_then(|runtime| runtime.remaining_bucket(remaining_sec));
+        let vol_bps_per_sqrt_min = runtime.and_then(|runtime| {
+            self.price_history
+                .get(&market.asset)
+                .and_then(|history| history.vol_bps_per_sqrt_min(now, runtime.vol_lookback_min()))
+        });
+        let vol_bin = runtime
+            .zip(vol_bps_per_sqrt_min)
+            .map(|(runtime, vol)| runtime.vol_bin(vol));
+        let cell = runtime
+            .zip(remaining_bucket)
+            .zip(vol_bin)
+            .zip(side_leading)
+            .zip(abs_d_bps_f64)
+            .and_then(
+                |((((runtime, remaining_bucket), vol_bin), side_leading), abs_d_bps)| {
+                    runtime.find_cell(remaining_bucket, vol_bin, side_leading, abs_d_bps)
+                },
+            );
+        let edge_summary = runtime
+            .zip(cell)
+            .zip(book)
+            .map(|((runtime, cell), book)| summarize_asks(runtime, cell, &book.asks()));
+        let skip_reason = self.trade_skip_reason(
+            market.asset,
+            runtime,
+            remaining_sec,
+            line,
+            latest_tick,
+            price_age_ms,
+            d_bps,
+            abs_d_bps_f64,
+            side_leading,
+            token,
+            book,
+            book_age_ms,
+            vol_bps_per_sqrt_min,
+            cell,
+            best_ask.as_ref(),
+            edge_summary.as_ref(),
+            config,
+        );
+        let decision = if skip_reason.is_some() {
+            "skip"
+        } else if config.live_trading {
+            "live_trade"
+        } else {
+            "shadow_trade"
+        };
+
+        info!(
+            event = "trade_evaluation",
+            asset = %market.asset,
+            market_id = market.market_id,
+            condition_id = market.condition_id,
+            slug = market.slug,
+            up_token_id = ?self.token_for_outcome(market, Outcome::Up).map(|token| token.asset_id.as_str()),
+            down_token_id = ?self.token_for_outcome(market, Outcome::Down).map(|token| token.asset_id.as_str()),
+            buy_token_id = ?token.map(|token| token.asset_id.as_str()),
+            line_price = ?line.map(|line| line.price.to_string()),
+            line_observed_at = ?line.map(|line| line.observed_at),
+            current_price = ?latest_tick.map(|tick| tick.value.to_string()),
+            current_received_at = ?latest_tick.map(|tick| tick.received_at),
+            current_exchange_timestamp = ?latest_tick.map(|tick| tick.exchange_timestamp),
+            price_age_ms = ?price_age_ms,
+            orderbook_age_ms = ?book_age_ms,
+            remaining_sec,
+            remaining_bucket = ?remaining_bucket,
+            d_bps = ?d_bps.map(|value| value.round_dp(6).to_string()),
+            abs_d_bps = ?abs_d_bps.map(|value| value.round_dp(6).to_string()),
+            side_leading = ?side_leading.map(SideLeading::as_str),
+            vol_bps_per_sqrt_min = ?vol_bps_per_sqrt_min,
+            vol_bin = ?vol_bin.map(|bin| bin.as_str()),
+            cell_sample_count = ?cell.map(|cell| cell.sample_count),
+            p_win_lower = ?cell.map(|cell| cell.p_win_lower),
+            best_ask = ?best_ask.as_ref().map(|level| level.price.to_string()),
+            best_ask_size = ?best_ask.as_ref().map(|level| level.size.to_string()),
+            best_ask_fee = ?edge_summary.as_ref().and_then(|summary| summary.best_fee),
+            best_ask_edge = ?edge_summary.as_ref().and_then(|summary| summary.best_edge),
+            positive_ev_depth_shares = ?edge_summary.as_ref().map(|summary| summary.positive_ev_depth_shares),
+            positive_ev_depth_usdc = ?edge_summary.as_ref().map(|summary| summary.positive_ev_depth_usdc),
+            max_acceptable_price = ?edge_summary.as_ref().and_then(|summary| summary.max_acceptable_price),
+            min_edge_probability = ?runtime.map(AssetRuntime::min_edge_probability),
+            max_position_usdc = ?runtime.map(AssetRuntime::max_position_usdc),
+            already_positioned = false,
+            decision,
+            skip_reason = ?skip_reason,
+            live_trading = config.live_trading,
+            config_hash = ?runtime.map(AssetRuntime::runtime_config_hash),
+            source_config_hash = ?runtime.map(AssetRuntime::source_config_hash),
+            input_hash = ?runtime.map(AssetRuntime::training_input_hash),
+            "trade evaluation"
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn trade_skip_reason(
+        &self,
+        asset: Asset,
+        runtime: Option<&AssetRuntime>,
+        remaining_sec: i64,
+        line: Option<&SlotLine>,
+        latest_tick: Option<&PriceTick>,
+        price_age_ms: Option<i64>,
+        d_bps: Option<Decimal>,
+        abs_d_bps: Option<f64>,
+        side_leading: Option<SideLeading>,
+        token: Option<&OutcomeToken>,
+        book: Option<&TokenBook>,
+        book_age_ms: Option<i64>,
+        vol_bps_per_sqrt_min: Option<f64>,
+        cell: Option<&RuntimeCell>,
+        best_ask: Option<&PriceLevel>,
+        edge_summary: Option<&EdgeSummary>,
+        config: &RuntimeConfig,
+    ) -> Option<&'static str> {
+        if !config.tradable_assets.contains(&asset) {
+            return Some("asset_not_in_tradable_whitelist");
+        }
+        let Some(runtime) = runtime else {
+            return Some("asset_not_in_runtime_bundle");
+        };
+        if remaining_sec < runtime.min_remaining_sec_to_trade() {
+            return Some("remaining_sec_below_min");
+        }
+        if remaining_sec > runtime.max_remaining_sec_to_trade() {
+            return Some("remaining_sec_above_max");
+        }
+        if line.is_none() {
+            return Some("missing_line_price");
+        }
+        if latest_tick.is_none() {
+            return Some("missing_current_price");
+        }
+        if price_age_ms.is_some_and(|age| age > duration_ms(config.price_stale_after)) {
+            return Some("stale_current_price");
+        }
+        if d_bps.is_none() {
+            return Some("invalid_line_price");
+        }
+        if side_leading.is_none()
+            || abs_d_bps.is_some_and(|abs_d_bps| abs_d_bps < config.min_abs_d_bps)
+        {
+            return Some("too_close_to_line");
+        }
+        if token.is_none() {
+            return Some("missing_token_id");
+        }
+        if book.is_none() {
+            return Some("missing_order_book");
+        }
+        if book_age_ms.is_none() {
+            return Some("missing_order_book_timestamp");
+        }
+        if book_age_ms.is_some_and(|age| age > duration_ms(config.orderbook_stale_after)) {
+            return Some("stale_order_book");
+        }
+        if vol_bps_per_sqrt_min.is_none() {
+            return Some("insufficient_price_history");
+        }
+        if cell.is_none() {
+            return Some("no_matching_config_cell");
+        }
+        if best_ask.is_none() {
+            return Some("order_book_missing_asks");
+        }
+        if edge_summary.is_none_or(|summary| summary.positive_ev_depth_shares <= 0.0) {
+            return Some("no_positive_ev_depth");
+        }
+        if config.live_trading {
+            return Some("live_trading_not_implemented");
+        }
+
+        None
+    }
+
+    fn token_for_outcome<'a>(
+        &self,
+        market: &'a MonitoredMarket,
+        outcome: Outcome,
+    ) -> Option<&'a OutcomeToken> {
+        market.tokens.iter().find(|token| token.outcome == outcome)
+    }
+
     fn token_context(&self, asset_id: &str) -> Option<TokenContext<'_>> {
         let (slug, token) = self.markets_by_asset_id.get(asset_id)?;
         Some(TokenContext { slug, token })
@@ -556,6 +801,74 @@ fn distance_bps(price: Decimal, line: Decimal) -> Option<Decimal> {
     Some(((price - line) / line) * Decimal::from(10_000))
 }
 
+fn decimal_abs(value: Decimal) -> Decimal {
+    if value < Decimal::ZERO { -value } else { value }
+}
+
+fn side_for_distance(value: Decimal) -> Option<SideLeading> {
+    if value > Decimal::ZERO {
+        Some(SideLeading::UpLeading)
+    } else if value < Decimal::ZERO {
+        Some(SideLeading::DownLeading)
+    } else {
+        None
+    }
+}
+
+fn outcome_for_side(side: SideLeading) -> Outcome {
+    match side {
+        SideLeading::UpLeading => Outcome::Up,
+        SideLeading::DownLeading => Outcome::Down,
+    }
+}
+
+fn age_ms(now: DateTime<Utc>, timestamp: DateTime<Utc>) -> i64 {
+    (now - timestamp).num_milliseconds().max(0)
+}
+
+fn duration_ms(duration: Duration) -> i64 {
+    duration.as_millis().try_into().unwrap_or(i64::MAX)
+}
+
+#[derive(Clone, Debug, Default)]
+struct EdgeSummary {
+    best_fee: Option<f64>,
+    best_edge: Option<f64>,
+    positive_ev_depth_shares: f64,
+    positive_ev_depth_usdc: f64,
+    max_acceptable_price: Option<f64>,
+}
+
+fn summarize_asks(runtime: &AssetRuntime, cell: &RuntimeCell, asks: &[PriceLevel]) -> EdgeSummary {
+    let mut summary = EdgeSummary::default();
+
+    for (index, level) in asks.iter().enumerate() {
+        let Some(ask) = level.price.to_f64() else {
+            break;
+        };
+        let Some(size) = level.size.to_f64() else {
+            break;
+        };
+
+        let fee = runtime.fee_rate() * ask * (1.0 - ask);
+        let edge = cell.p_win_lower - (ask + fee);
+        if index == 0 {
+            summary.best_fee = Some(fee);
+            summary.best_edge = Some(edge);
+        }
+
+        if edge < runtime.min_edge_probability() {
+            break;
+        }
+
+        summary.positive_ev_depth_shares += size;
+        summary.positive_ev_depth_usdc += size * ask;
+        summary.max_acceptable_price = Some(ask);
+    }
+
+    summary
+}
+
 #[cfg(test)]
 mod tests {
     use chrono::{TimeDelta, TimeZone, Utc};
@@ -565,12 +878,14 @@ mod tests {
         domain::{
             asset::Asset,
             market::{MonitoredMarket, Outcome, OutcomeToken},
+            orderbook::PriceLevel,
             time::MarketSlot,
         },
         polymarket::rtds::{PriceFeedSource, PriceTick},
+        runtime::{RuntimeBundle, SideLeading, VolBin},
     };
 
-    use super::{MonitorState, asset_ids_for_markets, distance_bps};
+    use super::{MonitorState, asset_ids_for_markets, distance_bps, summarize_asks};
 
     #[test]
     fn asset_ids_are_sorted_and_deduped() {
@@ -647,6 +962,42 @@ mod tests {
             distance_bps(Decimal::new(10_050, 2), Decimal::new(10_000, 2)).unwrap(),
             Decimal::new(50, 0)
         );
+    }
+
+    #[test]
+    fn executable_depth_uses_p_win_lower_against_ask_levels() {
+        let bundle = RuntimeBundle::load(
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("runtime/wiggler-prod-v1"),
+        )
+        .unwrap();
+        let runtime = bundle.config_for(Asset::Btc).unwrap();
+        let cell = runtime
+            .find_cell(60, VolBin::Low, SideLeading::UpLeading, 2.5)
+            .unwrap();
+
+        let summary = summarize_asks(
+            runtime,
+            cell,
+            &[
+                PriceLevel {
+                    price: Decimal::new(80, 2),
+                    size: Decimal::new(10, 0),
+                },
+                PriceLevel {
+                    price: Decimal::new(84, 2),
+                    size: Decimal::new(20, 0),
+                },
+                PriceLevel {
+                    price: Decimal::new(86, 2),
+                    size: Decimal::new(30, 0),
+                },
+            ],
+        );
+
+        assert!((summary.best_fee.unwrap() - 0.01152).abs() < 0.000001);
+        assert!(summary.best_edge.unwrap() > runtime.min_edge_probability());
+        assert_eq!(summary.positive_ev_depth_shares, 30.0);
+        assert_eq!(summary.max_acceptable_price, Some(0.84));
     }
 
     fn market_with_tokens(asset_ids: Vec<&str>) -> MonitoredMarket {

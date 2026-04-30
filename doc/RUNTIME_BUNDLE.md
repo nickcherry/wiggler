@@ -1,0 +1,68 @@
+# Runtime Bundle
+
+The monitor loads the production runtime bundle from
+`runtime/wiggler-prod-v1` by default. Override it with:
+
+```bash
+cargo run -- monitor --runtime-bundle-dir /path/to/bundle
+WIGGLER_RUNTIME_BUNDLE_DIR=/path/to/bundle cargo run -- monitor
+```
+
+The checked-in bundle contains:
+
+- `wiggler-runtime-manifest.json`
+- `BTC_300s_boundary.runtime.json`
+- `ETH_300s_boundary.runtime.json`
+- `SOL_300s_boundary.runtime.json`
+- `XRP_300s_boundary.runtime.json`
+- `DOGE_300s_boundary.runtime.json`
+
+HYPE and BNB are not in this bundle and are not in the default production
+whitelist. The production tradable whitelist is controlled separately with
+`WIGGLER_TRADABLE_ASSETS`; an asset must be in that list and have a runtime
+config to become eligible.
+
+## Validation
+
+Startup validates the runtime files before opening websockets:
+
+- runtime config version is `wiggler-runtime-prob-grid-v1`
+- market type is `up_down`
+- interval is `300`
+- anchor mode is `boundary`
+- config asset matches the manifest entry
+- runtime, source-config, and training-input hashes match the manifest
+
+## Shadow Evaluation
+
+Every 15 seconds, for each active 5-minute market, the monitor logs a
+`trade_evaluation` event. It computes:
+
+- line price from the captured Chainlink tick at slot start
+- current Chainlink price from Polymarket RTDS
+- remaining seconds and the next configured remaining-time bucket
+- distance from line in bps
+- 30-minute realized vol from in-memory one-minute price samples
+- leading side and corresponding Up/Down token
+- executable ask-level edge using `p_win_lower`
+
+The evaluator skips when data is missing or stale, the market is outside the
+60-240 second trading window, the price is too close to the line, no runtime
+cell matches, or there is no positive-EV executable ask depth.
+
+The current runtime is shadow-only. `WIGGLER_LIVE_TRADING=false` logs
+`decision="shadow_trade"` when all gates pass. `WIGGLER_LIVE_TRADING=true`
+fails closed at startup until order signing/submission is implemented.
+
+## Warmup
+
+Vol uses the bundle's configured 30-minute lookback:
+
+```text
+r_i_bps = 10_000 * (price_i / price_{i-1} - 1)
+vol = sqrt(mean(r_i_bps^2))
+```
+
+The monitor requires a full lookback window of minute samples, so fresh
+processes will log `skip_reason="insufficient_price_history"` until warmup is
+complete.

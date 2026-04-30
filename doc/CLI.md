@@ -36,19 +36,23 @@ Side effects:
 
 ### `monitor`
 
-Runs the data-only live monitor.
+Runs the live monitor and shadow evaluator.
 
 ```bash
 cargo run -- monitor
 cargo run -- monitor --max-runtime-seconds 15
+cargo run -- monitor --runtime-bundle-dir runtime/wiggler-prod-v1
 ```
 
 Default behavior:
 
 - Assets: `btc,eth,sol,xrp,doge`
+- Tradable assets: `btc,eth,sol,xrp,doge`
 - Slot width: `300` seconds
 - Lookahead: current slot plus one future slot
 - Underlying price feed: `chainlink`
+- Runtime bundle: `runtime/wiggler-prod-v1`
+- Live trading: disabled; `WIGGLER_LIVE_TRADING=true` fails closed until order execution exists
 
 Use a comma-separated whitelist to monitor more than one market family:
 
@@ -67,7 +71,8 @@ Side effects:
 - Opens one RTDS websocket per whitelisted asset for the configured price source.
 - Opens one CLOB market websocket for the full token watchset.
 - Emits JSON logs to stdout/stderr through tracing.
-- Does not place orders or send trade decisions.
+- Logs shadow trade evaluations and skip reasons.
+- Does not place orders.
 
 ## Output
 
@@ -78,9 +83,15 @@ Long-running output is structured JSON logs. Key events:
 - `initial book snapshot`
 - `captured slot line`
 - `monitor status`
+- `trade evaluation`
 - `watched market resolved`
 
 Per-event book, best-bid/ask, and trade churn is logged at debug level.
+
+`trade evaluation` logs include the market id, token ids, line/current prices,
+remaining-time bucket, distance from line, vol bin, runtime cell sample count,
+`p_win_lower`, executable ask edge, positive-EV depth, decision, skip reason,
+and runtime hashes.
 
 ## Destructive Commands
 

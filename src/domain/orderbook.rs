@@ -34,7 +34,9 @@ impl TokenBook {
     ) {
         self.bids = levels_to_map(bids);
         self.asks = levels_to_map(asks);
-        self.last_timestamp = timestamp;
+        if timestamp.is_some() {
+            self.last_timestamp = timestamp;
+        }
         self.last_hash = hash;
     }
 
@@ -56,7 +58,9 @@ impl TokenBook {
             levels.insert(price, size);
         }
 
-        self.last_timestamp = timestamp;
+        if timestamp.is_some() {
+            self.last_timestamp = timestamp;
+        }
     }
 
     pub fn best_bid(&self) -> Option<PriceLevel> {
@@ -74,6 +78,16 @@ impl TokenBook {
             price: *price,
             size: *size,
         })
+    }
+
+    pub fn asks(&self) -> Vec<PriceLevel> {
+        self.asks
+            .iter()
+            .map(|(price, size)| PriceLevel {
+                price: *price,
+                size: *size,
+            })
+            .collect()
     }
 
     pub fn depth(&self) -> (usize, usize) {

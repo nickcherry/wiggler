@@ -5,4 +5,5 @@ pub mod domain;
 pub mod logging;
 pub mod monitor;
 pub mod polymarket;
+pub mod runtime;
 pub mod telegram;

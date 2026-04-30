@@ -23,6 +23,7 @@ slot, info-level logs are intentionally bounded:
 - startup and websocket connection lines
 - one initial orderbook snapshot per token after each CLOB subscription
 - one status line per active asset every 15 seconds
+- one shadow trade-evaluation line per active asset every 15 seconds
 - warnings/errors/reconnects
 - watched market resolution events
 
@@ -41,6 +42,8 @@ sudo useradd --system --home /opt/wiggler --shell /usr/sbin/nologin wiggler
 sudo mkdir -p /opt/wiggler/bin /opt/wiggler/tmp
 sudo chown -R wiggler:wiggler /opt/wiggler
 sudo install -m 0755 target/release/wiggler /opt/wiggler/bin/wiggler
+sudo cp -R runtime /opt/wiggler/runtime
+sudo chown -R wiggler:wiggler /opt/wiggler/runtime
 
 sudo install -m 0644 deploy/systemd/wiggler.service /etc/systemd/system/wiggler.service
 sudo install -D -m 0644 deploy/systemd/journald.conf.d/20-wiggler.conf /etc/systemd/journald.conf.d/20-wiggler.conf

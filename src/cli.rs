@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use clap::{Parser, Subcommand};
 
 use crate::domain::asset::{Asset, DEFAULT_ASSET_WHITELIST};
@@ -63,6 +65,14 @@ pub struct MonitorArgs {
     /// RTDS crypto source. Chainlink is the default because BTC 5m markets resolve on Chainlink.
     #[arg(long, default_value_t = PriceFeedSource::Chainlink)]
     pub price_feed: PriceFeedSource,
+
+    /// Runtime probability-table bundle directory.
+    #[arg(
+        long,
+        env = "WIGGLER_RUNTIME_BUNDLE_DIR",
+        default_value = "runtime/wiggler-prod-v1"
+    )]
+    pub runtime_bundle_dir: PathBuf,
 
     /// Stop automatically after this many seconds. Useful for smoke tests.
     #[arg(long)]

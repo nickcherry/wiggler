@@ -8,9 +8,11 @@
 4. Subscribe to every discovered `Up` and `Down` CLOB token.
 5. Stream each whitelisted asset's Chainlink price from RTDS.
 6. Maintain in-memory orderbooks per token.
-7. Refresh the watchset every 10 seconds.
-8. If the token set changes, reconnect the CLOB websocket with the new set.
-9. Emit status logs every 15 seconds.
+7. Maintain a bounded in-memory price history for runtime vol buckets.
+8. Load the production runtime probability-table bundle.
+9. Refresh the watchset every 10 seconds.
+10. If the token set changes, reconnect the CLOB websocket with the new set.
+11. Emit status and shadow trade-evaluation logs every 15 seconds.
 
 ## Rollover
 
@@ -35,6 +37,7 @@ All live state is in memory:
 - token-to-market lookup
 - orderbook per CLOB token asset ID
 - latest underlying price tick per asset
+- recent underlying price history per asset
 - captured slot line per watched slug
 
 No database is used. If future logic needs a short local cache, prefer a simple
@@ -42,21 +45,32 @@ file artifact under `tmp/` before adding a managed service.
 
 ## Data Freshness
 
-Future decision code must check freshness before acting:
+Shadow decision code checks freshness before logging an eligible decision:
 
+- asset is in `WIGGLER_TRADABLE_ASSETS`
 - latest Chainlink tick age
-- orderbook websocket health
+- orderbook update age
 - current slot line availability
 - market still active/open
-- enough book depth at expected execution price
+- enough executable ask depth at expected execution price
 
-The scaffold does not make decisions, so it only logs the available state.
+Defaults:
+
+- current price stale after 20 seconds
+- orderbook stale after 10 seconds
+- no trading before 240 seconds or after 60 seconds remaining
+- no trading within 0.01 bps of the line
 
 ## Logging
 
 Info-level logging is designed to be safe for long-running operation. It logs
-periodic summaries and lifecycle events, while high-volume websocket churn stays
-at debug level. Production should run with `RUST_LOG=wiggler=info,info`.
+periodic summaries, shadow evaluations, and lifecycle events, while high-volume
+websocket churn stays at debug level. Production should run with
+`RUST_LOG=wiggler=info,info`.
+
+Shadow evaluations include a `decision` and `skip_reason`. A fresh process will
+usually skip with `insufficient_price_history` until the 30-minute runtime vol
+lookback is warm.
 
 See [OPERATIONS.md](./OPERATIONS.md) for systemd and journald retention.
 
@@ -66,6 +80,7 @@ See [OPERATIONS.md](./OPERATIONS.md) for systemd and journald retention.
 - RTDS reconnects with exponential backoff up to 30 seconds.
 - CLOB websocket reconnects with exponential backoff up to 30 seconds.
 - A changed token watchset restarts only the CLOB task.
+- `WIGGLER_LIVE_TRADING=true` fails closed until order execution exists.
 - `Ctrl-C` exits cleanly.
 
 ## Hosting

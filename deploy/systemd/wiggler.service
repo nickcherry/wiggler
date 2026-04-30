@@ -14,6 +14,9 @@ RestartSec=3
 
 Environment=RUST_LOG=wiggler=info,info
 Environment=WIGGLER_ASSETS=btc,eth,sol,xrp,doge
+Environment=WIGGLER_TRADABLE_ASSETS=btc,eth,sol,xrp,doge
+Environment=WIGGLER_RUNTIME_BUNDLE_DIR=runtime/wiggler-prod-v1
+Environment=WIGGLER_LIVE_TRADING=false
 
 StandardOutput=journal
 StandardError=journal
