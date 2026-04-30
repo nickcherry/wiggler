@@ -49,7 +49,7 @@ cargo run -- monitor --max-runtime-seconds 15
 Useful overrides:
 
 ```bash
-cargo run -- monitor --assets btc,eth,sol,xrp,doge,hype,bnb --slot-seconds 300 --lookahead-slots 1
+cargo run -- monitor --assets btc,eth,sol,xrp,doge --slot-seconds 300 --lookahead-slots 1
 cargo run -- monitor --price-feed chainlink
 ```
 
@@ -58,7 +58,7 @@ cargo run -- monitor --price-feed chainlink
 | name | default | purpose |
 |---|---|---|
 | `RUST_LOG` | `wiggler=info,info` | Tracing filter |
-| `WIGGLER_ASSETS` | `btc,eth,sol,xrp,doge,hype,bnb` | Comma-separated asset whitelist |
+| `WIGGLER_ASSETS` | `btc,eth,sol,xrp,doge` | Comma-separated asset whitelist |
 | `POLYMARKET_GAMMA_BASE_URL` | `https://gamma-api.polymarket.com` | Market discovery |
 | `POLYMARKET_CLOB_MARKET_WS_URL` | `wss://ws-subscriptions-clob.polymarket.com/ws/market` | Orderbook websocket |
 | `POLYMARKET_RTDS_WS_URL` | `wss://ws-live-data.polymarket.com` | Chainlink/Binance crypto price websocket |

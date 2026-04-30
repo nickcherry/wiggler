@@ -16,7 +16,7 @@ pub enum Asset {
     Bnb,
 }
 
-pub const DEFAULT_ASSET_WHITELIST: &str = "btc,eth,sol,xrp,doge,hype,bnb";
+pub const DEFAULT_ASSET_WHITELIST: &str = "btc,eth,sol,xrp,doge";
 
 pub fn normalize_assets(mut assets: Vec<Asset>) -> Vec<Asset> {
     if assets.is_empty() {

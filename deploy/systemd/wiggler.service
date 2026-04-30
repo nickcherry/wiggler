@@ -13,7 +13,7 @@ Restart=always
 RestartSec=3
 
 Environment=RUST_LOG=wiggler=info,info
-Environment=WIGGLER_ASSETS=btc,eth,sol,xrp,doge,hype,bnb
+Environment=WIGGLER_ASSETS=btc,eth,sol,xrp,doge
 
 StandardOutput=journal
 StandardError=journal

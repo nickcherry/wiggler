@@ -17,7 +17,7 @@ churn and can become the dominant disk and network cost.
 
 ## Expected Log Volume
 
-At the default whitelist (`btc,eth,sol,xrp,doge,hype,bnb`) and one lookahead
+At the default whitelist (`btc,eth,sol,xrp,doge`) and one lookahead
 slot, info-level logs are intentionally bounded:
 
 - startup and websocket connection lines

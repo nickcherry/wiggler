@@ -22,7 +22,7 @@ Checks Gamma discovery for current and upcoming Polymarket slots.
 
 ```bash
 cargo run -- doctor
-cargo run -- doctor --assets btc,eth,sol,xrp,doge,hype,bnb --slot-seconds 300 --lookahead-slots 1
+cargo run -- doctor --assets btc,eth,sol,xrp,doge --slot-seconds 300 --lookahead-slots 1
 ```
 
 Output is pretty JSON so it can be read by a human or parsed by tooling.
@@ -45,7 +45,7 @@ cargo run -- monitor --max-runtime-seconds 15
 
 Default behavior:
 
-- Assets: `btc,eth,sol,xrp,doge,hype,bnb`
+- Assets: `btc,eth,sol,xrp,doge`
 - Slot width: `300` seconds
 - Lookahead: current slot plus one future slot
 - Underlying price feed: `chainlink`
@@ -53,11 +53,13 @@ Default behavior:
 Use a comma-separated whitelist to monitor more than one market family:
 
 ```bash
-cargo run -- monitor --assets btc,eth,sol,xrp,doge,hype,bnb
-WIGGLER_ASSETS=btc,eth,sol,xrp,doge,hype,bnb cargo run -- monitor
+cargo run -- monitor --assets btc,eth,sol,xrp,doge
+WIGGLER_ASSETS=btc,eth,sol,xrp,doge cargo run -- monitor
 ```
 
 `--asset btc` is accepted as an alias for `--assets btc`.
+HYPE and BNB remain supported but are not in the default whitelist; include
+them explicitly with `--assets ...` when ready.
 
 Side effects:
 
