@@ -105,6 +105,7 @@ pub async fn run(args: MonitorArgs, config: RuntimeConfig) -> Result<()> {
         slot_seconds = args.slot_seconds,
         price_feed = %args.price_feed,
         evaluation_interval_ms = duration_ms(config.evaluation_interval),
+        log_evaluations = config.log_evaluations,
         "monitor started"
     );
     if telegram.is_configured() {
@@ -617,7 +618,8 @@ impl MonitorState {
                 continue;
             }
 
-            let prepared = self.evaluate_trade(market, runtime_bundle, config, now, true);
+            let prepared =
+                self.evaluate_trade(market, runtime_bundle, config, now, config.log_evaluations);
             let Some(prepared) = prepared else {
                 continue;
             };
@@ -892,8 +894,13 @@ impl MonitorState {
             }
         }
 
-        let Some(prepared) = self.evaluate_trade(market, runtime_bundle, config, Utc::now(), true)
-        else {
+        let Some(prepared) = self.evaluate_trade(
+            market,
+            runtime_bundle,
+            config,
+            Utc::now(),
+            config.log_evaluations,
+        ) else {
             info!(
                 event = "live_execution_skipped",
                 slug = market.slug,
@@ -901,6 +908,15 @@ impl MonitorState {
                 skip_reason = "pre_submit_recompute_failed",
                 "live execution skipped"
             );
+            if let Err(error) = telegram
+                .send_message(&format!(
+                    "LIVE pre-submit canceled {}: recompute failed {}",
+                    market.asset, market.slug
+                ))
+                .await
+            {
+                warn!(error = %error, slug = market.slug, "failed to send live cancel Telegram message");
+            }
             return;
         };
         if !pre_submit_matches_initial(initial_prepared, &prepared) {
@@ -915,6 +931,18 @@ impl MonitorState {
                 skip_reason = "pre_submit_side_flip",
                 "live execution skipped"
             );
+            if let Err(error) = telegram
+                .send_message(&format!(
+                    "LIVE pre-submit canceled {}: side flipped {} -> {} {}",
+                    market.asset,
+                    outcome_label(&initial_prepared.outcome),
+                    outcome_label(&prepared.outcome),
+                    market.slug
+                ))
+                .await
+            {
+                warn!(error = %error, slug = market.slug, "failed to send live cancel Telegram message");
+            }
             return;
         }
 
@@ -2044,6 +2072,7 @@ mod tests {
             max_order_usdc: 25.0,
             live_order_type: LiveOrderType::Fak,
             evaluation_interval: Duration::from_millis(1_000),
+            log_evaluations: false,
             polymarket_private_key: None,
             polymarket_api_key: None,
             polymarket_api_secret: None,

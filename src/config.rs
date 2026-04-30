@@ -14,6 +14,7 @@ pub const DEFAULT_MIN_ABS_D_BPS: f64 = 0.01;
 pub const DEFAULT_MIN_ORDER_USDC: f64 = 1.0;
 pub const DEFAULT_MAX_ORDER_USDC: f64 = 25.0;
 pub const DEFAULT_EVALUATION_INTERVAL_MS: u64 = 1_000;
+pub const DEFAULT_LOG_EVALUATIONS: bool = false;
 
 #[derive(Clone)]
 pub struct RuntimeConfig {
@@ -27,6 +28,7 @@ pub struct RuntimeConfig {
     pub max_order_usdc: f64,
     pub live_order_type: LiveOrderType,
     pub evaluation_interval: Duration,
+    pub log_evaluations: bool,
     pub polymarket_private_key: Option<String>,
     pub polymarket_api_key: Option<String>,
     pub polymarket_api_secret: Option<String>,
@@ -60,6 +62,7 @@ impl RuntimeConfig {
                 "WIGGLER_EVALUATION_INTERVAL_MS",
                 DEFAULT_EVALUATION_INTERVAL_MS,
             )?),
+            log_evaluations: bool_env("WIGGLER_LOG_EVALUATIONS", DEFAULT_LOG_EVALUATIONS)?,
             polymarket_private_key: non_empty_env("POLYMARKET_PRIVATE_KEY"),
             polymarket_api_key: non_empty_env("POLYMARKET_API_KEY"),
             polymarket_api_secret: non_empty_env("POLYMARKET_API_SECRET"),

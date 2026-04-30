@@ -35,8 +35,7 @@ Startup validates the runtime files before opening websockets:
 
 ## Shadow Evaluation
 
-Every `WIGGLER_EVALUATION_INTERVAL_MS`, for each active 5-minute market, the monitor logs a
-`trade_evaluation` event. It computes:
+Every `WIGGLER_EVALUATION_INTERVAL_MS`, for each active 5-minute market, the monitor computes:
 
 - line price from the captured Chainlink tick at slot start
 - current Chainlink price from Polymarket RTDS
@@ -58,12 +57,14 @@ current absolute lead has decayed below 75% of the max absolute lead observed
 so far in the current 5-minute market, the evaluator adds a 0.005 probability
 edge penalty before walking asks.
 
-`WIGGLER_LIVE_TRADING=false` logs `mode="shadow"` and `decision="would_trade"`
-when all gates pass, but it never submits orders. `WIGGLER_LIVE_TRADING=true`
-logs `mode="live"`, repeats the full evaluation immediately before submit, and
+`WIGGLER_LIVE_TRADING=false` sends a Telegram shadow decision when all gates
+pass, but it never submits orders. `WIGGLER_LIVE_TRADING=true` sends a live
+intent notification, repeats the full evaluation immediately before submit, and
 submits only when the recomputed outcome token still matches the initial
 decision. Live order lifecycle logs use `decision="submitted"`,
-`decision="filled"`, or `decision="rejected"`.
+`decision="filled"`, or `decision="rejected"`. Full per-tick
+`trade_evaluation` logs are off by default; enable `WIGGLER_LOG_EVALUATIONS=true`
+for short debugging runs.
 
 Live order sizing is the minimum of:
 

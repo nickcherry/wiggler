@@ -14,7 +14,7 @@
 10. Refresh the watchset every 10 seconds.
 11. If the token set changes, reconnect the CLOB websocket with the new set.
 12. Emit status logs every 15 seconds.
-13. Evaluate every `WIGGLER_EVALUATION_INTERVAL_MS` and log each evaluation.
+13. Evaluate every `WIGGLER_EVALUATION_INTERVAL_MS`; full per-tick evaluation logs are opt-in.
 
 ## Rollover
 
@@ -72,14 +72,14 @@ Defaults:
 ## Logging
 
 Info-level logging is designed to be safe for long-running operation. It logs
-periodic summaries, shadow evaluations, and lifecycle events, while high-volume
-websocket churn stays at debug level. Production should run with
-`RUST_LOG=wiggler=info,info`.
+periodic summaries and lifecycle events, while high-volume websocket churn and
+full per-tick evaluations stay off unless explicitly enabled. Production should
+run with `RUST_LOG=wiggler=info,info`.
 
-Evaluations include `mode`, `decision`, and `skip_reason`. A fresh process will
-usually skip with `insufficient_price_history` until the 30-minute runtime vol
-lookback is warm; current-market path gaps can also produce
-`insufficient_path_history`.
+When `WIGGLER_LOG_EVALUATIONS=true`, evaluation logs include `mode`,
+`decision`, and `skip_reason`. A fresh process will usually skip with
+`insufficient_price_history` until the 30-minute runtime vol lookback is warm;
+current-market path gaps can also produce `insufficient_path_history`.
 
 Live trading uses the same evaluator twice: once for the logged decision and
 again immediately before order submission. If the second evaluation fails, if

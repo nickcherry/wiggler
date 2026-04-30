@@ -72,7 +72,8 @@ Side effects:
 - Opens one RTDS websocket per whitelisted asset for the configured price source.
 - Opens one CLOB market websocket for the full token watchset.
 - Emits JSON logs to stdout/stderr through tracing.
-- Logs every trade evaluation, would-trade, and skip reason.
+- Sends Telegram notifications for shadow decisions and live order lifecycle events when configured.
+- Logs full per-tick trade evaluations only when `WIGGLER_LOG_EVALUATIONS=true`.
 - Places live orders only when `WIGGLER_LIVE_TRADING=true`.
 
 ## Output
@@ -84,16 +85,17 @@ Long-running output is structured JSON logs. Key events:
 - `initial book snapshot`
 - `captured slot line`
 - `monitor status`
-- `trade evaluation`
+- `trade evaluation` when `WIGGLER_LOG_EVALUATIONS=true`
 - `watched market resolved`
 
 Per-event book, best-bid/ask, and trade churn is logged at debug level.
 
-`trade evaluation` logs include the market id, token ids, line/current prices,
-remaining-time bucket, distance from line, vol bin, runtime cell sample count,
-`p_win`, `p_win_lower`, path-state fields, executable ask edge, positive-EV
-depth, decision, skip reason, runtime hashes, training input hash, and price
-source/resolution-source fields for basis auditing.
+When enabled, `trade evaluation` logs include the market id, token ids,
+line/current prices, remaining-time bucket, distance from line, vol bin,
+runtime cell sample count, `p_win`, `p_win_lower`, path-state fields,
+executable ask edge, positive-EV depth, decision, skip reason, runtime hashes,
+training input hash, and price source/resolution-source fields for basis
+auditing.
 
 ## Destructive Commands
 

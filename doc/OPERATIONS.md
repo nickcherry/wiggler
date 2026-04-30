@@ -23,15 +23,15 @@ slot, info-level logs are intentionally bounded:
 - startup and websocket connection lines
 - one initial orderbook snapshot per token after each CLOB subscription
 - one status line per active asset every 15 seconds
-- one trade-evaluation line per active asset every `WIGGLER_EVALUATION_INTERVAL_MS`
+- live order submit/response/error lines
 - warnings/errors/reconnects
 - watched market resolution events
 
-At the default 1-second evaluation cadence, expect hundreds of thousands of
-info-level JSON lines per day for five assets. The larger live websocket event
-stream stays in memory and is only counted in periodic status logs. Increase
-`WIGGLER_EVALUATION_INTERVAL_MS` for quieter shadow runs; keep it low for live
-trading latency.
+Per-tick `trade_evaluation` logs are disabled by default. Enable
+`WIGGLER_LOG_EVALUATIONS=true` only for short debugging runs; at fast evaluation
+cadences it can produce millions of JSON lines per day. The larger live
+websocket event stream stays in memory and is only counted in periodic status
+logs.
 
 ## Systemd
 
