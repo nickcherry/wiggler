@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
@@ -108,6 +108,11 @@ impl OrderBookSet {
     pub fn book(&self, asset_id: &str) -> Option<&TokenBook> {
         self.books.get(asset_id)
     }
+
+    pub fn retain_only(&mut self, active_asset_ids: &HashSet<String>) {
+        self.books
+            .retain(|asset_id, _| active_asset_ids.contains(asset_id));
+    }
 }
 
 fn levels_to_map(levels: Vec<PriceLevel>) -> BTreeMap<Decimal, Decimal> {
@@ -119,9 +124,11 @@ fn levels_to_map(levels: Vec<PriceLevel>) -> BTreeMap<Decimal, Decimal> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+
     use rust_decimal::Decimal;
 
-    use super::{BookSide, PriceLevel, TokenBook};
+    use super::{BookSide, OrderBookSet, PriceLevel, TokenBook};
 
     #[test]
     fn replaces_snapshot_and_reads_best_prices() {
@@ -167,5 +174,17 @@ mod tests {
         book.apply_level(BookSide::Bid, Decimal::new(50, 2), Decimal::ZERO, None);
 
         assert!(book.best_bid().is_none());
+    }
+
+    #[test]
+    fn prunes_inactive_books() {
+        let mut books = OrderBookSet::default();
+        books.book_mut("active");
+        books.book_mut("stale");
+
+        books.retain_only(&HashSet::from(["active".to_string()]));
+
+        assert!(books.book("active").is_some());
+        assert!(books.book("stale").is_none());
     }
 }

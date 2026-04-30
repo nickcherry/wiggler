@@ -25,11 +25,19 @@ logging under systemd/journald retention rather than app-managed files.
 
 ## Live-System Caution
 
-`monitor` talks to public Polymarket websockets. It does not write to external
-systems or place orders.
+`monitor` talks to public Polymarket websockets in shadow mode. When
+`WIGGLER_LIVE_TRADING=true`, it can sign and post Polymarket orders.
 
-Future live trading commands must be explicit and must not share the same
-default path as data-only monitoring.
+Live trading must remain explicit and fail closed:
+
+- `WIGGLER_LIVE_TRADING` defaults to `false`
+- `POLYMARKET_PRIVATE_KEY` is required only for live mode
+- live orders are buy-only, taker-only, FAK/FOK market orders with an explicit
+  max acceptable price
+- the evaluator reruns immediately before submit
+- any existing local or remote market exposure blocks another order
+- live order attempts and responses are logged and sent to Telegram when
+  Telegram is configured
 
 ## Debugging
 

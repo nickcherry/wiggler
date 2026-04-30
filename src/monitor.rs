@@ -25,6 +25,8 @@ use crate::{
         rtds::{PriceTick, run_price_feed},
     },
     runtime::{AssetRuntime, PriceHistory, RuntimeBundle, RuntimeCell, SideLeading},
+    telegram::TelegramClient,
+    trading::executor::{LiveOrderRequest, LiveTradeExecutor},
 };
 
 pub async fn run(args: MonitorArgs, config: RuntimeConfig) -> Result<()> {
@@ -41,11 +43,12 @@ pub async fn run(args: MonitorArgs, config: RuntimeConfig) -> Result<()> {
             args.runtime_bundle_dir.display()
         )
     })?;
-    if config.live_trading {
-        bail!(
-            "WIGGLER_LIVE_TRADING=true requested, but live order execution is not implemented yet"
-        );
-    }
+    let telegram = TelegramClient::from_config(&config);
+    let live_executor = if config.live_trading {
+        Some(LiveTradeExecutor::from_config(&config).await?)
+    } else {
+        None
+    };
 
     let watchset_config = WatchsetConfig {
         ws_endpoint: config.clob_market_ws_url.clone(),
@@ -73,8 +76,10 @@ pub async fn run(args: MonitorArgs, config: RuntimeConfig) -> Result<()> {
     let mut subscribed_asset_ids = Vec::<String>::new();
     let mut refresh_interval = time::interval(Duration::from_secs(10));
     let mut status_interval = time::interval(Duration::from_secs(15));
+    let mut evaluation_interval = time::interval(config.evaluation_interval);
     refresh_interval.tick().await;
     status_interval.tick().await;
+    evaluation_interval.tick().await;
     let deadline = args
         .max_runtime_seconds
         .map(|seconds| time::Instant::now() + Duration::from_secs(seconds));
@@ -96,10 +101,23 @@ pub async fn run(args: MonitorArgs, config: RuntimeConfig) -> Result<()> {
         runtime_bundle_dir = %args.runtime_bundle_dir.display(),
         runtime_manifest_version = runtime_bundle.manifest_version(),
         live_trading = config.live_trading,
+        telegram_configured = telegram.is_configured(),
         slot_seconds = args.slot_seconds,
         price_feed = %args.price_feed,
+        evaluation_interval_ms = duration_ms(config.evaluation_interval),
         "monitor started"
     );
+    if telegram.is_configured() {
+        telegram
+            .send_message(&format!(
+                "wiggler started: live_trading={} assets={} tradable={}",
+                config.live_trading,
+                format_assets(&assets),
+                format_assets(&config.tradable_assets)
+            ))
+            .await
+            .context("send Telegram startup message")?;
+    }
 
     loop {
         tokio::select! {
@@ -126,7 +144,14 @@ pub async fn run(args: MonitorArgs, config: RuntimeConfig) -> Result<()> {
             }
             _ = status_interval.tick() => {
                 state.log_status();
-                state.log_trade_evaluations(&runtime_bundle, &config);
+            }
+            _ = evaluation_interval.tick() => {
+                state.evaluate_and_maybe_execute(
+                    &runtime_bundle,
+                    &config,
+                    live_executor.as_ref(),
+                    &telegram,
+                ).await;
             }
             Some(tick) = price_rx.recv() => {
                 state.apply_price_tick(tick);
@@ -273,6 +298,9 @@ struct MonitorState {
     latest_prices: HashMap<Asset, PriceTick>,
     price_history: HashMap<Asset, PriceHistory>,
     slot_lines: HashMap<String, SlotLine>,
+    positioned_markets: HashSet<String>,
+    pending_markets: HashSet<String>,
+    shadow_decision_markets: HashSet<String>,
     initial_books_seen: HashSet<String>,
     event_counts: EventCounts,
 }
@@ -282,6 +310,10 @@ impl MonitorState {
         let active_slugs = markets
             .iter()
             .map(|market| market.slug.clone())
+            .collect::<HashSet<_>>();
+        let active_asset_ids = markets
+            .iter()
+            .flat_map(MonitoredMarket::asset_ids)
             .collect::<HashSet<_>>();
 
         self.markets_by_slug = markets
@@ -301,6 +333,9 @@ impl MonitorState {
 
         self.slot_lines
             .retain(|slug, _| active_slugs.contains(slug));
+        self.initial_books_seen
+            .retain(|asset_id| active_asset_ids.contains(asset_id));
+        self.books.retain_only(&active_asset_ids);
     }
 
     fn apply_price_tick(&mut self, tick: PriceTick) {
@@ -532,24 +567,50 @@ impl MonitorState {
         }
     }
 
-    fn log_trade_evaluations(&self, runtime_bundle: &RuntimeBundle, config: &RuntimeConfig) {
+    async fn evaluate_and_maybe_execute(
+        &mut self,
+        runtime_bundle: &RuntimeBundle,
+        config: &RuntimeConfig,
+        live_executor: Option<&LiveTradeExecutor>,
+        telegram: &TelegramClient,
+    ) {
         let now = Utc::now();
-        for market in self.markets_by_slug.values() {
+        let markets = self.markets_by_slug.values().cloned().collect::<Vec<_>>();
+        for market in &markets {
             if now < market.slot.start() || now >= market.slot.end() {
                 continue;
             }
 
-            self.log_trade_evaluation(market, runtime_bundle, config, now);
+            let prepared = self.evaluate_trade(market, runtime_bundle, config, now, true);
+            let Some(prepared) = prepared else {
+                continue;
+            };
+
+            if config.live_trading {
+                let Some(executor) = live_executor else {
+                    warn!(slug = market.slug, "live trading enabled without executor");
+                    continue;
+                };
+                self.execute_live_trade(market, runtime_bundle, config, executor, telegram)
+                    .await;
+            } else if self
+                .shadow_decision_markets
+                .insert(market.condition_id.clone())
+                && let Err(error) = telegram.send_message(&prepared.telegram_text(false)).await
+            {
+                warn!(error = %error, slug = market.slug, "failed to send shadow trade Telegram message");
+            }
         }
     }
 
-    fn log_trade_evaluation(
+    fn evaluate_trade(
         &self,
         market: &MonitoredMarket,
         runtime_bundle: &RuntimeBundle,
         config: &RuntimeConfig,
         now: DateTime<Utc>,
-    ) {
+        emit_log: bool,
+    ) -> Option<PreparedTrade> {
         let runtime = runtime_bundle.config_for(market.asset);
         let line = self.slot_lines.get(&market.slug);
         let latest_tick = self.latest_prices.get(&market.asset);
@@ -567,6 +628,7 @@ impl MonitorState {
         let book = token.and_then(|token| self.books.book(&token.asset_id));
         let best_ask = book.and_then(TokenBook::best_ask);
         let price_age_ms = latest_tick.map(|tick| age_ms(now, tick.received_at));
+        let price_exchange_age_ms = latest_tick.map(|tick| age_ms(now, tick.exchange_timestamp));
         let book_age_ms = book.and_then(|book| book.last_timestamp.map(|ts| age_ms(now, ts)));
         let remaining_bucket = runtime.and_then(|runtime| runtime.remaining_bucket(remaining_sec));
         let vol_bps_per_sqrt_min = runtime.and_then(|runtime| {
@@ -591,6 +653,8 @@ impl MonitorState {
             .zip(cell)
             .zip(book)
             .map(|((runtime, cell), book)| summarize_asks(runtime, cell, &book.asks()));
+        let already_positioned = self.positioned_markets.contains(&market.condition_id)
+            || self.pending_markets.contains(&market.condition_id);
         let skip_reason = self.trade_skip_reason(
             market.asset,
             runtime,
@@ -598,6 +662,7 @@ impl MonitorState {
             line,
             latest_tick,
             price_age_ms,
+            price_exchange_age_ms,
             d_bps,
             abs_d_bps_f64,
             side_leading,
@@ -608,6 +673,7 @@ impl MonitorState {
             cell,
             best_ask.as_ref(),
             edge_summary.as_ref(),
+            already_positioned,
             config,
         );
         let decision = if skip_reason.is_some() {
@@ -618,49 +684,206 @@ impl MonitorState {
             "shadow_trade"
         };
 
-        info!(
-            event = "trade_evaluation",
-            asset = %market.asset,
-            market_id = market.market_id,
-            condition_id = market.condition_id,
-            slug = market.slug,
-            up_token_id = ?self.token_for_outcome(market, Outcome::Up).map(|token| token.asset_id.as_str()),
-            down_token_id = ?self.token_for_outcome(market, Outcome::Down).map(|token| token.asset_id.as_str()),
-            buy_token_id = ?token.map(|token| token.asset_id.as_str()),
-            line_price = ?line.map(|line| line.price.to_string()),
-            line_observed_at = ?line.map(|line| line.observed_at),
-            current_price = ?latest_tick.map(|tick| tick.value.to_string()),
-            current_received_at = ?latest_tick.map(|tick| tick.received_at),
-            current_exchange_timestamp = ?latest_tick.map(|tick| tick.exchange_timestamp),
-            price_age_ms = ?price_age_ms,
-            orderbook_age_ms = ?book_age_ms,
+        if emit_log {
+            info!(
+                event = "trade_evaluation",
+                asset = %market.asset,
+                market_id = market.market_id,
+                condition_id = market.condition_id,
+                slug = market.slug,
+                up_token_id = ?self.token_for_outcome(market, Outcome::Up).map(|token| token.asset_id.as_str()),
+                down_token_id = ?self.token_for_outcome(market, Outcome::Down).map(|token| token.asset_id.as_str()),
+                buy_token_id = ?token.map(|token| token.asset_id.as_str()),
+                line_price = ?line.map(|line| line.price.to_string()),
+                line_observed_at = ?line.map(|line| line.observed_at),
+                current_price = ?latest_tick.map(|tick| tick.value.to_string()),
+                current_received_at = ?latest_tick.map(|tick| tick.received_at),
+                current_exchange_timestamp = ?latest_tick.map(|tick| tick.exchange_timestamp),
+                price_age_ms = ?price_age_ms,
+                price_exchange_age_ms = ?price_exchange_age_ms,
+                orderbook_age_ms = ?book_age_ms,
+                remaining_sec,
+                remaining_bucket = ?remaining_bucket,
+                d_bps = ?d_bps.map(|value| value.round_dp(6).to_string()),
+                abs_d_bps = ?abs_d_bps.map(|value| value.round_dp(6).to_string()),
+                side_leading = ?side_leading.map(SideLeading::as_str),
+                vol_bps_per_sqrt_min = ?vol_bps_per_sqrt_min,
+                vol_bin = ?vol_bin.map(|bin| bin.as_str()),
+                cell_sample_count = ?cell.map(|cell| cell.sample_count),
+                p_win_lower = ?cell.map(|cell| cell.p_win_lower),
+                best_ask = ?best_ask.as_ref().map(|level| level.price.to_string()),
+                best_ask_size = ?best_ask.as_ref().map(|level| level.size.to_string()),
+                best_ask_fee = ?edge_summary.as_ref().and_then(|summary| summary.best_fee),
+                best_ask_edge = ?edge_summary.as_ref().and_then(|summary| summary.best_edge),
+                positive_ev_depth_shares = ?edge_summary.as_ref().map(|summary| summary.positive_ev_depth_shares),
+                positive_ev_depth_usdc = ?edge_summary.as_ref().map(|summary| summary.positive_ev_depth_usdc),
+                max_acceptable_price = ?edge_summary.as_ref().and_then(|summary| summary.max_acceptable_price),
+                min_edge_probability = ?runtime.map(AssetRuntime::min_edge_probability),
+                min_order_usdc = config.min_order_usdc,
+                max_position_usdc = ?runtime.map(AssetRuntime::max_position_usdc),
+                max_order_usdc = config.max_order_usdc,
+                already_positioned,
+                decision,
+                skip_reason = ?skip_reason,
+                live_trading = config.live_trading,
+                config_hash = ?runtime.map(AssetRuntime::runtime_config_hash),
+                source_config_hash = ?runtime.map(AssetRuntime::source_config_hash),
+                input_hash = ?runtime.map(AssetRuntime::training_input_hash),
+                "trade evaluation"
+            );
+        }
+
+        if skip_reason.is_some() {
+            return None;
+        }
+
+        let runtime = runtime?;
+        let token = token?;
+        let edge_summary = edge_summary.as_ref()?;
+        let max_price = edge_summary.max_acceptable_price?;
+        let amount_usdc = edge_summary
+            .positive_ev_depth_usdc
+            .min(runtime.max_position_usdc())
+            .min(config.max_order_usdc);
+        if amount_usdc < config.min_order_usdc {
+            return None;
+        }
+
+        Some(PreparedTrade {
+            asset: market.asset,
+            slug: market.slug.clone(),
+            condition_id: market.condition_id.clone(),
+            token_id: token.asset_id.clone(),
+            outcome: token.outcome.clone(),
+            amount_usdc,
+            max_price,
             remaining_sec,
-            remaining_bucket = ?remaining_bucket,
-            d_bps = ?d_bps.map(|value| value.round_dp(6).to_string()),
-            abs_d_bps = ?abs_d_bps.map(|value| value.round_dp(6).to_string()),
-            side_leading = ?side_leading.map(SideLeading::as_str),
-            vol_bps_per_sqrt_min = ?vol_bps_per_sqrt_min,
-            vol_bin = ?vol_bin.map(|bin| bin.as_str()),
-            cell_sample_count = ?cell.map(|cell| cell.sample_count),
-            p_win_lower = ?cell.map(|cell| cell.p_win_lower),
-            best_ask = ?best_ask.as_ref().map(|level| level.price.to_string()),
-            best_ask_size = ?best_ask.as_ref().map(|level| level.size.to_string()),
-            best_ask_fee = ?edge_summary.as_ref().and_then(|summary| summary.best_fee),
-            best_ask_edge = ?edge_summary.as_ref().and_then(|summary| summary.best_edge),
-            positive_ev_depth_shares = ?edge_summary.as_ref().map(|summary| summary.positive_ev_depth_shares),
-            positive_ev_depth_usdc = ?edge_summary.as_ref().map(|summary| summary.positive_ev_depth_usdc),
-            max_acceptable_price = ?edge_summary.as_ref().and_then(|summary| summary.max_acceptable_price),
-            min_edge_probability = ?runtime.map(AssetRuntime::min_edge_probability),
-            max_position_usdc = ?runtime.map(AssetRuntime::max_position_usdc),
-            already_positioned = false,
-            decision,
-            skip_reason = ?skip_reason,
-            live_trading = config.live_trading,
-            config_hash = ?runtime.map(AssetRuntime::runtime_config_hash),
-            source_config_hash = ?runtime.map(AssetRuntime::source_config_hash),
-            input_hash = ?runtime.map(AssetRuntime::training_input_hash),
-            "trade evaluation"
-        );
+            d_bps: d_bps.map(|value| value.round_dp(6).to_string()),
+            p_win_lower: cell.map(|cell| cell.p_win_lower),
+            best_edge: edge_summary.best_edge,
+        })
+    }
+
+    async fn execute_live_trade(
+        &mut self,
+        market: &MonitoredMarket,
+        runtime_bundle: &RuntimeBundle,
+        config: &RuntimeConfig,
+        executor: &LiveTradeExecutor,
+        telegram: &TelegramClient,
+    ) {
+        if self.pending_markets.contains(&market.condition_id)
+            || self.positioned_markets.contains(&market.condition_id)
+        {
+            return;
+        }
+
+        match executor.has_market_exposure(&market.condition_id).await {
+            Ok(true) => {
+                self.positioned_markets.insert(market.condition_id.clone());
+                info!(
+                    event = "live_execution_skipped",
+                    slug = market.slug,
+                    condition_id = market.condition_id,
+                    skip_reason = "remote_market_exposure",
+                    "live execution skipped"
+                );
+                return;
+            }
+            Ok(false) => {}
+            Err(error) => {
+                warn!(error = %error, slug = market.slug, "failed to reconcile market exposure");
+                return;
+            }
+        }
+
+        let Some(prepared) = self.evaluate_trade(market, runtime_bundle, config, Utc::now(), false)
+        else {
+            info!(
+                event = "live_execution_skipped",
+                slug = market.slug,
+                condition_id = market.condition_id,
+                skip_reason = "pre_submit_recompute_failed",
+                "live execution skipped"
+            );
+            return;
+        };
+
+        self.pending_markets.insert(market.condition_id.clone());
+        if let Err(error) = telegram.send_message(&prepared.telegram_text(true)).await {
+            warn!(error = %error, slug = market.slug, "failed to send live intent Telegram message");
+        }
+
+        let request = LiveOrderRequest {
+            asset: prepared.asset,
+            slug: prepared.slug.clone(),
+            condition_id: prepared.condition_id.clone(),
+            token_id: prepared.token_id.clone(),
+            outcome: prepared.outcome.clone(),
+            amount_usdc: prepared.amount_usdc,
+            max_price: prepared.max_price,
+        };
+        let result = executor.execute(&request).await;
+        self.pending_markets.remove(&market.condition_id);
+
+        match result {
+            Ok(response) => {
+                if response.success {
+                    self.positioned_markets.insert(market.condition_id.clone());
+                }
+                info!(
+                    event = "live_order_response",
+                    slug = market.slug,
+                    condition_id = market.condition_id,
+                    token_id = request.token_id,
+                    outcome = ?request.outcome,
+                    amount_usdc = request.amount_usdc,
+                    max_price = request.max_price,
+                    order_id = response.order_id,
+                    status = response.status,
+                    success = response.success,
+                    error_msg = ?response.error_msg,
+                    making_amount = response.making_amount,
+                    taking_amount = response.taking_amount,
+                    trade_ids = ?response.trade_ids,
+                    "live order response"
+                );
+                if let Err(error) = telegram
+                    .send_message(&format!(
+                        "LIVE order response {}/{} status={} success={} order={} fills={}",
+                        request.asset,
+                        request.outcome_label(),
+                        response.status,
+                        response.success,
+                        response.order_id,
+                        response.trade_ids.len()
+                    ))
+                    .await
+                {
+                    warn!(error = %error, slug = market.slug, "failed to send live response Telegram message");
+                }
+            }
+            Err(error) => {
+                warn!(
+                    event = "live_order_error",
+                    slug = market.slug,
+                    condition_id = market.condition_id,
+                    error = %error,
+                    "live order failed"
+                );
+                if let Err(telegram_error) = telegram
+                    .send_message(&format!(
+                        "LIVE order failed {}/{}: {}",
+                        request.asset,
+                        request.outcome_label(),
+                        error
+                    ))
+                    .await
+                {
+                    warn!(error = %telegram_error, slug = market.slug, "failed to send live error Telegram message");
+                }
+            }
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -672,6 +895,7 @@ impl MonitorState {
         line: Option<&SlotLine>,
         latest_tick: Option<&PriceTick>,
         price_age_ms: Option<i64>,
+        price_exchange_age_ms: Option<i64>,
         d_bps: Option<Decimal>,
         abs_d_bps: Option<f64>,
         side_leading: Option<SideLeading>,
@@ -682,6 +906,7 @@ impl MonitorState {
         cell: Option<&RuntimeCell>,
         best_ask: Option<&PriceLevel>,
         edge_summary: Option<&EdgeSummary>,
+        already_positioned: bool,
         config: &RuntimeConfig,
     ) -> Option<&'static str> {
         if !config.tradable_assets.contains(&asset) {
@@ -705,6 +930,9 @@ impl MonitorState {
         if price_age_ms.is_some_and(|age| age > duration_ms(config.price_stale_after)) {
             return Some("stale_current_price");
         }
+        if price_exchange_age_ms.is_some_and(|age| age > duration_ms(config.price_stale_after)) {
+            return Some("stale_current_price_source");
+        }
         if d_bps.is_none() {
             return Some("invalid_line_price");
         }
@@ -712,6 +940,9 @@ impl MonitorState {
             || abs_d_bps.is_some_and(|abs_d_bps| abs_d_bps < config.min_abs_d_bps)
         {
             return Some("too_close_to_line");
+        }
+        if already_positioned {
+            return Some("already_positioned");
         }
         if token.is_none() {
             return Some("missing_token_id");
@@ -737,8 +968,20 @@ impl MonitorState {
         if edge_summary.is_none_or(|summary| summary.positive_ev_depth_shares <= 0.0) {
             return Some("no_positive_ev_depth");
         }
-        if config.live_trading {
-            return Some("live_trading_not_implemented");
+        if edge_summary
+            .and_then(|summary| summary.max_acceptable_price)
+            .is_none()
+        {
+            return Some("missing_max_acceptable_price");
+        }
+        if edge_summary.is_some_and(|summary| {
+            summary
+                .positive_ev_depth_usdc
+                .min(runtime.max_position_usdc())
+                .min(config.max_order_usdc)
+                < config.min_order_usdc
+        }) {
+            return Some("order_size_below_min");
         }
 
         None
@@ -791,6 +1034,56 @@ struct EventCounts {
 struct TokenContext<'a> {
     slug: &'a String,
     token: &'a OutcomeToken,
+}
+
+#[derive(Clone, Debug)]
+struct PreparedTrade {
+    asset: Asset,
+    slug: String,
+    condition_id: String,
+    token_id: String,
+    outcome: Outcome,
+    amount_usdc: f64,
+    max_price: f64,
+    remaining_sec: i64,
+    d_bps: Option<String>,
+    p_win_lower: Option<f64>,
+    best_edge: Option<f64>,
+}
+
+impl PreparedTrade {
+    fn telegram_text(&self, live: bool) -> String {
+        let mode = if live {
+            "LIVE intent"
+        } else {
+            "SHADOW decision"
+        };
+        format!(
+            "{} {} {} amount=${:.2} max_price={:.2} remaining={}s d_bps={} p_win_lower={} edge={} {}",
+            mode,
+            self.asset,
+            outcome_label(&self.outcome),
+            self.amount_usdc,
+            self.max_price,
+            self.remaining_sec,
+            self.d_bps.as_deref().unwrap_or("n/a"),
+            self.p_win_lower
+                .map(|value| format!("{value:.4}"))
+                .unwrap_or_else(|| "n/a".to_string()),
+            self.best_edge
+                .map(|value| format!("{value:.4}"))
+                .unwrap_or_else(|| "n/a".to_string()),
+            self.slug
+        )
+    }
+}
+
+fn outcome_label(outcome: &Outcome) -> &'static str {
+    match outcome {
+        Outcome::Up => "Up",
+        Outcome::Down => "Down",
+        Outcome::Other(_) => "Other",
+    }
 }
 
 fn distance_bps(price: Decimal, line: Decimal) -> Option<Decimal> {

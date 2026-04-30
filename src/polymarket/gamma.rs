@@ -58,11 +58,14 @@ impl GammaClient {
         let Some(event) = self.fetch_event_by_slug(&slug).await? else {
             return Ok(None);
         };
+        if !event.active || event.closed {
+            return Ok(None);
+        }
 
         let Some(market) = event
             .markets
             .into_iter()
-            .find(|market| market.enable_order_book)
+            .find(|market| market.enable_order_book && market.active && !market.closed)
         else {
             return Ok(None);
         };

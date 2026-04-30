@@ -7,7 +7,7 @@ use crate::polymarket::rtds::PriceFeedSource;
 
 #[derive(Debug, Parser)]
 #[command(name = "wiggler")]
-#[command(about = "Data-only Polymarket crypto up/down market monitor")]
+#[command(about = "Polymarket crypto up/down monitor and gated trader")]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Command,

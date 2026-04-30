@@ -84,6 +84,35 @@ The monitor handles:
 
 Unknown events are logged at debug level with the raw payload.
 
+## Live Trading API
+
+Live order signing and submission uses Polymarket's official Rust SDK:
+
+- Docs: <https://docs.polymarket.com/api-reference/clients-sdks>
+- Order docs: <https://docs.polymarket.com/trading/orders/create>
+- Auth docs: <https://docs.polymarket.com/api-reference/authentication>
+- Rust crate: `polymarket_client_sdk_v2`
+
+The default trading API host is:
+
+```text
+https://clob-v2.polymarket.com
+```
+
+The SDK handles L1 authentication, L2 headers, EIP-712 signing, protocol
+version detection, and order submission. Wiggler only submits buy-side market
+orders with:
+
+- explicit price limit from positive-EV ask depth
+- `FAK` by default, configurable to `FOK`
+- no maker/post-only path
+- no sell/flipping path
+- no repeated local or remote exposure in the same market
+
+Before enabling live trading, the funder wallet must have the required
+Polymarket collateral allowance. The SDK/API will reject orders with
+insufficient balance or allowance.
+
 ## Underlying Price Feed
 
 The 5-minute crypto market descriptions say resolution uses Chainlink streams,

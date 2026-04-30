@@ -52,7 +52,8 @@ Default behavior:
 - Lookahead: current slot plus one future slot
 - Underlying price feed: `chainlink`
 - Runtime bundle: `runtime/wiggler-prod-v1`
-- Live trading: disabled; `WIGGLER_LIVE_TRADING=true` fails closed until order execution exists
+- Evaluation cadence: `1000` ms
+- Live trading: disabled; enable with `WIGGLER_LIVE_TRADING=true` and Polymarket credentials
 
 Use a comma-separated whitelist to monitor more than one market family:
 
@@ -72,7 +73,7 @@ Side effects:
 - Opens one CLOB market websocket for the full token watchset.
 - Emits JSON logs to stdout/stderr through tracing.
 - Logs shadow trade evaluations and skip reasons.
-- Does not place orders.
+- Places live orders only when `WIGGLER_LIVE_TRADING=true`.
 
 ## Output
 

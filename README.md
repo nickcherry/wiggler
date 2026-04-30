@@ -2,15 +2,17 @@
 
 Rust CLI for monitoring Polymarket crypto up/down markets.
 
-Current scope: shadow monitoring for whitelisted 5-minute crypto markets. The
-runtime discovers the current and next Polymarket event for each whitelisted
-asset, subscribes to every outcome token over the CLOB market websocket,
-streams the matching Chainlink price from Polymarket RTDS, loads the production
-probability-table bundle, and logs EV-gated trade evaluations without operator
-action.
+Current scope: shadow monitoring plus gated live execution for whitelisted
+5-minute crypto markets. The runtime discovers the current and next Polymarket
+event for each whitelisted asset, subscribes to every outcome token over the
+CLOB market websocket, streams the matching Chainlink price from Polymarket
+RTDS, loads the production probability-table bundle, and evaluates executable
+ask depth against EV/risk/staleness gates.
 
-There is no live trading path yet. No orders are created, signed, or posted.
-`WIGGLER_LIVE_TRADING=true` currently fails closed at startup.
+Live trading is off by default. With `WIGGLER_LIVE_TRADING=false`, eligible
+decisions are shadow-logged. With `WIGGLER_LIVE_TRADING=true`, the monitor uses
+the official Polymarket Rust CLOB SDK to sign and post taker-only FAK/FOK market
+orders with explicit price limits.
 
 ## Docs
 
@@ -33,8 +35,9 @@ cargo build
 cp .env.example .env
 ```
 
-The monitor uses public Polymarket endpoints and does not need API keys.
-Telegram is optional and currently only scaffolded for future decision alerts.
+Shadow monitoring uses public Polymarket endpoints and does not need API keys.
+Live trading requires a Polymarket private key and funded/approved wallet.
+Telegram is optional.
 
 ## Commands
 
@@ -65,20 +68,28 @@ cargo run -- monitor --runtime-bundle-dir runtime/wiggler-prod-v1
 | `WIGGLER_ASSETS` | `btc,eth,sol,xrp,doge` | Comma-separated asset whitelist |
 | `WIGGLER_TRADABLE_ASSETS` | `btc,eth,sol,xrp,doge` | Comma-separated shadow/live eligibility whitelist |
 | `WIGGLER_RUNTIME_BUNDLE_DIR` | `runtime/wiggler-prod-v1` | Runtime probability-table bundle |
-| `WIGGLER_LIVE_TRADING` | `false` | Global live-trading flag; true is rejected until execution is implemented |
+| `WIGGLER_LIVE_TRADING` | `false` | Global live-trading flag |
+| `WIGGLER_LIVE_ORDER_TYPE` | `fak` | Live taker order type: `fak` or `fok` |
+| `WIGGLER_MIN_ORDER_USDC` | `1` | Minimum live/shadow decision notional |
+| `WIGGLER_MAX_ORDER_USDC` | `25` | Production cap applied below bundle position caps |
+| `WIGGLER_EVALUATION_INTERVAL_MS` | `1000` | Decision/evaluation cadence |
 | `WIGGLER_PRICE_STALE_AFTER_MS` | `20000` | Max current-price age for an eligible evaluation |
 | `WIGGLER_ORDERBOOK_STALE_AFTER_MS` | `10000` | Max orderbook age for an eligible evaluation |
 | `WIGGLER_MIN_ABS_D_BPS` | `0.01` | Dust threshold around the market line |
 | `POLYMARKET_GAMMA_BASE_URL` | `https://gamma-api.polymarket.com` | Market discovery |
+| `POLYMARKET_CLOB_API_URL` | `https://clob-v2.polymarket.com` | CLOB trading/auth API |
 | `POLYMARKET_CLOB_MARKET_WS_URL` | `wss://ws-subscriptions-clob.polymarket.com/ws/market` | Orderbook websocket |
 | `POLYMARKET_RTDS_WS_URL` | `wss://ws-live-data.polymarket.com` | Chainlink/Binance crypto price websocket |
-| `TELEGRAM_BOT_TOKEN` | unset | Optional future notification sender |
-| `TELEGRAM_CHAT_ID` | unset | Optional future notification target |
+| `POLYMARKET_PRIVATE_KEY` | unset | Required for live order signing |
+| `POLYMARKET_SIGNATURE_TYPE` | `eoa` | `eoa`, `proxy`, `gnosis-safe`, or `poly1271` |
+| `POLYMARKET_FUNDER_ADDRESS` | unset | Optional explicit funded Polymarket wallet address |
+| `POLYMARKET_API_KEY` / `POLYMARKET_API_SECRET` / `POLYMARKET_API_PASSPHRASE` | unset | Optional L2 API credentials; SDK derives/creates credentials when unset |
+| `POLYMARKET_API_NONCE` | unset | Optional nonce for API key derivation/creation |
+| `TELEGRAM_BOT_TOKEN` | unset | Optional notification sender |
+| `TELEGRAM_CHAT_ID` | unset | Optional notification target |
 
 ## Current Non-Goals
 
 - No database.
-- No trade execution.
-- No wallet or Polymarket auth.
 - No backtest engine.
 - No CEX candle ingestion; use `../wiggler-data` for historical candles.

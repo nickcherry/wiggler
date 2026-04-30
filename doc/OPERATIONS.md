@@ -23,13 +23,15 @@ slot, info-level logs are intentionally bounded:
 - startup and websocket connection lines
 - one initial orderbook snapshot per token after each CLOB subscription
 - one status line per active asset every 15 seconds
-- one shadow trade-evaluation line per active asset every 15 seconds
+- one trade-evaluation line per active asset every `WIGGLER_EVALUATION_INTERVAL_MS`
 - warnings/errors/reconnects
 - watched market resolution events
 
-That is roughly tens of thousands of JSON lines per day, not millions. The
-larger live websocket event stream stays in memory and is only counted in
-periodic status logs.
+At the default 1-second evaluation cadence, expect hundreds of thousands of
+info-level JSON lines per day for five assets. The larger live websocket event
+stream stays in memory and is only counted in periodic status logs. Increase
+`WIGGLER_EVALUATION_INTERVAL_MS` for quieter shadow runs; keep it low for live
+trading latency.
 
 ## Systemd
 
@@ -94,7 +96,7 @@ The monitor is intentionally stateless:
 - no database
 - no application log files
 - no durable cache by default
-- in-memory orderbooks only
+- in-memory orderbooks only, pruned to the active watchset on every refresh
 
 If memory grows unexpectedly, systemd should apply pressure at `MemoryHigh` and
 kill/restart the service before it can make the whole server unhealthy.

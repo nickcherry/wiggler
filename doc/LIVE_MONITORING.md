@@ -12,7 +12,8 @@
 8. Load the production runtime probability-table bundle.
 9. Refresh the watchset every 10 seconds.
 10. If the token set changes, reconnect the CLOB websocket with the new set.
-11. Emit status and shadow trade-evaluation logs every 15 seconds.
+11. Emit status logs every 15 seconds.
+12. Evaluate every `WIGGLER_EVALUATION_INTERVAL_MS` and log each evaluation.
 
 ## Rollover
 
@@ -40,6 +41,7 @@ All live state is in memory:
 - recent underlying price history per asset
 - captured slot line per watched slug
 
+Orderbooks for tokens that leave the active watchset are pruned on refresh.
 No database is used. If future logic needs a short local cache, prefer a simple
 file artifact under `tmp/` before adding a managed service.
 
@@ -53,6 +55,8 @@ Shadow decision code checks freshness before logging an eligible decision:
 - current slot line availability
 - market still active/open
 - enough executable ask depth at expected execution price
+- no local pending/positioned state for the market
+- no remote open orders or historical trades for the market before live submit
 
 Defaults:
 
@@ -72,6 +76,10 @@ Shadow evaluations include a `decision` and `skip_reason`. A fresh process will
 usually skip with `insufficient_price_history` until the 30-minute runtime vol
 lookback is warm.
 
+Live trading uses the same evaluator twice: once for the logged decision and
+again immediately before order submission. If the second evaluation fails, no
+order is sent.
+
 See [OPERATIONS.md](./OPERATIONS.md) for systemd and journald retention.
 
 ## Failure Behavior
@@ -80,7 +88,8 @@ See [OPERATIONS.md](./OPERATIONS.md) for systemd and journald retention.
 - RTDS reconnects with exponential backoff up to 30 seconds.
 - CLOB websocket reconnects with exponential backoff up to 30 seconds.
 - A changed token watchset restarts only the CLOB task.
-- `WIGGLER_LIVE_TRADING=true` fails closed until order execution exists.
+- `WIGGLER_LIVE_TRADING=true` fails closed when credentials are missing,
+  authentication fails, or the account is in closed-only mode.
 - `Ctrl-C` exits cleanly.
 
 ## Hosting

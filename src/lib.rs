@@ -7,3 +7,4 @@ pub mod monitor;
 pub mod polymarket;
 pub mod runtime;
 pub mod telegram;
+pub mod trading;

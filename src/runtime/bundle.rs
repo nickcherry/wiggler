@@ -11,6 +11,7 @@ use serde::Deserialize;
 use crate::domain::asset::Asset;
 
 const EXPECTED_RUNTIME_VERSION: &str = "wiggler-runtime-prob-grid-v1";
+const EXPECTED_MANIFEST_VERSION: &str = "wiggler-runtime-bundle-v1";
 const EXPECTED_MARKET_TYPE: &str = "up_down";
 const EXPECTED_INTERVAL_SEC: u32 = 300;
 const EXPECTED_ANCHOR_MODE: &str = "boundary";
@@ -26,6 +27,9 @@ impl RuntimeBundle {
         let dir = dir.as_ref();
         let manifest_path = dir.join("wiggler-runtime-manifest.json");
         let manifest = read_json::<Manifest>(&manifest_path)?;
+        if manifest.version != EXPECTED_MANIFEST_VERSION {
+            bail!("unsupported runtime manifest version: {}", manifest.version);
+        }
         let mut configs = HashMap::new();
 
         for entry in &manifest.runtime_configs {
@@ -35,7 +39,12 @@ impl RuntimeBundle {
                 .with_context(|| format!("load runtime config {}", config_path.display()))?;
 
             validate_config(&config, entry)?;
-            configs.insert(asset, AssetRuntime::from_config(config));
+            if configs
+                .insert(asset, AssetRuntime::from_config(config))
+                .is_some()
+            {
+                bail!("duplicate runtime config for asset {asset}");
+            }
         }
 
         Ok(Self {
@@ -339,6 +348,50 @@ fn validate_config(config: &RuntimeConfigFile, manifest: &ManifestRuntimeConfig)
     if config.remaining_sec_buckets.is_empty() {
         bail!(
             "runtime config for {} has no remaining-sec buckets",
+            config.asset
+        );
+    }
+    if !config.fee.taker_fee_rate.is_finite() || config.fee.taker_fee_rate < 0.0 {
+        bail!("runtime config for {} has invalid taker fee", config.asset);
+    }
+    if !config.risk_defaults.min_edge_probability.is_finite()
+        || config.risk_defaults.min_edge_probability < 0.0
+    {
+        bail!(
+            "runtime config for {} has invalid min edge probability",
+            config.asset
+        );
+    }
+    if !config.risk_defaults.max_position_usdc.is_finite()
+        || config.risk_defaults.max_position_usdc <= 0.0
+    {
+        bail!(
+            "runtime config for {} has invalid max position",
+            config.asset
+        );
+    }
+    let thresholds = &config.vol_bins.thresholds_bps_per_sqrt_min;
+    if !thresholds.low_max_bps_per_sqrt_min.is_finite()
+        || !thresholds.normal_max_bps_per_sqrt_min.is_finite()
+        || !thresholds.high_max_bps_per_sqrt_min.is_finite()
+        || thresholds.low_max_bps_per_sqrt_min > thresholds.normal_max_bps_per_sqrt_min
+        || thresholds.normal_max_bps_per_sqrt_min > thresholds.high_max_bps_per_sqrt_min
+    {
+        bail!(
+            "runtime config for {} has invalid vol thresholds",
+            config.asset
+        );
+    }
+    if config.cells.iter().any(|cell| {
+        !cell.abs_d_bps_min.is_finite()
+            || cell
+                .abs_d_bps_max
+                .is_some_and(|max| !max.is_finite() || max <= cell.abs_d_bps_min)
+            || !cell.p_win_lower.is_finite()
+            || !(0.0..=1.0).contains(&cell.p_win_lower)
+    }) {
+        bail!(
+            "runtime config for {} has invalid cell values",
             config.asset
         );
     }

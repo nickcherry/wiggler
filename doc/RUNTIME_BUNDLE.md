@@ -35,7 +35,7 @@ Startup validates the runtime files before opening websockets:
 
 ## Shadow Evaluation
 
-Every 15 seconds, for each active 5-minute market, the monitor logs a
+Every `WIGGLER_EVALUATION_INTERVAL_MS`, for each active 5-minute market, the monitor logs a
 `trade_evaluation` event. It computes:
 
 - line price from the captured Chainlink tick at slot start
@@ -50,9 +50,17 @@ The evaluator skips when data is missing or stale, the market is outside the
 60-240 second trading window, the price is too close to the line, no runtime
 cell matches, or there is no positive-EV executable ask depth.
 
-The current runtime is shadow-only. `WIGGLER_LIVE_TRADING=false` logs
-`decision="shadow_trade"` when all gates pass. `WIGGLER_LIVE_TRADING=true`
-fails closed at startup until order signing/submission is implemented.
+`WIGGLER_LIVE_TRADING=false` logs `decision="shadow_trade"` when all gates
+pass. `WIGGLER_LIVE_TRADING=true` logs `decision="live_trade"` and can place a
+live Polymarket order after a second pre-submit evaluation.
+
+Live order sizing is the minimum of:
+
+- positive-EV executable depth in USDC
+- the runtime config's `max_position_usdc`
+- `WIGGLER_MAX_ORDER_USDC`
+
+The monitor skips if that amount is below `WIGGLER_MIN_ORDER_USDC`.
 
 ## Warmup
 

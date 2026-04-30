@@ -13,18 +13,18 @@ If either value is missing, the Telegram client is a no-op.
 
 ## Current Behavior
 
-The current monitor does not send Telegram messages because it does not make
-trade decisions.
+When configured, the monitor sends Telegram messages for:
+
+- process startup
+- first shadow decision per market
+- live order intent
+- live order response
+- live order error
 
 ## Future Behavior
 
-When decision logic is added, Telegram messages should be sent for:
+Additional message types that are still useful future work:
 
-- startup with runtime configuration
-- slot line capture if useful operationally
-- dry-run decision
-- live order intent
-- order accepted/rejected
 - fill
 - exit/settlement
 - runtime health degradation
