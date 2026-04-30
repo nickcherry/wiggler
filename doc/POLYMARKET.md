@@ -96,7 +96,7 @@ Live order signing and submission uses Polymarket's official Rust SDK:
 The default trading API host is:
 
 ```text
-https://clob-v2.polymarket.com
+https://clob.polymarket.com
 ```
 
 The SDK handles L1 authentication, L2 headers, EIP-712 signing, protocol

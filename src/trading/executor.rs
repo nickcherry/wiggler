@@ -8,15 +8,15 @@ use polymarket_client_sdk_v2::{
     clob::{
         Client, Config,
         types::{
-            Amount, OrderType, Side, SignatureType,
-            request::{OrdersRequest, TradesRequest},
+            Amount, AssetType, OrderType, Side, SignatureType,
+            request::{BalanceAllowanceRequest, OrdersRequest, TradesRequest},
             response::PostOrderResponse,
         },
     },
     types::{Address, B256, Decimal, U256},
 };
 use rust_decimal::prelude::FromPrimitive;
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::{
     config::{LiveOrderType, PolymarketSignatureType, RuntimeConfig},
@@ -46,6 +46,23 @@ impl LiveTradeExecutor {
         let clob_config = Config::builder().use_server_time(true).build();
         let client = Client::new(&config.clob_api_url, clob_config)
             .with_context(|| format!("create CLOB client for {}", config.clob_api_url))?;
+        let geoblock = client
+            .check_geoblock()
+            .await
+            .context("check Polymarket geoblock status")?;
+        if geoblock.blocked {
+            bail!(
+                "Polymarket order placement is geoblocked from country={}, region={}",
+                geoblock.country,
+                geoblock.region
+            );
+        }
+        info!(
+            country = geoblock.country,
+            region = geoblock.region,
+            "Polymarket geoblock check passed"
+        );
+
         let mut auth = client
             .authentication_builder(&signer)
             .signature_type(map_signature_type(config.polymarket_signature_type));
@@ -71,6 +88,39 @@ impl LiveTradeExecutor {
             .context("check CLOB closed-only mode")?;
         if closed_only.closed_only {
             bail!("Polymarket account is in closed-only mode");
+        }
+
+        let collateral_request = BalanceAllowanceRequest::builder()
+            .asset_type(AssetType::Collateral)
+            .build();
+        if let Err(error) = client
+            .update_balance_allowance(collateral_request.clone())
+            .await
+        {
+            warn!(
+                error = %format!("{error:#}"),
+                "failed to refresh CLOB collateral balance allowance"
+            );
+        }
+        let collateral = client
+            .balance_allowance(collateral_request)
+            .await
+            .context("query CLOB collateral balance allowance")?;
+        let min_order_usdc =
+            Decimal::from_f64(config.min_order_usdc).context("convert min order USDC")?;
+        if collateral.balance < min_order_usdc || collateral.allowances.is_empty() {
+            warn!(
+                collateral_balance = %collateral.balance,
+                allowance_count = collateral.allowances.len(),
+                min_order_usdc = %min_order_usdc,
+                "live trading account may not be able to place orders"
+            );
+        } else {
+            info!(
+                collateral_balance = %collateral.balance,
+                allowance_count = collateral.allowances.len(),
+                "live trading account balance allowance loaded"
+            );
         }
 
         info!(

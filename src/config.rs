@@ -5,7 +5,7 @@ use anyhow::{Result, bail};
 use crate::domain::asset::{Asset, DEFAULT_ASSET_WHITELIST};
 
 pub const DEFAULT_GAMMA_BASE_URL: &str = "https://gamma-api.polymarket.com";
-pub const DEFAULT_CLOB_API_URL: &str = "https://clob-v2.polymarket.com";
+pub const DEFAULT_CLOB_API_URL: &str = "https://clob.polymarket.com";
 pub const DEFAULT_CLOB_MARKET_WS_URL: &str = "wss://ws-subscriptions-clob.polymarket.com/ws/market";
 pub const DEFAULT_RTDS_WS_URL: &str = "wss://ws-live-data.polymarket.com";
 pub const DEFAULT_PRICE_STALE_AFTER_MS: u64 = 20_000;
@@ -39,6 +39,7 @@ pub struct RuntimeConfig {
     pub price_stale_after: Duration,
     pub orderbook_stale_after: Duration,
     pub min_abs_d_bps: f64,
+    pub telegram_enabled: bool,
     pub telegram_bot_token: Option<String>,
     pub telegram_chat_id: Option<String>,
 }
@@ -82,6 +83,7 @@ impl RuntimeConfig {
                 DEFAULT_ORDERBOOK_STALE_AFTER_MS,
             )?),
             min_abs_d_bps: f64_env("WIGGLER_MIN_ABS_D_BPS", DEFAULT_MIN_ABS_D_BPS)?,
+            telegram_enabled: bool_env("WIGGLER_TELEGRAM_ENABLED", true)?,
             telegram_bot_token: non_empty_env("TELEGRAM_BOT_TOKEN"),
             telegram_chat_id: non_empty_env("TELEGRAM_CHAT_ID"),
         };
@@ -90,7 +92,9 @@ impl RuntimeConfig {
     }
 
     pub fn telegram_is_configured(&self) -> bool {
-        self.telegram_bot_token.is_some() && self.telegram_chat_id.is_some()
+        self.telegram_enabled
+            && self.telegram_bot_token.is_some()
+            && self.telegram_chat_id.is_some()
     }
 
     fn validate(&self) -> Result<()> {

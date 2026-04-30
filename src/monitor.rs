@@ -302,6 +302,7 @@ struct MonitorState {
     slot_lines: HashMap<String, SlotLine>,
     positioned_markets: HashSet<String>,
     pending_markets: HashSet<String>,
+    failed_order_markets: HashSet<String>,
     shadow_decision_markets: HashSet<String>,
     resolved_markets: HashSet<String>,
     initial_books_seen: HashSet<String>,
@@ -724,30 +725,34 @@ impl MonitorState {
         let already_positioned = self.positioned_markets.contains(&market.condition_id)
             || self.pending_markets.contains(&market.condition_id);
         let market_resolved = self.resolved_markets.contains(&market.condition_id);
-        let skip_reason = self.trade_skip_reason(
-            market.asset,
-            runtime,
-            remaining_sec,
-            line,
-            latest_tick,
-            price_age_ms,
-            price_exchange_age_ms,
-            d_bps,
-            abs_d_bps_f64,
-            side_leading,
-            token,
-            book,
-            book_age_ms,
-            vol_bps_per_sqrt_min,
-            cell,
-            path_state.as_ref(),
-            required_edge,
-            best_ask.as_ref(),
-            edge_summary.as_ref(),
-            already_positioned,
-            market_resolved,
-            config,
-        );
+        let skip_reason = if self.failed_order_markets.contains(&market.condition_id) {
+            Some("live_order_failed")
+        } else {
+            self.trade_skip_reason(
+                market.asset,
+                runtime,
+                remaining_sec,
+                line,
+                latest_tick,
+                price_age_ms,
+                price_exchange_age_ms,
+                d_bps,
+                abs_d_bps_f64,
+                side_leading,
+                token,
+                book,
+                book_age_ms,
+                vol_bps_per_sqrt_min,
+                cell,
+                path_state.as_ref(),
+                required_edge,
+                best_ask.as_ref(),
+                edge_summary.as_ref(),
+                already_positioned,
+                market_resolved,
+                config,
+            )
+        };
         let decision = if skip_reason.is_some() {
             "skip"
         } else {
@@ -871,6 +876,7 @@ impl MonitorState {
     ) {
         if self.pending_markets.contains(&market.condition_id)
             || self.positioned_markets.contains(&market.condition_id)
+            || self.failed_order_markets.contains(&market.condition_id)
         {
             return;
         }
@@ -981,6 +987,9 @@ impl MonitorState {
             Ok(response) => {
                 if response.success {
                     self.positioned_markets.insert(market.condition_id.clone());
+                } else {
+                    self.failed_order_markets
+                        .insert(market.condition_id.clone());
                 }
                 let decision = if response.has_fill() {
                     "filled"
@@ -1025,6 +1034,9 @@ impl MonitorState {
                 }
             }
             Err(error) => {
+                self.failed_order_markets
+                    .insert(market.condition_id.clone());
+                let error_chain = format!("{error:#}");
                 warn!(
                     event = "live_order_error",
                     timestamp = %Utc::now().to_rfc3339(),
@@ -1032,7 +1044,7 @@ impl MonitorState {
                     slug = market.slug,
                     condition_id = market.condition_id,
                     decision = "rejected",
-                    error = %error,
+                    error = %error_chain,
                     "live order failed"
                 );
                 if let Err(telegram_error) = telegram
@@ -1040,7 +1052,7 @@ impl MonitorState {
                         "LIVE order failed {}/{}: {}",
                         request.asset,
                         request.outcome_label(),
-                        error
+                        error_chain
                     ))
                     .await
                 {
@@ -2063,7 +2075,7 @@ mod tests {
     fn test_config(live_trading: bool) -> RuntimeConfig {
         RuntimeConfig {
             gamma_base_url: "https://gamma-api.polymarket.com".to_string(),
-            clob_api_url: "https://clob-v2.polymarket.com".to_string(),
+            clob_api_url: "https://clob.polymarket.com".to_string(),
             clob_market_ws_url: "wss://ws-subscriptions-clob.polymarket.com/ws/market".to_string(),
             rtds_ws_url: "wss://ws-live-data.polymarket.com".to_string(),
             live_trading,
@@ -2083,6 +2095,7 @@ mod tests {
             price_stale_after: Duration::from_millis(20_000),
             orderbook_stale_after: Duration::from_millis(10_000),
             min_abs_d_bps: 0.01,
+            telegram_enabled: true,
             telegram_bot_token: None,
             telegram_chat_id: None,
         }

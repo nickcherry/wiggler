@@ -20,7 +20,7 @@ Environment=WIGGLER_LIVE_TRADING=false
 Environment=WIGGLER_LIVE_ORDER_TYPE=fak
 Environment=WIGGLER_EVALUATION_INTERVAL_MS=1000
 Environment=WIGGLER_MAX_ORDER_USDC=25
-Environment=POLYMARKET_CLOB_API_URL=https://clob-v2.polymarket.com
+Environment=POLYMARKET_CLOB_API_URL=https://clob.polymarket.com
 
 StandardOutput=journal
 StandardError=journal

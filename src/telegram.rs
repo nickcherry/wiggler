@@ -13,10 +13,19 @@ pub struct TelegramClient {
 
 impl TelegramClient {
     pub fn from_config(config: &RuntimeConfig) -> Self {
+        let (bot_token, chat_id) = if config.telegram_is_configured() {
+            (
+                config.telegram_bot_token.clone(),
+                config.telegram_chat_id.clone(),
+            )
+        } else {
+            (None, None)
+        };
+
         Self {
             http: Client::new(),
-            bot_token: config.telegram_bot_token.clone(),
-            chat_id: config.telegram_chat_id.clone(),
+            bot_token,
+            chat_id,
         }
     }
 

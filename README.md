@@ -79,7 +79,7 @@ cargo run -- monitor --runtime-bundle-dir runtime/wiggler-prod-v1
 | `WIGGLER_ORDERBOOK_STALE_AFTER_MS` | `10000` | Max orderbook age for an eligible evaluation |
 | `WIGGLER_MIN_ABS_D_BPS` | `0.01` | Dust threshold around the market line |
 | `POLYMARKET_GAMMA_BASE_URL` | `https://gamma-api.polymarket.com` | Market discovery |
-| `POLYMARKET_CLOB_API_URL` | `https://clob-v2.polymarket.com` | CLOB trading/auth API |
+| `POLYMARKET_CLOB_API_URL` | `https://clob.polymarket.com` | CLOB trading/auth API |
 | `POLYMARKET_CLOB_MARKET_WS_URL` | `wss://ws-subscriptions-clob.polymarket.com/ws/market` | Orderbook websocket |
 | `POLYMARKET_RTDS_WS_URL` | `wss://ws-live-data.polymarket.com` | Chainlink/Binance crypto price websocket |
 | `POLYMARKET_PRIVATE_KEY` | unset | Required for live order signing |
@@ -87,6 +87,7 @@ cargo run -- monitor --runtime-bundle-dir runtime/wiggler-prod-v1
 | `POLYMARKET_FUNDER_ADDRESS` | unset | Optional explicit funded Polymarket wallet address |
 | `POLYMARKET_API_KEY` / `POLYMARKET_API_SECRET` / `POLYMARKET_API_PASSPHRASE` | unset | Optional L2 API credentials; SDK derives/creates credentials when unset |
 | `POLYMARKET_API_NONCE` | unset | Optional nonce for API key derivation/creation |
+| `WIGGLER_TELEGRAM_ENABLED` | `true` | Set `false` to silence Telegram even when token/chat env vars are present |
 | `TELEGRAM_BOT_TOKEN` | unset | Optional notification sender |
 | `TELEGRAM_CHAT_ID` | unset | Optional notification target |
 
