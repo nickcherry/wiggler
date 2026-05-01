@@ -5,6 +5,7 @@ use anyhow::{Result, bail};
 use crate::domain::asset::{Asset, DEFAULT_ASSET_WHITELIST};
 
 pub const DEFAULT_GAMMA_BASE_URL: &str = "https://gamma-api.polymarket.com";
+pub const DEFAULT_DATA_API_BASE_URL: &str = "https://data-api.polymarket.com";
 pub const DEFAULT_CLOB_API_URL: &str = "https://clob.polymarket.com";
 pub const DEFAULT_CLOB_MARKET_WS_URL: &str = "wss://ws-subscriptions-clob.polymarket.com/ws/market";
 pub const DEFAULT_RTDS_WS_URL: &str = "wss://ws-live-data.polymarket.com";
@@ -21,6 +22,7 @@ pub const DEFAULT_TELEGRAM_PNL_INTERVAL_SECS: u64 = 15 * 60;
 #[derive(Clone)]
 pub struct RuntimeConfig {
     pub gamma_base_url: String,
+    pub data_api_base_url: String,
     pub clob_api_url: String,
     pub clob_market_ws_url: String,
     pub rtds_ws_url: String,
@@ -52,6 +54,10 @@ impl RuntimeConfig {
     pub fn from_env() -> Result<Self> {
         let config = Self {
             gamma_base_url: env_or_default("POLYMARKET_GAMMA_BASE_URL", DEFAULT_GAMMA_BASE_URL),
+            data_api_base_url: env_or_default(
+                "POLYMARKET_DATA_API_BASE_URL",
+                DEFAULT_DATA_API_BASE_URL,
+            ),
             clob_api_url: env_or_default("POLYMARKET_CLOB_API_URL", DEFAULT_CLOB_API_URL),
             clob_market_ws_url: env_or_default(
                 "POLYMARKET_CLOB_MARKET_WS_URL",

@@ -23,11 +23,16 @@ When configured, the monitor sends Telegram messages for:
 - live order intent
 - live order response
 - live order error
-- live closeout with running recorded live PnL
-- periodic recorded live PnL summary
+- live closeout with Polymarket account PnL plus local trade-record PnL
+- periodic Polymarket account PnL plus local trade-record PnL summary
 
 FAK/FOK no-fill errors are reported as no-fill events, but they do not block
 the monitor from looking for another entry in the same market.
+
+Polymarket account PnL is fetched from the public profile/leaderboard data API
+using `POLYMARKET_FUNDER_ADDRESS`. The local trade-record ledger is still shown
+because it is useful for debugging exact bot closeouts, but it is not the
+source of truth for the account/profile PnL.
 
 ## Message Content
 

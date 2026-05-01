@@ -8,6 +8,7 @@ use std::{
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, TimeDelta, Utc};
 use rust_decimal::{Decimal, prelude::ToPrimitive};
+use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::{sync::mpsc, task::JoinHandle, time};
 use tracing::{debug, info, warn};
@@ -46,6 +47,7 @@ pub async fn run(args: MonitorArgs, config: RuntimeConfig) -> Result<()> {
         )
     })?;
     let telegram = TelegramClient::from_config(&config);
+    let account_pnl = AccountPnlClient::from_config(&config);
     let live_executor = if config.live_trading {
         match LiveTradeExecutor::from_config(&config).await {
             Ok(executor) => Some(executor),
@@ -173,7 +175,8 @@ pub async fn run(args: MonitorArgs, config: RuntimeConfig) -> Result<()> {
                 state.log_status();
             }
             _ = optional_interval_tick(&mut pnl_interval) => {
-                let message = state.pnl_summary_text();
+                let account_snapshot = account_pnl.fetch().await;
+                let message = state.pnl_summary_text(account_snapshot.as_ref());
                 if let Err(error) = telegram.send_message(&message).await {
                     warn!(error = %error, "failed to send Telegram PnL summary");
                 }
@@ -188,8 +191,13 @@ pub async fn run(args: MonitorArgs, config: RuntimeConfig) -> Result<()> {
             }
             Some(tick) = price_rx.recv() => {
                 let closeouts = state.apply_price_tick(tick);
+                let account_snapshot = if closeouts.iter().any(|closeout| closeout.mode == TradeMode::Live) {
+                    account_pnl.fetch().await
+                } else {
+                    None
+                };
                 for closeout in closeouts {
-                    if let Err(error) = telegram.send_message(&closeout.telegram_text(state.pnl_stats())).await {
+                    if let Err(error) = telegram.send_message(&closeout.telegram_text(state.pnl_stats(), account_snapshot.as_ref())).await {
                         warn!(error = %error, slug = closeout.slug, "failed to send trade closeout Telegram message");
                     }
                 }
@@ -347,6 +355,179 @@ struct SlotLine {
     observed_at: DateTime<Utc>,
 }
 
+#[derive(Clone)]
+struct AccountPnlClient {
+    http: reqwest::Client,
+    data_api_base_url: String,
+    user: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+struct AccountPnlSnapshot {
+    profile_pnl_usdc: f64,
+    volume_usdc: Option<f64>,
+    positions_value_usdc: Option<f64>,
+    positions_cash_pnl_usdc: Option<f64>,
+}
+
+impl AccountPnlClient {
+    fn from_config(config: &RuntimeConfig) -> Self {
+        Self {
+            http: reqwest::Client::builder()
+                .user_agent("wiggler/1.0 account-pnl")
+                .build()
+                .unwrap_or_else(|_| reqwest::Client::new()),
+            data_api_base_url: config.data_api_base_url.trim_end_matches('/').to_string(),
+            user: config
+                .polymarket_funder_address
+                .as_ref()
+                .map(|address| address.to_ascii_lowercase()),
+        }
+    }
+
+    async fn fetch(&self) -> Option<AccountPnlSnapshot> {
+        let Some(user) = self.user.as_deref() else {
+            return None;
+        };
+        match self.fetch_user(user).await {
+            Ok(snapshot) => Some(snapshot),
+            Err(error) => {
+                warn!(
+                    error = %error,
+                    user,
+                    "failed to fetch Polymarket account PnL snapshot"
+                );
+                None
+            }
+        }
+    }
+
+    async fn fetch_user(&self, user: &str) -> Result<AccountPnlSnapshot> {
+        let leaderboard_url = format!("{}/v1/leaderboard", self.data_api_base_url);
+        let leaderboard = self
+            .http
+            .get(&leaderboard_url)
+            .query(&[
+                ("timePeriod", "all"),
+                ("orderBy", "VOL"),
+                ("limit", "1"),
+                ("offset", "0"),
+                ("category", "overall"),
+                ("user", user),
+            ])
+            .send()
+            .await
+            .context("request Polymarket leaderboard PnL")?
+            .error_for_status()
+            .context("Polymarket leaderboard PnL status")?
+            .json::<Vec<LeaderboardPnlRow>>()
+            .await
+            .context("parse Polymarket leaderboard PnL")?;
+        let row = leaderboard
+            .into_iter()
+            .next()
+            .context("Polymarket leaderboard returned no user row")?;
+
+        let positions_value_usdc = self.fetch_positions_value(user).await;
+        let positions_cash_pnl_usdc = self.fetch_positions_cash_pnl(user).await;
+
+        Ok(AccountPnlSnapshot {
+            profile_pnl_usdc: row.pnl.unwrap_or(0.0),
+            volume_usdc: row.vol,
+            positions_value_usdc,
+            positions_cash_pnl_usdc,
+        })
+    }
+
+    async fn fetch_positions_value(&self, user: &str) -> Option<f64> {
+        let value_url = format!("{}/value", self.data_api_base_url);
+        match self
+            .http
+            .get(value_url)
+            .query(&[("user", user)])
+            .send()
+            .await
+            .and_then(reqwest::Response::error_for_status)
+        {
+            Ok(response) => match response.json::<Vec<PositionValueRow>>().await {
+                Ok(rows) => rows.first().and_then(|row| row.value),
+                Err(error) => {
+                    warn!(error = %error, "failed to parse Polymarket position value");
+                    None
+                }
+            },
+            Err(error) => {
+                warn!(error = %error, "failed to fetch Polymarket position value");
+                None
+            }
+        }
+    }
+
+    async fn fetch_positions_cash_pnl(&self, user: &str) -> Option<f64> {
+        let positions_url = format!("{}/positions", self.data_api_base_url);
+        match self
+            .http
+            .get(positions_url)
+            .query(&[("user", user), ("limit", "500"), ("sizeThreshold", "0")])
+            .send()
+            .await
+            .and_then(reqwest::Response::error_for_status)
+        {
+            Ok(response) => match response.json::<Vec<PositionPnlRow>>().await {
+                Ok(rows) => Some(rows.iter().filter_map(|row| row.cash_pnl).sum()),
+                Err(error) => {
+                    warn!(error = %error, "failed to parse Polymarket position PnL");
+                    None
+                }
+            },
+            Err(error) => {
+                warn!(error = %error, "failed to fetch Polymarket position PnL");
+                None
+            }
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct LeaderboardPnlRow {
+    pnl: Option<f64>,
+    vol: Option<f64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PositionValueRow {
+    value: Option<f64>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PositionPnlRow {
+    cash_pnl: Option<f64>,
+}
+
+fn account_pnl_line(snapshot: Option<&AccountPnlSnapshot>) -> String {
+    let Some(snapshot) = snapshot else {
+        return "Polymarket account P/L: unavailable; local trade-record P/L below".to_string();
+    };
+    let mut line = format!(
+        "Polymarket account P/L: {} all-time",
+        format_signed_usdc(snapshot.profile_pnl_usdc)
+    );
+    if let Some(value) = snapshot.positions_value_usdc {
+        line.push_str(&format!("; positions value {}", format_usdc(value)));
+    }
+    if let Some(cash_pnl) = snapshot.positions_cash_pnl_usdc {
+        line.push_str(&format!(
+            "; current positions P/L {}",
+            format_signed_usdc(cash_pnl)
+        ));
+    }
+    if let Some(volume) = snapshot.volume_usdc {
+        line.push_str(&format!("; volume {}", format_usdc(volume)));
+    }
+    line
+}
+
 #[derive(Default)]
 struct MonitorState {
     markets_by_slug: HashMap<String, MonitoredMarket>,
@@ -384,13 +565,15 @@ impl MonitorState {
         &self.pnl_stats
     }
 
-    fn pnl_summary_text(&mut self) -> String {
+    fn pnl_summary_text(&mut self, account_snapshot: Option<&AccountPnlSnapshot>) -> String {
         let total = self.pnl_stats;
         let delta = total.diff(self.last_pnl_summary);
         self.last_pnl_summary = total;
         let (open_count, open_amount) = self.open_live_position_summary();
+        let account_line = account_pnl_line(account_snapshot);
         format!(
-            "Wiggler PnL update\nTotal recorded live P/L: {} ({} closed, {} wins / {} losses{})\nSince last update: {} ({} closed, {} wins / {} losses{})\nOpen positions: {}{}",
+            "Wiggler PnL update\n{}\nLocal trade-record P/L: {} ({} closed, {} wins / {} losses{})\nSince last update: {} ({} closed, {} wins / {} losses{})\nOpen positions: {}{}",
+            account_line,
             format_signed_usdc(total.estimated_pnl_usdc),
             total.closed,
             total.wins,
@@ -1696,7 +1879,11 @@ impl PnlStats {
 }
 
 impl TradeCloseout {
-    fn telegram_text(&self, pnl_stats: &PnlStats) -> String {
+    fn telegram_text(
+        &self,
+        pnl_stats: &PnlStats,
+        account_snapshot: Option<&AccountPnlSnapshot>,
+    ) -> String {
         let status = match self.won {
             Some(true) => "won",
             Some(false) => "lost",
@@ -1708,7 +1895,7 @@ impl TradeCloseout {
             _ => "Estimated P/L: flat/unknown".to_string(),
         };
         format!(
-            "{} closeout: {} {} {}\nTarget: {}\nClose: {}\nBet: {}\n{}\nRunning live P/L: {} ({} closed, {} wins / {} losses{})",
+            "{} closeout: {} {} {}\nTarget: {}\nClose: {}\nBet: {}\n{}\n{}\nLocal trade-record P/L: {} ({} closed, {} wins / {} losses{})",
             match self.mode {
                 TradeMode::Live => "Live",
                 TradeMode::Shadow => "Shadow",
@@ -1720,6 +1907,7 @@ impl TradeCloseout {
             format_market_price(self.asset, self.close_price),
             format_usdc(self.amount_usdc),
             pnl,
+            account_pnl_line(account_snapshot),
             format_signed_usdc(pnl_stats.estimated_pnl_usdc),
             pnl_stats.closed,
             pnl_stats.wins,
@@ -2429,9 +2617,10 @@ mod tests {
     };
 
     use super::{
-        MarketPricePath, MonitorState, PathState, PreparedTrade, SlotLine, asset_ids_for_markets,
-        distance_bps, is_retryable_no_fill_error, pnl_from_trade_record,
-        pre_submit_matches_initial, required_edge_probability, summarize_asks,
+        AccountPnlSnapshot, MarketPricePath, MonitorState, PathState, PreparedTrade, SlotLine,
+        account_pnl_line, asset_ids_for_markets, distance_bps, is_retryable_no_fill_error,
+        pnl_from_trade_record, pre_submit_matches_initial, required_edge_probability,
+        summarize_asks,
     };
 
     #[test]
@@ -2983,6 +3172,31 @@ mod tests {
         assert!((pnl - 7.85).abs() < 0.000001);
     }
 
+    #[test]
+    fn account_pnl_line_prefers_profile_snapshot() {
+        let snapshot = AccountPnlSnapshot {
+            profile_pnl_usdc: 12.34,
+            volume_usdc: Some(100.0),
+            positions_value_usdc: Some(5.67),
+            positions_cash_pnl_usdc: Some(-8.9),
+        };
+
+        let line = account_pnl_line(Some(&snapshot));
+
+        assert!(line.contains("Polymarket account P/L: +$12.34 all-time"));
+        assert!(line.contains("positions value $5.67"));
+        assert!(line.contains("current positions P/L -$8.90"));
+        assert!(line.contains("volume $100.00"));
+    }
+
+    #[test]
+    fn account_pnl_line_falls_back_when_unavailable() {
+        assert_eq!(
+            account_pnl_line(None),
+            "Polymarket account P/L: unavailable; local trade-record P/L below"
+        );
+    }
+
     fn market_with_tokens(asset_ids: Vec<&str>) -> MonitoredMarket {
         MonitoredMarket {
             asset: Asset::Btc,
@@ -3048,6 +3262,7 @@ mod tests {
     fn test_config(live_trading: bool) -> RuntimeConfig {
         RuntimeConfig {
             gamma_base_url: "https://gamma-api.polymarket.com".to_string(),
+            data_api_base_url: "https://data-api.polymarket.com".to_string(),
             clob_api_url: "https://clob.polymarket.com".to_string(),
             clob_market_ws_url: "wss://ws-subscriptions-clob.polymarket.com/ws/market".to_string(),
             rtds_ws_url: "wss://ws-live-data.polymarket.com".to_string(),
