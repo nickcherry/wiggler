@@ -1,12 +1,14 @@
 use std::{
     collections::{HashMap, HashSet, VecDeque},
-    future,
+    fs, future,
+    path::{Path, PathBuf},
     time::Duration,
 };
 
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, TimeDelta, Utc};
 use rust_decimal::{Decimal, prelude::ToPrimitive};
+use serde_json::{Value, json};
 use tokio::{sync::mpsc, task::JoinHandle, time};
 use tracing::{debug, info, warn};
 
@@ -26,7 +28,7 @@ use crate::{
     },
     runtime::{AssetRuntime, PriceHistory, RuntimeBundle, RuntimeCell, SideLeading},
     telegram::TelegramClient,
-    trading::executor::{LiveOrderRequest, LiveTradeExecutor},
+    trading::executor::{LiveOrderRequest, LiveOrderResponse, LiveTradeExecutor},
 };
 
 pub async fn run(args: MonitorArgs, config: RuntimeConfig) -> Result<()> {
@@ -155,7 +157,12 @@ pub async fn run(args: MonitorArgs, config: RuntimeConfig) -> Result<()> {
                 ).await;
             }
             Some(tick) = price_rx.recv() => {
-                state.apply_price_tick(tick);
+                let closeouts = state.apply_price_tick(tick);
+                for closeout in closeouts {
+                    if let Err(error) = telegram.send_message(&closeout.telegram_text()).await {
+                        warn!(error = %error, slug = closeout.slug, "failed to send trade closeout Telegram message");
+                    }
+                }
             }
             Some(event) = market_rx.recv() => {
                 state.apply_market_event(event);
@@ -304,6 +311,7 @@ struct MonitorState {
     pending_markets: HashSet<String>,
     failed_order_markets: HashSet<String>,
     shadow_decision_markets: HashSet<String>,
+    tracked_entries: HashMap<String, TrackedEntry>,
     resolved_markets: HashSet<String>,
     initial_books_seen: HashSet<String>,
     event_counts: EventCounts,
@@ -349,7 +357,7 @@ impl MonitorState {
         self.books.retain_only(&active_asset_ids);
     }
 
-    fn apply_price_tick(&mut self, tick: PriceTick) {
+    fn apply_price_tick(&mut self, tick: PriceTick) -> Vec<TradeCloseout> {
         self.price_history
             .entry(tick.asset)
             .or_default()
@@ -388,6 +396,7 @@ impl MonitorState {
 
         self.record_market_price_paths(&tick);
         self.latest_prices.insert(tick.asset, tick);
+        self.close_tracked_entries()
     }
 
     fn record_market_price_paths(&mut self, tick: &PriceTick) {
@@ -642,9 +651,14 @@ impl MonitorState {
             } else if self
                 .shadow_decision_markets
                 .insert(market.condition_id.clone())
-                && let Err(error) = telegram.send_message(&prepared.telegram_text(false)).await
             {
-                warn!(error = %error, slug = market.slug, "failed to send shadow trade Telegram message");
+                self.record_trade_entry(config, market, &prepared, TradeMode::Shadow, true, false);
+                if let Err(error) = telegram
+                    .send_message(&prepared.telegram_text(TradeMode::Shadow))
+                    .await
+                {
+                    warn!(error = %error, slug = market.slug, "failed to send shadow trade Telegram message");
+                }
             }
         }
     }
@@ -840,6 +854,8 @@ impl MonitorState {
 
         let runtime = runtime?;
         let token = token?;
+        let line = line?;
+        let latest_tick = latest_tick?;
         let edge_summary = edge_summary.as_ref()?;
         let max_price = edge_summary.max_acceptable_price?;
         let amount_usdc = edge_summary
@@ -849,6 +865,13 @@ impl MonitorState {
         if amount_usdc < config.min_order_usdc {
             return None;
         }
+        let best_ask_price = best_ask.as_ref().and_then(|level| level.price.to_f64());
+        let best_ask_size = best_ask.as_ref().and_then(|level| level.size.to_f64());
+        let expected_fill_price = edge_summary.weighted_avg_price.or(best_ask_price);
+        let estimated_payout_usdc = expected_fill_price
+            .filter(|price| *price > 0.0)
+            .map(|price| amount_usdc / price);
+        let estimated_profit_usdc = estimated_payout_usdc.map(|payout| payout - amount_usdc);
 
         Some(PreparedTrade {
             asset: market.asset,
@@ -858,10 +881,42 @@ impl MonitorState {
             outcome: token.outcome.clone(),
             amount_usdc,
             max_price,
+            line_price: line.price.to_f64()?,
+            current_price: latest_tick.value.to_f64()?,
+            line_observed_at: line.observed_at,
+            current_exchange_timestamp: latest_tick.exchange_timestamp,
+            current_received_at: latest_tick.received_at,
             remaining_sec,
             d_bps: d_bps.map(|value| value.round_dp(6).to_string()),
+            p_win: cell.map(|cell| cell.p_win),
             p_win_lower: cell.map(|cell| cell.p_win_lower),
             best_edge: edge_summary.best_edge,
+            best_ask: best_ask_price,
+            best_ask_size,
+            weighted_avg_price: edge_summary.weighted_avg_price,
+            best_fee: edge_summary.best_fee,
+            best_all_in_cost: edge_summary.best_all_in_cost,
+            positive_ev_depth_shares: edge_summary.positive_ev_depth_shares,
+            positive_ev_depth_usdc: edge_summary.positive_ev_depth_usdc,
+            expected_fill_price,
+            estimated_payout_usdc,
+            estimated_profit_usdc,
+            remaining_sec_bucket: remaining_bucket,
+            vol_bps_per_sqrt_min,
+            vol_bin: vol_bin.map(|bin| bin.as_str().to_string()),
+            matched_remaining_sec_bucket: cell.map(|cell| cell.remaining_sec),
+            matched_abs_d_bps_min: cell.map(|cell| cell.abs_d_bps_min),
+            matched_abs_d_bps_max: cell.and_then(|cell| cell.abs_d_bps_max),
+            cell_sample_count: cell.map(|cell| cell.sample_count),
+            return_last_60s_bps: path_state.as_ref().map(|state| state.return_last_60s_bps),
+            retracing_60s: path_state.as_ref().map(|state| state.retracing_60s),
+            max_abs_d_bps_so_far: path_state.as_ref().map(|state| state.max_abs_d_bps_so_far),
+            lead_decay_ratio: path_state.as_ref().map(|state| state.lead_decay_ratio),
+            edge_penalty_applied,
+            runtime_config_hash: Some(runtime.runtime_config_hash().to_string()),
+            source_config_hash: Some(runtime.source_config_hash().to_string()),
+            training_input_hash: Some(runtime.training_input_hash().to_string()),
+            training_label_source_kind: runtime.training_label_source_kind().map(str::to_string),
         })
     }
 
@@ -953,7 +1008,11 @@ impl MonitorState {
         }
 
         self.pending_markets.insert(market.condition_id.clone());
-        if let Err(error) = telegram.send_message(&prepared.telegram_text(true)).await {
+        self.record_trade_entry(config, market, &prepared, TradeMode::Live, false, false);
+        if let Err(error) = telegram
+            .send_message(&prepared.telegram_text(TradeMode::Live))
+            .await
+        {
             warn!(error = %error, slug = market.slug, "failed to send live intent Telegram message");
         }
 
@@ -991,6 +1050,7 @@ impl MonitorState {
                     self.failed_order_markets
                         .insert(market.condition_id.clone());
                 }
+                self.record_live_response(&market.condition_id, &response);
                 let decision = if response.has_fill() {
                     "filled"
                 } else if response.success {
@@ -1019,15 +1079,7 @@ impl MonitorState {
                     "live order response"
                 );
                 if let Err(error) = telegram
-                    .send_message(&format!(
-                        "LIVE order response {}/{} status={} success={} order={} fills={}",
-                        request.asset,
-                        request.outcome_label(),
-                        response.status,
-                        response.success,
-                        response.order_id,
-                        response.trade_ids.len()
-                    ))
+                    .send_message(&live_response_text(&request, &response))
                     .await
                 {
                     warn!(error = %error, slug = market.slug, "failed to send live response Telegram message");
@@ -1037,6 +1089,7 @@ impl MonitorState {
                 self.failed_order_markets
                     .insert(market.condition_id.clone());
                 let error_chain = format!("{error:#}");
+                self.record_live_error(&market.condition_id, &error_chain);
                 warn!(
                     event = "live_order_error",
                     timestamp = %Utc::now().to_rfc3339(),
@@ -1203,6 +1256,141 @@ impl MonitorState {
         self.books.book(&token.asset_id)
     }
 
+    fn record_trade_entry(
+        &mut self,
+        config: &RuntimeConfig,
+        market: &MonitoredMarket,
+        prepared: &PreparedTrade,
+        mode: TradeMode,
+        track_closeout: bool,
+        notify_closeout: bool,
+    ) {
+        let attempted_at = Utc::now();
+        let record_path = trade_record_path(&config.trade_record_dir, attempted_at, mode, prepared);
+        let mut record = trade_entry_record_json(mode, market, prepared, attempted_at);
+        record["record_path"] = json!(record_path.display().to_string());
+        if let Err(error) = write_json_record(&record_path, &record) {
+            warn!(
+                error = %error,
+                path = %record_path.display(),
+                slug = market.slug,
+                "failed to write trade entry record"
+            );
+        }
+        self.tracked_entries.insert(
+            market.condition_id.clone(),
+            TrackedEntry {
+                mode,
+                prepared: prepared.clone(),
+                slot_start: market.slot.start(),
+                slot_end: market.slot.end(),
+                record_path: Some(record_path),
+                record,
+                track_closeout,
+                notify_closeout,
+                closeout_sent: false,
+            },
+        );
+    }
+
+    fn record_live_response(&mut self, condition_id: &str, response: &LiveOrderResponse) {
+        let Some(entry) = self.tracked_entries.get_mut(condition_id) else {
+            return;
+        };
+        entry.track_closeout = response.has_fill();
+        entry.notify_closeout = response.has_fill();
+        entry.record["order_response"] = json!({
+            "received_at": Utc::now().to_rfc3339(),
+            "order_id": response.order_id.as_str(),
+            "status": response.status.as_str(),
+            "success": response.success,
+            "error_msg": response.error_msg.as_deref(),
+            "making_amount": response.making_amount.as_str(),
+            "taking_amount": response.taking_amount.as_str(),
+            "trade_ids": &response.trade_ids,
+            "has_fill": response.has_fill(),
+        });
+        entry.record["state"] = json!(if response.has_fill() {
+            "filled"
+        } else if response.success {
+            "submitted"
+        } else {
+            "rejected"
+        });
+        entry.write_record();
+    }
+
+    fn record_live_error(&mut self, condition_id: &str, error: &str) {
+        let Some(entry) = self.tracked_entries.get_mut(condition_id) else {
+            return;
+        };
+        entry.track_closeout = false;
+        entry.notify_closeout = false;
+        entry.record["order_error"] = json!({
+            "received_at": Utc::now().to_rfc3339(),
+            "error": error,
+        });
+        entry.record["state"] = json!("error");
+        entry.write_record();
+    }
+
+    fn close_tracked_entries(&mut self) -> Vec<TradeCloseout> {
+        let mut closeouts = Vec::new();
+        for entry in self.tracked_entries.values_mut() {
+            if entry.closeout_sent || !entry.track_closeout {
+                continue;
+            }
+            let Some(tick) = self.latest_prices.get(&entry.prepared.asset) else {
+                continue;
+            };
+            if tick.exchange_timestamp < entry.slot_end {
+                continue;
+            }
+            let Some(close_price) = tick.value.to_f64() else {
+                continue;
+            };
+            let won = closeout_won(
+                &entry.prepared.outcome,
+                close_price,
+                entry.prepared.line_price,
+            );
+            let estimated_pnl = closeout_estimated_pnl(
+                entry.prepared.amount_usdc,
+                entry.prepared.estimated_profit_usdc,
+                won,
+            );
+            entry.closeout_sent = true;
+            entry.record["closeout"] = json!({
+                "closed_at": Utc::now().to_rfc3339(),
+                "price_timestamp": tick.exchange_timestamp,
+                "price_received_at": tick.received_at,
+                "slot_start": entry.slot_start,
+                "slot_end": entry.slot_end,
+                "close_price": close_price,
+                "line_price": entry.prepared.line_price,
+                "outcome": outcome_label(&entry.prepared.outcome),
+                "won": won,
+                "estimated_pnl_usdc": estimated_pnl,
+            });
+            entry.record["state"] = json!("closed");
+            entry.write_record();
+            if entry.notify_closeout {
+                closeouts.push(TradeCloseout {
+                    mode: entry.mode,
+                    asset: entry.prepared.asset,
+                    slug: entry.prepared.slug.clone(),
+                    outcome: entry.prepared.outcome.clone(),
+                    line_price: entry.prepared.line_price,
+                    close_price,
+                    amount_usdc: entry.prepared.amount_usdc,
+                    estimated_profit_usdc: entry.prepared.estimated_profit_usdc,
+                    won,
+                });
+            }
+        }
+        closeouts
+    }
+
     fn is_watched_condition(&self, condition_id: &str) -> bool {
         self.markets_by_slug
             .values()
@@ -1226,6 +1414,227 @@ struct EventCounts {
     unknown: u64,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TradeMode {
+    Live,
+    Shadow,
+}
+
+impl TradeMode {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Live => "live",
+            Self::Shadow => "shadow",
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct TrackedEntry {
+    mode: TradeMode,
+    prepared: PreparedTrade,
+    slot_start: DateTime<Utc>,
+    slot_end: DateTime<Utc>,
+    record_path: Option<PathBuf>,
+    record: Value,
+    track_closeout: bool,
+    notify_closeout: bool,
+    closeout_sent: bool,
+}
+
+#[derive(Clone, Debug)]
+struct TradeCloseout {
+    mode: TradeMode,
+    asset: Asset,
+    slug: String,
+    outcome: Outcome,
+    line_price: f64,
+    close_price: f64,
+    amount_usdc: f64,
+    estimated_profit_usdc: Option<f64>,
+    won: Option<bool>,
+}
+
+impl TradeCloseout {
+    fn telegram_text(&self) -> String {
+        let status = match self.won {
+            Some(true) => "won",
+            Some(false) => "lost",
+            None => "tied",
+        };
+        let pnl = match (self.won, self.estimated_profit_usdc) {
+            (Some(true), Some(profit)) => format!("Estimated P/L: +{}", format_usdc(profit)),
+            (Some(false), _) => format!("Estimated P/L: -{}", format_usdc(self.amount_usdc)),
+            _ => "Estimated P/L: flat/unknown".to_string(),
+        };
+        format!(
+            "{} closeout: {} {} {}\nTarget: {}\nClose: {}\nBet: {}\n{}",
+            match self.mode {
+                TradeMode::Live => "Live",
+                TradeMode::Shadow => "Shadow",
+            },
+            self.asset.to_string().to_ascii_uppercase(),
+            outcome_label(&self.outcome),
+            status,
+            format_market_price(self.asset, self.line_price),
+            format_market_price(self.asset, self.close_price),
+            format_usdc(self.amount_usdc),
+            pnl
+        )
+    }
+}
+
+impl TrackedEntry {
+    fn write_record(&self) {
+        let Some(record_path) = &self.record_path else {
+            return;
+        };
+        if let Err(error) = write_json_record(record_path, &self.record) {
+            warn!(
+                error = %error,
+                path = %record_path.display(),
+                slug = self.prepared.slug,
+                "failed to update trade record"
+            );
+        }
+    }
+}
+
+fn trade_record_path(
+    dir: &Path,
+    attempted_at: DateTime<Utc>,
+    mode: TradeMode,
+    prepared: &PreparedTrade,
+) -> PathBuf {
+    let condition = prepared
+        .condition_id
+        .trim_start_matches("0x")
+        .chars()
+        .take(10)
+        .collect::<String>();
+    let filename = format!(
+        "{}-{}-{}-{}-{}.json",
+        attempted_at.format("%Y%m%dT%H%M%S%.3fZ"),
+        mode.as_str(),
+        prepared.asset,
+        outcome_label(&prepared.outcome).to_ascii_lowercase(),
+        condition
+    );
+    dir.join(filename)
+}
+
+fn write_json_record(path: &Path, value: &Value) -> Result<()> {
+    let parent = path.parent().context("trade record path has no parent")?;
+    fs::create_dir_all(parent)
+        .with_context(|| format!("create trade record dir {}", parent.display()))?;
+    let bytes = serde_json::to_vec_pretty(value).context("serialize trade record")?;
+    let tmp_path = path.with_extension("json.tmp");
+    fs::write(&tmp_path, bytes)
+        .with_context(|| format!("write trade record temp file {}", tmp_path.display()))?;
+    fs::rename(&tmp_path, path)
+        .with_context(|| format!("rename trade record file {}", path.display()))?;
+    Ok(())
+}
+
+fn trade_entry_record_json(
+    mode: TradeMode,
+    market: &MonitoredMarket,
+    prepared: &PreparedTrade,
+    attempted_at: DateTime<Utc>,
+) -> Value {
+    json!({
+        "schema_version": 1,
+        "state": "attempting",
+        "mode": mode.as_str(),
+        "attempted_at": attempted_at,
+        "market": {
+            "asset": prepared.asset,
+            "event_id": market.event_id.as_str(),
+            "market_id": market.market_id.as_str(),
+            "slug": market.slug.as_str(),
+            "title": market.title.as_str(),
+            "condition_id": market.condition_id.as_str(),
+            "slot_start": market.slot.start(),
+            "slot_end": market.slot.end(),
+            "resolution_source": market.resolution_source.as_deref(),
+            "tokens": &market.tokens,
+        },
+        "entry": {
+            "outcome": outcome_label(&prepared.outcome),
+            "token_id": prepared.token_id.as_str(),
+            "amount_usdc": prepared.amount_usdc,
+            "max_order_price": prepared.max_price,
+            "expected_fill_price": prepared.expected_fill_price,
+            "estimated_payout_usdc": prepared.estimated_payout_usdc,
+            "estimated_profit_usdc": prepared.estimated_profit_usdc,
+        },
+        "prices": {
+            "line_price": prepared.line_price,
+            "line_observed_at": prepared.line_observed_at,
+            "current_price": prepared.current_price,
+            "current_exchange_timestamp": prepared.current_exchange_timestamp,
+            "current_received_at": prepared.current_received_at,
+            "d_bps": prepared.d_bps.as_deref(),
+            "remaining_sec": prepared.remaining_sec,
+            "remaining_sec_bucket": prepared.remaining_sec_bucket,
+        },
+        "edge": {
+            "p_win": prepared.p_win,
+            "p_win_lower": prepared.p_win_lower,
+            "best_edge": prepared.best_edge,
+            "best_ask": prepared.best_ask,
+            "best_ask_size": prepared.best_ask_size,
+            "best_fee": prepared.best_fee,
+            "best_all_in_cost": prepared.best_all_in_cost,
+            "weighted_avg_price": prepared.weighted_avg_price,
+            "positive_ev_depth_shares": prepared.positive_ev_depth_shares,
+            "positive_ev_depth_usdc": prepared.positive_ev_depth_usdc,
+        },
+        "runtime": {
+            "vol_bps_per_sqrt_min": prepared.vol_bps_per_sqrt_min,
+            "vol_bin": prepared.vol_bin.as_deref(),
+            "matched_remaining_sec_bucket": prepared.matched_remaining_sec_bucket,
+            "matched_abs_d_bps_min": prepared.matched_abs_d_bps_min,
+            "matched_abs_d_bps_max": prepared.matched_abs_d_bps_max,
+            "cell_sample_count": prepared.cell_sample_count,
+            "runtime_config_hash": prepared.runtime_config_hash.as_deref(),
+            "source_config_hash": prepared.source_config_hash.as_deref(),
+            "training_input_hash": prepared.training_input_hash.as_deref(),
+            "training_label_source_kind": prepared.training_label_source_kind.as_deref(),
+        },
+        "path": {
+            "return_last_60s_bps": prepared.return_last_60s_bps,
+            "retracing_60s": prepared.retracing_60s,
+            "max_abs_d_bps_so_far": prepared.max_abs_d_bps_so_far,
+            "lead_decay_ratio": prepared.lead_decay_ratio,
+            "edge_penalty_applied": prepared.edge_penalty_applied,
+        },
+    })
+}
+
+fn closeout_won(outcome: &Outcome, close_price: f64, line_price: f64) -> Option<bool> {
+    if (close_price - line_price).abs() <= f64::EPSILON {
+        return None;
+    }
+    match outcome {
+        Outcome::Up => Some(close_price > line_price),
+        Outcome::Down => Some(close_price < line_price),
+        Outcome::Other(_) => None,
+    }
+}
+
+fn closeout_estimated_pnl(
+    amount_usdc: f64,
+    estimated_profit_usdc: Option<f64>,
+    won: Option<bool>,
+) -> Option<f64> {
+    match won {
+        Some(true) => estimated_profit_usdc,
+        Some(false) => Some(-amount_usdc),
+        None => Some(0.0),
+    }
+}
+
 struct TokenContext<'a> {
     slug: &'a String,
     token: &'a OutcomeToken,
@@ -1240,35 +1649,72 @@ struct PreparedTrade {
     outcome: Outcome,
     amount_usdc: f64,
     max_price: f64,
+    line_price: f64,
+    current_price: f64,
+    line_observed_at: DateTime<Utc>,
+    current_exchange_timestamp: DateTime<Utc>,
+    current_received_at: DateTime<Utc>,
     remaining_sec: i64,
     d_bps: Option<String>,
+    p_win: Option<f64>,
     p_win_lower: Option<f64>,
     best_edge: Option<f64>,
+    best_ask: Option<f64>,
+    best_ask_size: Option<f64>,
+    weighted_avg_price: Option<f64>,
+    best_fee: Option<f64>,
+    best_all_in_cost: Option<f64>,
+    positive_ev_depth_shares: f64,
+    positive_ev_depth_usdc: f64,
+    expected_fill_price: Option<f64>,
+    estimated_payout_usdc: Option<f64>,
+    estimated_profit_usdc: Option<f64>,
+    remaining_sec_bucket: Option<u32>,
+    vol_bps_per_sqrt_min: Option<f64>,
+    vol_bin: Option<String>,
+    matched_remaining_sec_bucket: Option<u32>,
+    matched_abs_d_bps_min: Option<f64>,
+    matched_abs_d_bps_max: Option<f64>,
+    cell_sample_count: Option<u64>,
+    return_last_60s_bps: Option<f64>,
+    retracing_60s: Option<bool>,
+    max_abs_d_bps_so_far: Option<f64>,
+    lead_decay_ratio: Option<f64>,
+    edge_penalty_applied: bool,
+    runtime_config_hash: Option<String>,
+    source_config_hash: Option<String>,
+    training_input_hash: Option<String>,
+    training_label_source_kind: Option<String>,
 }
 
 impl PreparedTrade {
-    fn telegram_text(&self, live: bool) -> String {
-        let mode = if live {
-            "LIVE intent"
-        } else {
-            "SHADOW decision"
+    fn telegram_text(&self, mode: TradeMode) -> String {
+        let mode_label = match mode {
+            TradeMode::Live => "Live order",
+            TradeMode::Shadow => "Shadow trade",
         };
+        let win_text = self
+            .estimated_profit_usdc
+            .zip(self.estimated_payout_usdc)
+            .map(|(profit, payout)| {
+                format!(
+                    "If it wins: +{} profit ({} payout)",
+                    format_usdc(profit),
+                    format_usdc(payout)
+                )
+            })
+            .unwrap_or_else(|| "If it wins: payout estimate unavailable".to_string());
         format!(
-            "{} {} {} amount=${:.2} max_price={:.2} remaining={}s d_bps={} p_win_lower={} edge={} {}",
-            mode,
-            self.asset,
+            "{}: taking {} {}\nTarget: {}\nCurrent: {}\nBet: {} at up to {:.2}\nTime left: {}\n{}",
+            mode_label,
+            self.asset.to_string().to_ascii_uppercase(),
             outcome_label(&self.outcome),
-            self.amount_usdc,
+            format_market_price(self.asset, self.line_price),
+            format_market_price(self.asset, self.current_price),
+            format_usdc(self.amount_usdc),
             self.max_price,
-            self.remaining_sec,
-            self.d_bps.as_deref().unwrap_or("n/a"),
-            self.p_win_lower
-                .map(|value| format!("{value:.4}"))
-                .unwrap_or_else(|| "n/a".to_string()),
-            self.best_edge
-                .map(|value| format!("{value:.4}"))
-                .unwrap_or_else(|| "n/a".to_string()),
-            self.slug
+            format_remaining(self.remaining_sec),
+            win_text
         )
     }
 }
@@ -1278,6 +1724,58 @@ fn outcome_label(outcome: &Outcome) -> &'static str {
         Outcome::Up => "Up",
         Outcome::Down => "Down",
         Outcome::Other(_) => "Other",
+    }
+}
+
+fn format_usdc(value: f64) -> String {
+    format!("${value:.2}")
+}
+
+fn format_remaining(seconds: i64) -> String {
+    let seconds = seconds.max(0);
+    let minutes = seconds / 60;
+    let seconds = seconds % 60;
+    if minutes > 0 {
+        format!("{minutes}m {seconds:02}s")
+    } else {
+        format!("{seconds}s")
+    }
+}
+
+fn format_market_price(asset: Asset, value: f64) -> String {
+    match asset {
+        Asset::Btc | Asset::Eth => format!("${value:.2}"),
+        Asset::Sol => format!("${value:.4}"),
+        Asset::Xrp | Asset::Doge | Asset::Hype | Asset::Bnb => format!("${value:.6}"),
+    }
+}
+
+fn live_response_text(request: &LiveOrderRequest, response: &LiveOrderResponse) -> String {
+    if response.has_fill() {
+        format!(
+            "Live order filled: {} {}\nBet: {}\nOrder: {}\nFills: {}",
+            request.asset.to_string().to_ascii_uppercase(),
+            request.outcome_label(),
+            format_usdc(request.amount_usdc),
+            response.order_id,
+            response.trade_ids.len()
+        )
+    } else if response.success {
+        format!(
+            "Live order accepted but no fill yet: {} {}\nBet: {}\nOrder: {}",
+            request.asset.to_string().to_ascii_uppercase(),
+            request.outcome_label(),
+            format_usdc(request.amount_usdc),
+            response.order_id
+        )
+    } else {
+        format!(
+            "Live order rejected: {} {}\nBet: {}\nReason: {}",
+            request.asset.to_string().to_ascii_uppercase(),
+            request.outcome_label(),
+            format_usdc(request.amount_usdc),
+            response.error_msg.as_deref().unwrap_or("unknown")
+        )
     }
 }
 
@@ -2095,6 +2593,7 @@ mod tests {
             price_stale_after: Duration::from_millis(20_000),
             orderbook_stale_after: Duration::from_millis(10_000),
             min_abs_d_bps: 0.01,
+            trade_record_dir: std::path::PathBuf::from("trade-records"),
             telegram_enabled: true,
             telegram_bot_token: None,
             telegram_chat_id: None,
@@ -2102,6 +2601,7 @@ mod tests {
     }
 
     fn prepared_trade(outcome: Outcome, token_id: &str) -> PreparedTrade {
+        let now = Utc.with_ymd_and_hms(2026, 4, 30, 15, 52, 0).unwrap();
         PreparedTrade {
             asset: Asset::Btc,
             slug: "slug".to_string(),
@@ -2110,10 +2610,42 @@ mod tests {
             outcome,
             amount_usdc: 10.0,
             max_price: 0.8,
+            line_price: 67_000.0,
+            current_price: 67_010.0,
+            line_observed_at: now - TimeDelta::seconds(120),
+            current_exchange_timestamp: now,
+            current_received_at: now,
             remaining_sec: 120,
             d_bps: Some("1".to_string()),
+            p_win: Some(0.91),
             p_win_lower: Some(0.9),
             best_edge: Some(0.05),
+            best_ask: Some(0.75),
+            best_ask_size: Some(100.0),
+            weighted_avg_price: Some(0.8),
+            best_fee: Some(0.01),
+            best_all_in_cost: Some(0.81),
+            positive_ev_depth_shares: 12.5,
+            positive_ev_depth_usdc: 10.0,
+            expected_fill_price: Some(0.8),
+            estimated_payout_usdc: Some(12.5),
+            estimated_profit_usdc: Some(2.5),
+            remaining_sec_bucket: Some(120),
+            vol_bps_per_sqrt_min: Some(1.5),
+            vol_bin: Some("low".to_string()),
+            matched_remaining_sec_bucket: Some(120),
+            matched_abs_d_bps_min: Some(0.0),
+            matched_abs_d_bps_max: Some(10.0),
+            cell_sample_count: Some(100),
+            return_last_60s_bps: Some(1.0),
+            retracing_60s: Some(false),
+            max_abs_d_bps_so_far: Some(2.0),
+            lead_decay_ratio: Some(1.0),
+            edge_penalty_applied: false,
+            runtime_config_hash: Some("runtime".to_string()),
+            source_config_hash: Some("source".to_string()),
+            training_input_hash: Some("input".to_string()),
+            training_label_source_kind: Some("label".to_string()),
         }
     }
 

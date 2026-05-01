@@ -1,4 +1,4 @@
-use std::{env, time::Duration};
+use std::{env, path::PathBuf, time::Duration};
 
 use anyhow::{Result, bail};
 
@@ -15,6 +15,7 @@ pub const DEFAULT_MIN_ORDER_USDC: f64 = 1.0;
 pub const DEFAULT_MAX_ORDER_USDC: f64 = 25.0;
 pub const DEFAULT_EVALUATION_INTERVAL_MS: u64 = 1_000;
 pub const DEFAULT_LOG_EVALUATIONS: bool = false;
+pub const DEFAULT_TRADE_RECORD_DIR: &str = "trade-records";
 
 #[derive(Clone)]
 pub struct RuntimeConfig {
@@ -29,6 +30,7 @@ pub struct RuntimeConfig {
     pub live_order_type: LiveOrderType,
     pub evaluation_interval: Duration,
     pub log_evaluations: bool,
+    pub trade_record_dir: PathBuf,
     pub polymarket_private_key: Option<String>,
     pub polymarket_api_key: Option<String>,
     pub polymarket_api_secret: Option<String>,
@@ -64,6 +66,10 @@ impl RuntimeConfig {
                 DEFAULT_EVALUATION_INTERVAL_MS,
             )?),
             log_evaluations: bool_env("WIGGLER_LOG_EVALUATIONS", DEFAULT_LOG_EVALUATIONS)?,
+            trade_record_dir: PathBuf::from(env_or_default(
+                "WIGGLER_TRADE_RECORD_DIR",
+                DEFAULT_TRADE_RECORD_DIR,
+            )),
             polymarket_private_key: non_empty_env("POLYMARKET_PRIVATE_KEY"),
             polymarket_api_key: non_empty_env("POLYMARKET_API_KEY"),
             polymarket_api_secret: non_empty_env("POLYMARKET_API_SECRET"),

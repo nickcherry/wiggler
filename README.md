@@ -75,6 +75,7 @@ cargo run -- monitor --runtime-bundle-dir runtime/wiggler-prod-v1
 | `WIGGLER_MAX_ORDER_USDC` | `25` | Production cap applied below bundle position caps |
 | `WIGGLER_EVALUATION_INTERVAL_MS` | `1000` | Decision/evaluation cadence |
 | `WIGGLER_LOG_EVALUATIONS` | `false` | Emit full per-tick `trade_evaluation` logs when debugging |
+| `WIGGLER_TRADE_RECORD_DIR` | `trade-records` | Ignored JSON record directory for shadow/live entry attempts |
 | `WIGGLER_PRICE_STALE_AFTER_MS` | `20000` | Max current-price age for an eligible evaluation |
 | `WIGGLER_ORDERBOOK_STALE_AFTER_MS` | `10000` | Max orderbook age for an eligible evaluation |
 | `WIGGLER_MIN_ABS_D_BPS` | `0.01` | Dust threshold around the market line |
