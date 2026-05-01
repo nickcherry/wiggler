@@ -32,6 +32,8 @@ Live settlement Telegram win/loss/PnL values use Polymarket Data API trade
 rows plus Gamma's resolved outcome prices. Local trade records are not used for
 PnL or win/loss summaries. Totals are account-wide for the configured wallet
 and asset whitelist, using resolved buy fills available from Polymarket APIs.
+PnL is net of the runtime-bundle estimated taker entry fee:
+`shares * fee_rate * price * (1 - price)`.
 The wallet comes from `POLYMARKET_USER_ADDRESS` or `POLYMARKET_FUNDER_ADDRESS`
 in `.env`, with EOA configs falling back to `POLYMARKET_PRIVATE_KEY`.
 

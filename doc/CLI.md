@@ -38,7 +38,8 @@ Side effects:
 
 ### `analyze-trades`
 
-Analyzes closed trade performance using Polymarket API data only.
+Analyzes closed trade performance using Polymarket API trade/resolution data
+and the runtime-bundle fee model.
 
 ```bash
 cargo run -- analyze-trades --user 0x...
@@ -50,6 +51,8 @@ Default behavior:
 
 - Assets: `btc,eth,sol,xrp,doge`
 - Slot width: `300` seconds
+- Runtime fee source: `runtime/wiggler-prod-v1` unless overridden with
+  `--runtime-bundle-dir`/`WIGGLER_RUNTIME_BUNDLE_DIR`
 - Trades fetched for entry-time matching and PnL calculation: up to `10000`
 - Wallet source: `--user`, then `POLYMARKET_USER_ADDRESS`, then
   `POLYMARKET_FUNDER_ADDRESS`; EOA configs can fall back to the
@@ -58,11 +61,13 @@ Default behavior:
 Output is formatted for a terminal and includes overall results plus breakdowns
 by asset, time remaining, entry-vs-line availability, and average entry odds.
 
-The report computes each buy fill's PnL from Data API trade rows plus Gamma's
-resolved outcome prices. The entry-vs-start-line section intentionally remains
-API-only: Polymarket APIs do not include the historical underlying start-line
-price or underlying price at entry, so the command will not backfill that from
-local trade records or external price archives.
+The report computes each buy fill's net PnL from Data API trade rows plus
+Gamma's resolved outcome prices, then subtracts the runtime-bundle estimated
+taker entry fee: `shares * fee_rate * price * (1 - price)`. The
+entry-vs-start-line section intentionally remains API-only: Polymarket APIs do
+not include the historical underlying start-line price or underlying price at
+entry, so the command will not backfill that from local trade records or
+external price archives.
 
 Side effects:
 

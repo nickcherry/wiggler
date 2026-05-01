@@ -31,7 +31,7 @@ use crate::{
     },
     runtime::{AssetRuntime, RuntimeBundle, RuntimeCell, SideLeading},
     telegram::TelegramClient,
-    trade_analysis::{self, ApiTradePnlRow},
+    trade_analysis::{self, ApiTradePnlRow, TradeFeeRates},
     trading::{LiveOrderRequest, LiveOrderResponse, LiveTradeExecutor},
 };
 
@@ -62,6 +62,7 @@ pub async fn run(args: MonitorArgs, config: RuntimeConfig) -> Result<()> {
             args.runtime_bundle_dir.display()
         )
     })?;
+    let trade_fee_rates = TradeFeeRates::from_runtime_bundle(&runtime_bundle, &assets)?;
     let candle_lookback_min = max_vol_lookback_min(&runtime_bundle, &assets);
     let telegram = TelegramClient::from_config(&config);
     let settlement_user = if telegram.is_configured() && !config.telegram_pnl_interval.is_zero() {
@@ -239,6 +240,7 @@ pub async fn run(args: MonitorArgs, config: RuntimeConfig) -> Result<()> {
                         .cloned()
                         .expect("settlement interval requires user address"),
                     &assets,
+                    &trade_fee_rates,
                 ).await;
             }
             _ = evaluation_interval.tick() => {
@@ -486,6 +488,7 @@ impl MonitorState {
         gamma: &GammaClient,
         user: Address,
         assets: &[Asset],
+        fee_rates: &TradeFeeRates,
     ) {
         if !telegram.is_configured() {
             return;
@@ -516,6 +519,7 @@ impl MonitorState {
             assets,
             duration,
             TELEGRAM_SETTLEMENT_MAX_TRADES,
+            fee_rates,
         )
         .await
         {

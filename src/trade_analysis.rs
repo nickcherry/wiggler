@@ -23,6 +23,7 @@ use crate::{
         data::{DataApiClient, is_buy},
         gamma::GammaClient,
     },
+    runtime::RuntimeBundle,
 };
 
 pub async fn run(args: AnalyzeTradesArgs, config: RuntimeConfig) -> Result<()> {
@@ -33,17 +34,25 @@ pub async fn run(args: AnalyzeTradesArgs, config: RuntimeConfig) -> Result<()> {
     let user = resolve_user_address(&args, &config)?;
     let duration = duration_from_seconds(args.slot_seconds)?;
     let assets = normalize_assets(args.assets);
+    let runtime_bundle = RuntimeBundle::load(&args.runtime_bundle_dir).with_context(|| {
+        format!(
+            "load runtime bundle from {}",
+            args.runtime_bundle_dir.display()
+        )
+    })?;
+    let fee_rates = TradeFeeRates::from_runtime_bundle(&runtime_bundle, &assets)?;
     let data_api = DataApiClient::new(&config.data_api_base_url)?;
     let gamma = GammaClient::new(config.gamma_base_url.clone());
 
     let trades = data_api.fetch_trades(user, args.max_trades).await?;
-    let analyzed = analyze_api_rows(&trades, &assets, duration, &gamma).await?;
+    let analyzed = analyze_api_rows(&trades, &assets, duration, &gamma, &fee_rates).await?;
     let report = PerformanceReport::new(ReportInput {
         user,
         data_api_base_url: config.data_api_base_url,
         gamma_base_url: config.gamma_base_url,
         assets,
         slot_seconds: duration.num_seconds(),
+        fee_model: fee_rates.summary(),
         trades_fetched: trades.len(),
         buy_trades_considered: analyzed.buy_trades_considered,
         unresolved_trades: analyzed.unresolved_trades,
@@ -114,9 +123,10 @@ pub async fn fetch_api_trade_pnl_rows(
     assets: &[Asset],
     duration: TimeDelta,
     max_trades: usize,
+    fee_rates: &TradeFeeRates,
 ) -> Result<ApiTradePnlRows> {
     let trades = data_api.fetch_trades(user, max_trades).await?;
-    let analyzed = analyze_api_rows(&trades, assets, duration, gamma).await?;
+    let analyzed = analyze_api_rows(&trades, assets, duration, gamma, fee_rates).await?;
     Ok(ApiTradePnlRows {
         rows: analyzed
             .trades
@@ -146,6 +156,7 @@ async fn analyze_api_rows(
     assets: &[Asset],
     duration: TimeDelta,
     gamma: &GammaClient,
+    fee_rates: &TradeFeeRates,
 ) -> Result<AnalysisRows> {
     let asset_filter = assets.iter().copied().collect::<HashSet<_>>();
     let mut candidate_trades = Vec::new();
@@ -186,8 +197,9 @@ async fn analyze_api_rows(
 
         let size = decimal_to_f64(trade.size, "size")?;
         let entry_price = decimal_to_f64(trade.price, "price")?;
-        let cost_basis = size * entry_price;
-        let realized_pnl = buy_trade_pnl(size, entry_price, resolution_price);
+        let entry_fee = trade_fee(size, entry_price, fee_rates.rate_for(asset));
+        let cost_basis = (size * entry_price) + entry_fee;
+        let realized_pnl = buy_trade_pnl(size, entry_price, resolution_price, entry_fee);
         let entry_remaining_seconds = trade
             .slug
             .as_str()
@@ -206,6 +218,7 @@ async fn analyze_api_rows(
             outcome: trade.outcome.clone(),
             realized_pnl,
             total_bought: cost_basis,
+            fees: entry_fee,
             entry_price,
             entry_remaining_seconds,
         });
@@ -299,8 +312,59 @@ fn decimal_to_f64(value: rust_decimal::Decimal, field: &'static str) -> Result<f
         .with_context(|| format!("convert Polymarket {field} to f64"))
 }
 
-fn buy_trade_pnl(size: f64, entry_price: f64, resolution_price: f64) -> f64 {
-    size * (resolution_price - entry_price)
+#[derive(Clone, Debug)]
+pub struct TradeFeeRates {
+    rates: HashMap<Asset, f64>,
+}
+
+impl TradeFeeRates {
+    pub fn from_runtime_bundle(runtime_bundle: &RuntimeBundle, assets: &[Asset]) -> Result<Self> {
+        let mut rates = HashMap::new();
+        for asset in assets {
+            let runtime = runtime_bundle
+                .config_for(*asset)
+                .with_context(|| format!("runtime bundle is missing fee config for {}", asset))?;
+            rates.insert(*asset, runtime.fee_rate());
+        }
+        Ok(Self { rates })
+    }
+
+    fn rate_for(&self, asset: Asset) -> f64 {
+        *self.rates.get(&asset).unwrap_or(&0.0)
+    }
+
+    fn summary(&self) -> String {
+        let mut rates = self.rates.iter().collect::<Vec<_>>();
+        rates.sort_by_key(|(asset, _)| **asset);
+        let unique_rates = rates
+            .iter()
+            .map(|(_, rate)| rate.to_bits())
+            .collect::<HashSet<_>>();
+        if unique_rates.len() == 1 {
+            let (_, rate) = rates[0];
+            format!("{} taker entry fee", format_percent(rate * 100.0))
+        } else {
+            rates
+                .into_iter()
+                .map(|(asset, rate)| {
+                    format!(
+                        "{} {}",
+                        asset.to_string().to_ascii_uppercase(),
+                        format_percent(rate * 100.0)
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(", ")
+        }
+    }
+}
+
+fn trade_fee(size: f64, price: f64, fee_rate: f64) -> f64 {
+    size * fee_rate * price * (1.0 - price)
+}
+
+fn buy_trade_pnl(size: f64, entry_price: f64, resolution_price: f64, entry_fee: f64) -> f64 {
+    size * (resolution_price - entry_price) - entry_fee
 }
 
 #[derive(Clone, Debug)]
@@ -312,6 +376,7 @@ struct AnalyzedTrade {
     outcome: String,
     realized_pnl: f64,
     total_bought: f64,
+    fees: f64,
     entry_price: f64,
     entry_remaining_seconds: Option<i64>,
 }
@@ -323,6 +388,7 @@ struct ReportInput {
     gamma_base_url: String,
     assets: Vec<Asset>,
     slot_seconds: i64,
+    fee_model: String,
     trades_fetched: usize,
     buy_trades_considered: usize,
     unresolved_trades: usize,
@@ -336,6 +402,7 @@ struct PerformanceReport {
     gamma_base_url: String,
     assets: Vec<Asset>,
     slot_seconds: i64,
+    fee_model: String,
     trades_fetched: usize,
     buy_trades_considered: usize,
     unresolved_trades: usize,
@@ -356,6 +423,7 @@ impl PerformanceReport {
             gamma_base_url: input.gamma_base_url,
             assets: input.assets,
             slot_seconds: input.slot_seconds,
+            fee_model: input.fee_model,
             trades_fetched: input.trades_fetched,
             buy_trades_considered: input.buy_trades_considered,
             unresolved_trades: input.unresolved_trades,
@@ -393,6 +461,13 @@ impl PerformanceReport {
             "{} {}",
             theme.dim("Resolution source:"),
             self.gamma_base_url
+        )
+        .unwrap();
+        writeln!(
+            output,
+            "{} net PnL subtracts estimated {} using fee = shares * rate * price * (1 - price)",
+            theme.dim("Fee model:"),
+            self.fee_model,
         )
         .unwrap();
         writeln!(output, "{} {}", theme.dim("Wallet:"), self.user).unwrap();
@@ -456,9 +531,10 @@ impl PerformanceReport {
         let total = self.overall.trades;
         writeln!(
             output,
-            "Trades: {} | PnL: {} | ROI: {} | Wins: {} | Losses: {} | Flats: {}",
+            "Trades: {} | Net PnL: {} | Fees: {} | ROI: {} | Wins: {} | Losses: {} | Flats: {}",
             format_whole_number(total),
             theme.pnl(&format_signed_usdc(self.overall.pnl), self.overall.pnl),
+            format_usdc(self.overall.fees),
             theme.pnl(
                 &format_optional_signed_percent(self.overall.roi_pct()),
                 self.overall.pnl
@@ -494,8 +570,9 @@ impl PerformanceReport {
                 Column::left("Group"),
                 Column::right("Trades"),
                 Column::right("% Trades"),
-                Column::right("PnL"),
-                Column::right("% PnL"),
+                Column::right("Net PnL"),
+                Column::right("Fees"),
+                Column::right("% Net PnL"),
                 Column::right("ROI"),
                 Column::right("Wins"),
                 Column::right("Losses"),
@@ -510,6 +587,7 @@ impl PerformanceReport {
                             row.stats.trade_share_pct(self.overall.trades),
                         )),
                         Cell::pnl(format_signed_usdc(row.stats.pnl), row.stats.pnl),
+                        Cell::plain(format_usdc(row.stats.fees)),
                         Cell::pnl(
                             format_optional_signed_percent(
                                 row.stats.pnl_share_pct(self.overall.pnl),
@@ -578,6 +656,7 @@ impl GroupKey {
 struct SummaryStats {
     trades: u64,
     cost_basis: f64,
+    fees: f64,
     pnl: f64,
     wins: u64,
     losses: u64,
@@ -596,6 +675,7 @@ impl SummaryStats {
     fn add(&mut self, trade: &AnalyzedTrade) {
         self.trades += 1;
         self.cost_basis += trade.total_bought.max(0.0);
+        self.fees += trade.fees.max(0.0);
         self.pnl += trade.realized_pnl;
         if trade.realized_pnl > 0.0 {
             self.wins += 1;
@@ -1023,7 +1103,7 @@ fn add_digit_grouping(digits: &str) -> String {
 mod tests {
     use super::{
         AnalyzedTrade, EntryOddsBucket, PerformanceReport, RemainingBucket, ReportInput,
-        SummaryStats, asset_from_market_text, buy_trade_pnl, format_signed_usdc,
+        SummaryStats, asset_from_market_text, buy_trade_pnl, format_signed_usdc, trade_fee,
     };
     use crate::domain::asset::Asset;
     use polymarket_client_sdk_v2::types::address;
@@ -1056,9 +1136,9 @@ mod tests {
     #[test]
     fn summary_stats_count_wins_losses_and_flats() {
         let trades = vec![
-            trade(Asset::Btc, 10.0, 100.0, 0.7, Some(210)),
-            trade(Asset::Btc, -5.0, 50.0, 0.4, Some(90)),
-            trade(Asset::Eth, 0.0, 20.0, 0.5, None),
+            trade(Asset::Btc, 10.0, 101.0, 1.0, 0.7, Some(210)),
+            trade(Asset::Btc, -5.0, 50.5, 0.5, 0.4, Some(90)),
+            trade(Asset::Eth, 0.0, 20.0, 0.0, 0.5, None),
         ];
         let stats = SummaryStats::from_trades(&trades);
 
@@ -1067,13 +1147,16 @@ mod tests {
         assert_eq!(stats.losses, 1);
         assert_eq!(stats.flats, 1);
         assert!((stats.pnl - 5.0).abs() < 0.000001);
-        assert!((stats.roi_pct().unwrap() - 2.94117647).abs() < 0.0001);
+        assert!((stats.fees - 1.5).abs() < 0.000001);
+        assert!((stats.roi_pct().unwrap() - 2.91545189).abs() < 0.0001);
     }
 
     #[test]
-    fn buy_trade_pnl_uses_resolved_outcome_price() {
-        assert!((buy_trade_pnl(100.0, 0.42, 1.0) - 58.0).abs() < 0.000001);
-        assert!((buy_trade_pnl(100.0, 0.42, 0.0) + 42.0).abs() < 0.000001);
+    fn buy_trade_pnl_subtracts_entry_fee() {
+        let entry_fee = trade_fee(100.0, 0.42, 0.072);
+        assert!((entry_fee - 1.75392).abs() < 0.000001);
+        assert!((buy_trade_pnl(100.0, 0.42, 1.0, entry_fee) - 56.24608).abs() < 0.000001);
+        assert!((buy_trade_pnl(100.0, 0.42, 0.0, entry_fee) + 43.75392).abs() < 0.000001);
     }
 
     #[test]
@@ -1096,18 +1179,21 @@ mod tests {
             gamma_base_url: "https://gamma-api.polymarket.com".to_string(),
             assets: vec![Asset::Btc, Asset::Eth],
             slot_seconds: 300,
+            fee_model: "7.2% taker entry fee".to_string(),
             trades_fetched: 2,
             buy_trades_considered: 2,
             unresolved_trades: 0,
             trades: vec![
-                trade(Asset::Btc, 12.5, 50.0, 0.7, Some(210)),
-                trade(Asset::Eth, -10.0, 40.0, 0.4, Some(45)),
+                trade(Asset::Btc, 12.5, 50.0, 0.5, 0.7, Some(210)),
+                trade(Asset::Eth, -10.0, 40.0, 0.4, 0.4, Some(45)),
             ],
         });
 
         let rendered = report.render(false);
 
         assert!(rendered.contains("Trade Performance Analysis"));
+        assert!(rendered.contains("Fee model"));
+        assert!(rendered.contains("Net PnL"));
         assert!(rendered.contains("By Asset"));
         assert!(rendered.contains("By Time Remaining"));
         assert!(rendered.contains("By Entry Vs Start Line"));
@@ -1125,6 +1211,7 @@ mod tests {
         asset: Asset,
         pnl: f64,
         total_bought: f64,
+        fees: f64,
         entry_price: f64,
         entry_remaining_seconds: Option<i64>,
     ) -> AnalyzedTrade {
@@ -1136,6 +1223,7 @@ mod tests {
             outcome: "Up".to_string(),
             realized_pnl: pnl,
             total_bought,
+            fees,
             entry_price,
             entry_remaining_seconds,
         }

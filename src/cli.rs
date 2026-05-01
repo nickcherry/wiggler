@@ -101,6 +101,14 @@ pub struct AnalyzeTradesArgs {
     #[arg(long, default_value_t = 300)]
     pub slot_seconds: i64,
 
+    /// Runtime probability-table bundle directory. Used for Polymarket fee rates.
+    #[arg(
+        long,
+        env = "WIGGLER_RUNTIME_BUNDLE_DIR",
+        default_value = "runtime/wiggler-prod-v1"
+    )]
+    pub runtime_bundle_dir: PathBuf,
+
     /// Maximum trades to fetch from Polymarket Data API.
     #[arg(long, default_value_t = 10_000)]
     pub max_trades: usize,
