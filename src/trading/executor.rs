@@ -1,4 +1,4 @@
-use std::{str::FromStr, time::Duration};
+use std::{str::FromStr, sync::Arc, time::Duration};
 
 use alloy::{signers::Signer as _, signers::local::PrivateKeySigner};
 use anyhow::{Context, Result, bail};
@@ -18,7 +18,7 @@ use polymarket_client_sdk_v2::{
 };
 use rust_decimal::prelude::FromPrimitive;
 use serde::Deserialize;
-use tokio::task::JoinHandle;
+use tokio::{sync::Mutex, task::JoinHandle};
 use tracing::{info, warn};
 
 use crate::{
@@ -29,11 +29,13 @@ use crate::{
 type AuthenticatedClient = Client<
     polymarket_client_sdk_v2::auth::state::Authenticated<polymarket_client_sdk_v2::auth::Normal>,
 >;
+type HeartbeatState = Arc<Mutex<Option<Uuid>>>;
 
 pub struct LiveTradeExecutor {
     client: AuthenticatedClient,
     signer: PrivateKeySigner,
     order_type: OrderType,
+    heartbeat_state: HeartbeatState,
     _heartbeat_task: JoinHandle<()>,
 }
 
@@ -92,7 +94,8 @@ impl LiveTradeExecutor {
             .authenticate()
             .await
             .context("authenticate CLOB client")?;
-        let heartbeat_id = initialize_heartbeat(&client)
+        let heartbeat_state = Arc::new(Mutex::new(None));
+        refresh_heartbeat(&client, &heartbeat_state)
             .await
             .context("initialize CLOB heartbeat")?;
         let closed_only = match client.closed_only_mode().await {
@@ -104,7 +107,7 @@ impl LiveTradeExecutor {
                     error = %error,
                     "refreshing heartbeat after startup L2 auth error"
                 );
-                initialize_heartbeat(&client)
+                refresh_heartbeat(&client, &heartbeat_state)
                     .await
                     .context("refresh CLOB heartbeat after closed-only auth error")?;
                 client
@@ -133,7 +136,7 @@ impl LiveTradeExecutor {
                     error = %error,
                     "refreshing heartbeat after balance refresh auth error"
                 );
-                initialize_heartbeat(&client)
+                refresh_heartbeat(&client, &heartbeat_state)
                     .await
                     .context("refresh CLOB heartbeat after balance refresh auth error")?;
                 if let Err(retry_error) = client
@@ -162,7 +165,7 @@ impl LiveTradeExecutor {
                     error = %error,
                     "refreshing heartbeat after balance query auth error"
                 );
-                initialize_heartbeat(&client)
+                refresh_heartbeat(&client, &heartbeat_state)
                     .await
                     .context("refresh CLOB heartbeat after balance query auth error")?;
                 client
@@ -196,10 +199,11 @@ impl LiveTradeExecutor {
         );
 
         Ok(Self {
-            _heartbeat_task: spawn_heartbeat_task(client.clone(), heartbeat_id),
+            _heartbeat_task: spawn_heartbeat_task(client.clone(), Arc::clone(&heartbeat_state)),
             client,
             signer,
             order_type: map_order_type(config.live_order_type),
+            heartbeat_state,
         })
     }
 
@@ -215,7 +219,7 @@ impl LiveTradeExecutor {
                     error = %error,
                     "refreshing heartbeat after L2 auth error"
                 );
-                initialize_heartbeat(&self.client)
+                refresh_heartbeat(&self.client, &self.heartbeat_state)
                     .await
                     .context("refresh CLOB heartbeat after open-orders auth error")?;
                 self.client
@@ -239,7 +243,7 @@ impl LiveTradeExecutor {
                     error = %error,
                     "refreshing heartbeat after L2 auth error"
                 );
-                initialize_heartbeat(&self.client)
+                refresh_heartbeat(&self.client, &self.heartbeat_state)
                     .await
                     .context("refresh CLOB heartbeat after trades auth error")?;
                 self.client
@@ -281,26 +285,36 @@ struct HeartbeatErrorBody {
     error: Option<String>,
 }
 
-async fn initialize_heartbeat(client: &AuthenticatedClient) -> Result<Option<Uuid>> {
-    match client.post_heartbeat(None).await {
+async fn refresh_heartbeat(
+    client: &AuthenticatedClient,
+    heartbeat_state: &HeartbeatState,
+) -> Result<Option<Uuid>> {
+    let mut heartbeat_id = heartbeat_state.lock().await;
+    let previous = heartbeat_id.to_owned();
+
+    match client.post_heartbeat(previous).await {
         Ok(response) => {
-            log_heartbeat_response("live_heartbeat_ok", &response);
+            if previous.is_none() || response.error.is_some() {
+                log_heartbeat_response("live_heartbeat_ok", &response);
+            }
+            *heartbeat_id = Some(response.heartbeat_id);
             Ok(Some(response.heartbeat_id))
         }
         Err(error) => {
-            let heartbeat_id = heartbeat_id_from_error(&error)
+            let resynced_heartbeat_id = heartbeat_id_from_error(&error)
                 .with_context(|| format!("post initial CLOB heartbeat: {error}"))?;
             warn!(
                 event = "live_heartbeat_resynced",
-                heartbeat_id = %heartbeat_id,
+                heartbeat_id = %resynced_heartbeat_id,
                 error = %error,
                 "live trading heartbeat id resynchronized"
             );
             let response = client
-                .post_heartbeat(Some(heartbeat_id))
+                .post_heartbeat(Some(resynced_heartbeat_id))
                 .await
                 .context("post resynchronized CLOB heartbeat")?;
             log_heartbeat_response("live_heartbeat_ok", &response);
+            *heartbeat_id = Some(response.heartbeat_id);
             Ok(Some(response.heartbeat_id))
         }
     }
@@ -308,7 +322,7 @@ async fn initialize_heartbeat(client: &AuthenticatedClient) -> Result<Option<Uui
 
 fn spawn_heartbeat_task(
     client: AuthenticatedClient,
-    mut heartbeat_id: Option<Uuid>,
+    heartbeat_state: HeartbeatState,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(5));
@@ -317,32 +331,12 @@ fn spawn_heartbeat_task(
 
         loop {
             interval.tick().await;
-            match client.post_heartbeat(heartbeat_id).await {
-                Ok(response) => {
-                    if heartbeat_id.as_ref() != Some(&response.heartbeat_id)
-                        || response.error.is_some()
-                    {
-                        log_heartbeat_response("live_heartbeat_ok", &response);
-                    }
-                    heartbeat_id = Some(response.heartbeat_id);
-                }
-                Err(error) => {
-                    if let Some(next_id) = heartbeat_id_from_error(&error) {
-                        warn!(
-                            event = "live_heartbeat_resynced",
-                            heartbeat_id = %next_id,
-                            error = %error,
-                            "live trading heartbeat id resynchronized"
-                        );
-                        heartbeat_id = Some(next_id);
-                    } else {
-                        warn!(
-                            event = "live_heartbeat_error",
-                            error = %error,
-                            "live trading heartbeat failed"
-                        );
-                    }
-                }
+            if let Err(error) = refresh_heartbeat(&client, &heartbeat_state).await {
+                warn!(
+                    event = "live_heartbeat_error",
+                    error = %format!("{error:#}"),
+                    "live trading heartbeat failed"
+                );
             }
         }
     })
