@@ -95,10 +95,25 @@ impl LiveTradeExecutor {
         let heartbeat_id = initialize_heartbeat(&client)
             .await
             .context("initialize CLOB heartbeat")?;
-        let closed_only = client
-            .closed_only_mode()
-            .await
-            .context("check CLOB closed-only mode")?;
+        let closed_only = match client.closed_only_mode().await {
+            Ok(closed_only) => closed_only,
+            Err(error) if is_l2_auth_error(&error) => {
+                warn!(
+                    event = "live_auth_refresh",
+                    endpoint = "auth/ban-status/closed-only",
+                    error = %error,
+                    "refreshing heartbeat after startup L2 auth error"
+                );
+                initialize_heartbeat(&client)
+                    .await
+                    .context("refresh CLOB heartbeat after closed-only auth error")?;
+                client
+                    .closed_only_mode()
+                    .await
+                    .context("check CLOB closed-only mode after heartbeat refresh")?
+            }
+            Err(error) => return Err(error).context("check CLOB closed-only mode"),
+        };
         if closed_only.closed_only {
             bail!("Polymarket account is in closed-only mode");
         }
@@ -106,19 +121,57 @@ impl LiveTradeExecutor {
         let collateral_request = BalanceAllowanceRequest::builder()
             .asset_type(AssetType::Collateral)
             .build();
-        if let Err(error) = client
+        match client
             .update_balance_allowance(collateral_request.clone())
             .await
         {
-            warn!(
-                error = %format!("{error:#}"),
-                "failed to refresh CLOB collateral balance allowance"
-            );
+            Ok(()) => {}
+            Err(error) if is_l2_auth_error(&error) => {
+                warn!(
+                    event = "live_auth_refresh",
+                    endpoint = "balance-allowance/update",
+                    error = %error,
+                    "refreshing heartbeat after balance refresh auth error"
+                );
+                initialize_heartbeat(&client)
+                    .await
+                    .context("refresh CLOB heartbeat after balance refresh auth error")?;
+                if let Err(retry_error) = client
+                    .update_balance_allowance(collateral_request.clone())
+                    .await
+                {
+                    warn!(
+                        error = %format!("{retry_error:#}"),
+                        "failed to refresh CLOB collateral balance allowance after heartbeat refresh"
+                    );
+                }
+            }
+            Err(error) => {
+                warn!(
+                    error = %format!("{error:#}"),
+                    "failed to refresh CLOB collateral balance allowance"
+                );
+            }
         }
-        let collateral = client
-            .balance_allowance(collateral_request)
-            .await
-            .context("query CLOB collateral balance allowance")?;
+        let collateral = match client.balance_allowance(collateral_request.clone()).await {
+            Ok(collateral) => collateral,
+            Err(error) if is_l2_auth_error(&error) => {
+                warn!(
+                    event = "live_auth_refresh",
+                    endpoint = "balance-allowance",
+                    error = %error,
+                    "refreshing heartbeat after balance query auth error"
+                );
+                initialize_heartbeat(&client)
+                    .await
+                    .context("refresh CLOB heartbeat after balance query auth error")?;
+                client
+                    .balance_allowance(collateral_request)
+                    .await
+                    .context("query CLOB collateral balance allowance after heartbeat refresh")?
+            }
+            Err(error) => return Err(error).context("query CLOB collateral balance allowance"),
+        };
         let min_order_usdc =
             Decimal::from_f64(config.min_order_usdc).context("convert min order USDC")?;
         if collateral.balance < min_order_usdc || collateral.allowances.is_empty() {
