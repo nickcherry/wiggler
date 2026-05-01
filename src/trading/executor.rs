@@ -1,6 +1,9 @@
 use std::{
     str::FromStr,
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicU32, Ordering},
+    },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -44,6 +47,7 @@ type AuthenticatedClient = Client<
 type ClientState = Arc<Mutex<AuthenticatedClient>>;
 type HeartbeatState = Arc<Mutex<Option<Uuid>>>;
 const INITIAL_CURSOR: &str = "MA==";
+static LAST_FRESH_API_NONCE: AtomicU32 = AtomicU32::new(0);
 
 sol! {
     struct ClobAuth {
@@ -642,6 +646,12 @@ struct HeartbeatErrorBody {
 }
 
 #[derive(Deserialize)]
+struct ClobErrorBody {
+    error_msg: Option<String>,
+    error: Option<String>,
+}
+
+#[derive(Deserialize)]
 struct ApiCredentialsBody {
     #[serde(alias = "apiKey")]
     api_key: String,
@@ -825,7 +835,27 @@ fn fresh_api_nonce() -> Result<u32> {
         .duration_since(UNIX_EPOCH)
         .context("system clock is before Unix epoch")?
         .as_secs();
-    u32::try_from(seconds).context("current Unix timestamp exceeds u32 nonce range")
+    let seconds =
+        u32::try_from(seconds).context("current Unix timestamp exceeds u32 nonce range")?;
+    reserve_fresh_api_nonce(&LAST_FRESH_API_NONCE, seconds)
+}
+
+fn reserve_fresh_api_nonce(last_nonce: &AtomicU32, base_nonce: u32) -> Result<u32> {
+    let mut previous = last_nonce.load(Ordering::Relaxed);
+    loop {
+        let nonce = if base_nonce > previous {
+            base_nonce
+        } else {
+            previous
+                .checked_add(1)
+                .context("fresh Polymarket API nonce range exhausted")?
+        };
+
+        match last_nonce.compare_exchange(previous, nonce, Ordering::AcqRel, Ordering::Relaxed) {
+            Ok(_) => return Ok(nonce),
+            Err(current) => previous = current,
+        }
+    }
 }
 
 fn redacted_uuid(value: Uuid) -> String {
@@ -854,8 +884,20 @@ fn is_l2_auth_error_chain(error: &anyhow::Error) -> bool {
 }
 
 fn is_invalid_api_key_status(status: &PolymarketStatus) -> bool {
-    status.status_code == polymarket_client_sdk_v2::error::StatusCode::UNAUTHORIZED
-        && status.message.contains("Invalid api key")
+    if status.status_code != polymarket_client_sdk_v2::error::StatusCode::UNAUTHORIZED {
+        return false;
+    }
+
+    let message = clob_error_message(&status.message).unwrap_or_else(|| status.message.clone());
+    let message = message.to_ascii_lowercase();
+    message.contains("invalid api key")
+        || (message.contains("api key") && message.contains("expired"))
+        || (message.contains("api key") && message.contains("unauthorized"))
+}
+
+fn clob_error_message(raw: &str) -> Option<String> {
+    let body: ClobErrorBody = serde_json::from_str(raw).ok()?;
+    body.error_msg.or(body.error)
 }
 
 fn credentials_from_config(config: &RuntimeConfig) -> Result<Option<Credentials>> {
@@ -933,10 +975,16 @@ fn probability_decimal_truncated(name: &str, value: f64, scale: u32) -> Result<D
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    use polymarket_client_sdk_v2::error::{
+        Error as PolymarketError, Method, StatusCode as PolymarketStatusCode,
+    };
     use polymarket_client_sdk_v2::types::address;
 
     use super::{
-        positive_decimal_truncated, probability_decimal_truncated, validate_funder_address,
+        is_l2_auth_error, positive_decimal_truncated, probability_decimal_truncated,
+        reserve_fresh_api_nonce, validate_funder_address,
     };
     use crate::config::PolymarketSignatureType;
 
@@ -967,5 +1015,61 @@ mod tests {
         let result = validate_funder_address(PolymarketSignatureType::GnosisSafe, signer, funder);
 
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn fresh_api_nonce_uses_base_when_newer_than_last() {
+        let last_nonce = AtomicU32::new(10);
+        let nonce = reserve_fresh_api_nonce(&last_nonce, 20).unwrap();
+
+        assert_eq!(nonce, 20);
+        assert_eq!(last_nonce.load(Ordering::Relaxed), 20);
+    }
+
+    #[test]
+    fn fresh_api_nonce_increments_when_base_would_repeat() {
+        let last_nonce = AtomicU32::new(0);
+
+        assert_eq!(reserve_fresh_api_nonce(&last_nonce, 100).unwrap(), 100);
+        assert_eq!(reserve_fresh_api_nonce(&last_nonce, 100).unwrap(), 101);
+        assert_eq!(reserve_fresh_api_nonce(&last_nonce, 99).unwrap(), 102);
+    }
+
+    #[test]
+    fn fresh_api_nonce_errors_when_exhausted() {
+        let last_nonce = AtomicU32::new(u32::MAX);
+        let result = reserve_fresh_api_nonce(&last_nonce, u32::MAX);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn l2_auth_error_detects_json_invalid_api_key_message() {
+        let status = unauthorized_status(r#"{"error":"Unauthorized/Invalid api key"}"#);
+
+        assert!(is_l2_auth_error(&status));
+    }
+
+    #[test]
+    fn l2_auth_error_detects_expired_api_key_message() {
+        let status = unauthorized_status(r#"{"error":"API key expired"}"#);
+
+        assert!(is_l2_auth_error(&status));
+    }
+
+    #[test]
+    fn l2_auth_error_ignores_unrelated_unauthorized_message() {
+        let status = unauthorized_status(r#"{"error":"expired timestamp"}"#);
+
+        assert!(!is_l2_auth_error(&status));
+    }
+
+    fn unauthorized_status(message: &str) -> PolymarketError {
+        PolymarketError::status(
+            PolymarketStatusCode::UNAUTHORIZED,
+            Method::GET,
+            "/data/orders".to_string(),
+            message.to_string(),
+        )
     }
 }
