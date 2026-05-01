@@ -31,8 +31,10 @@ the monitor from looking for another entry in the same market.
 
 Polymarket account PnL and total win/loss counts are fetched from the public
 profile/leaderboard, positions, and closed-positions data APIs using
-`POLYMARKET_FUNDER_ADDRESS`. The local trade-record ledger is still shown
-because it is useful for debugging exact bot closeouts, but it is not the
+`POLYMARKET_FUNDER_ADDRESS`. Open-position value and unrealized PnL only use
+non-resolved position rows; resolved redeemable rows are counted for win/loss
+but are not shown as "current" PnL. The local trade-record ledger is still
+shown because it is useful for debugging exact bot closeouts, but it is not the
 source of truth for account/profile PnL or total win/loss counts.
 
 ## Message Content

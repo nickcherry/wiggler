@@ -367,7 +367,8 @@ struct AccountPnlSnapshot {
     profile_pnl_usdc: f64,
     volume_usdc: Option<f64>,
     positions_value_usdc: Option<f64>,
-    positions_cash_pnl_usdc: Option<f64>,
+    open_positions_count: Option<u64>,
+    open_positions_cash_pnl_usdc: Option<f64>,
     wins: Option<u64>,
     losses: Option<u64>,
 }
@@ -432,9 +433,9 @@ impl AccountPnlClient {
 
         let positions_value_usdc = self.fetch_positions_value(user).await;
         let positions = self.fetch_positions(user).await;
-        let positions_cash_pnl_usdc = positions
+        let open_position_summary = positions
             .as_ref()
-            .map(|rows| rows.iter().filter_map(|row| row.cash_pnl).sum());
+            .map(|rows| account_open_position_summary(rows));
         let resolved_position_counts = positions
             .as_ref()
             .map(|rows| account_position_win_loss_counts(rows));
@@ -453,7 +454,8 @@ impl AccountPnlClient {
             profile_pnl_usdc: row.pnl.unwrap_or(0.0),
             volume_usdc: row.vol,
             positions_value_usdc,
-            positions_cash_pnl_usdc,
+            open_positions_count: open_position_summary.map(|summary| summary.count),
+            open_positions_cash_pnl_usdc: open_position_summary.map(|summary| summary.cash_pnl),
             wins,
             losses,
         })
@@ -575,6 +577,7 @@ struct PositionValueRow {
 struct PositionPnlRow {
     cash_pnl: Option<f64>,
     redeemable: Option<bool>,
+    mergeable: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -589,6 +592,12 @@ struct AccountWinLossCounts {
     losses: u64,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct AccountOpenPositionSummary {
+    count: u64,
+    cash_pnl: f64,
+}
+
 impl AccountWinLossCounts {
     fn add_pnl(&mut self, pnl: f64) {
         if pnl > 0.0 {
@@ -599,15 +608,31 @@ impl AccountWinLossCounts {
     }
 }
 
+fn account_open_position_summary(rows: &[PositionPnlRow]) -> AccountOpenPositionSummary {
+    let mut summary = AccountOpenPositionSummary::default();
+    for row in rows {
+        if account_position_is_resolved(row) {
+            continue;
+        }
+        summary.count += 1;
+        summary.cash_pnl += row.cash_pnl.unwrap_or(0.0);
+    }
+    summary
+}
+
 fn account_position_win_loss_counts(rows: &[PositionPnlRow]) -> AccountWinLossCounts {
     let mut counts = AccountWinLossCounts::default();
     for row in rows {
-        if row.redeemable != Some(true) {
+        if !account_position_is_resolved(row) {
             continue;
         }
         counts.add_pnl(row.cash_pnl.unwrap_or(0.0));
     }
     counts
+}
+
+fn account_position_is_resolved(row: &PositionPnlRow) -> bool {
+    row.redeemable == Some(true) || row.mergeable == Some(true)
 }
 
 fn account_pnl_line(snapshot: Option<&AccountPnlSnapshot>) -> String {
@@ -620,24 +645,41 @@ fn account_pnl_line(snapshot: Option<&AccountPnlSnapshot>) -> String {
     );
     match (snapshot.wins, snapshot.losses) {
         (Some(wins), Some(losses)) => {
-            line.push_str(&format!(" ({} wins / {} losses)", wins, losses));
+            line.push_str(&format!(
+                " ({} wins / {} losses)",
+                format_whole_number(wins),
+                format_whole_number(losses)
+            ));
         }
         (Some(wins), None) => {
-            line.push_str(&format!(" ({} wins)", wins));
+            line.push_str(&format!(" ({} wins)", format_whole_number(wins)));
         }
         (None, Some(losses)) => {
-            line.push_str(&format!(" ({} losses)", losses));
+            line.push_str(&format!(" ({} losses)", format_whole_number(losses)));
         }
         (None, None) => {}
     }
     if let Some(value) = snapshot.positions_value_usdc {
-        line.push_str(&format!("; positions value {}", format_usdc(value)));
-    }
-    if let Some(cash_pnl) = snapshot.positions_cash_pnl_usdc {
-        line.push_str(&format!(
-            "; current positions P/L {}",
-            format_signed_usdc(cash_pnl)
-        ));
+        match snapshot.open_positions_count {
+            Some(count) => {
+                line.push_str(&format!(
+                    "; open positions: {} worth {}",
+                    format_whole_number(count),
+                    format_usdc(value)
+                ));
+                if count > 0 {
+                    if let Some(cash_pnl) = snapshot.open_positions_cash_pnl_usdc {
+                        line.push_str(&format!(
+                            ", unrealized P/L {}",
+                            format_signed_usdc(cash_pnl)
+                        ));
+                    }
+                }
+            }
+            None => {
+                line.push_str(&format!("; open positions value {}", format_usdc(value)));
+            }
+        }
     }
     if let Some(volume) = snapshot.volume_usdc {
         line.push_str(&format!("; volume {}", format_usdc(volume)));
@@ -692,12 +734,12 @@ impl MonitorState {
             "Wiggler PnL update\n{}\nLocal trade-record debug P/L: {} ({} closed records{})\nLocal since last update: {} ({} closed records{})\nOpen positions: {}{}",
             account_line,
             format_signed_usdc(total.estimated_pnl_usdc),
-            total.closed,
+            format_whole_number(total.closed),
             total.tie_suffix(),
             format_signed_usdc(delta.estimated_pnl_usdc),
-            delta.closed,
+            format_whole_number(delta.closed),
             delta.tie_suffix(),
-            open_count,
+            format_whole_number(open_count),
             if open_count > 0 {
                 format!(" totaling {}", format_usdc(open_amount))
             } else {
@@ -2022,7 +2064,7 @@ impl TradeCloseout {
             pnl,
             account_pnl_line(account_snapshot),
             format_signed_usdc(pnl_stats.estimated_pnl_usdc),
-            pnl_stats.closed,
+            format_whole_number(pnl_stats.closed),
             pnl_stats.tie_suffix()
         )
     }
@@ -2339,9 +2381,17 @@ struct PreparedTrade {
 
 impl PreparedTrade {
     fn telegram_text(&self, mode: TradeMode) -> String {
-        let mode_label = match mode {
-            TradeMode::Live => "Live order",
-            TradeMode::Shadow => "Shadow trade",
+        let heading = match mode {
+            TradeMode::Live => format!(
+                "Trying {} {}",
+                self.asset.to_string().to_ascii_uppercase(),
+                outcome_label(&self.outcome)
+            ),
+            TradeMode::Shadow => format!(
+                "Shadow trade: {} {}",
+                self.asset.to_string().to_ascii_uppercase(),
+                outcome_label(&self.outcome)
+            ),
         };
         let win_text = self
             .estimated_profit_usdc
@@ -2355,10 +2405,8 @@ impl PreparedTrade {
             })
             .unwrap_or_else(|| "If it wins: payout estimate unavailable".to_string());
         format!(
-            "{}: taking {} {}\nTarget: {}\nCurrent: {}\nBet: {} at up to {:.2}\nTime left: {}\n{}",
-            mode_label,
-            self.asset.to_string().to_ascii_uppercase(),
-            outcome_label(&self.outcome),
+            "{}\nTarget: {}\nCurrent: {}\nBet: {} at up to {:.2}\nTime left: {}\n{}",
+            heading,
             format_market_price(self.asset, self.line_price),
             format_market_price(self.asset, self.current_price),
             format_usdc(self.amount_usdc),
@@ -2378,7 +2426,7 @@ fn outcome_label(outcome: &Outcome) -> &'static str {
 }
 
 fn format_usdc(value: f64) -> String {
-    format!("${value:.2}")
+    format_currency(value, 2)
 }
 
 fn format_signed_usdc(value: f64) -> String {
@@ -2404,10 +2452,36 @@ fn format_remaining(seconds: i64) -> String {
 
 fn format_market_price(asset: Asset, value: f64) -> String {
     match asset {
-        Asset::Btc | Asset::Eth => format!("${value:.2}"),
-        Asset::Sol => format!("${value:.4}"),
-        Asset::Xrp | Asset::Doge | Asset::Hype | Asset::Bnb => format!("${value:.6}"),
+        Asset::Btc | Asset::Eth => format_currency(value, 2),
+        Asset::Sol => format_currency(value, 4),
+        Asset::Xrp | Asset::Doge | Asset::Hype | Asset::Bnb => format_currency(value, 6),
     }
+}
+
+fn format_currency(value: f64, decimals: usize) -> String {
+    let sign = if value < 0.0 { "-" } else { "" };
+    let raw = format!("{:.*}", decimals, value.abs());
+    let (whole, fractional) = raw.split_once('.').unwrap_or((raw.as_str(), ""));
+    if decimals == 0 {
+        format!("{sign}${}", add_digit_grouping(whole))
+    } else {
+        format!("{sign}${}.{}", add_digit_grouping(whole), fractional)
+    }
+}
+
+fn format_whole_number(value: u64) -> String {
+    add_digit_grouping(&value.to_string())
+}
+
+fn add_digit_grouping(digits: &str) -> String {
+    let mut grouped = String::with_capacity(digits.len() + digits.len() / 3);
+    for (index, ch) in digits.chars().rev().enumerate() {
+        if index > 0 && index % 3 == 0 {
+            grouped.push(',');
+        }
+        grouped.push(ch);
+    }
+    grouped.chars().rev().collect()
 }
 
 fn live_startup_error_text(error: &str) -> String {
@@ -2436,7 +2510,7 @@ fn live_response_text(request: &LiveOrderRequest, response: &LiveOrderResponse) 
             request.outcome_label(),
             format_usdc(request.amount_usdc),
             response.order_id,
-            response.trade_ids.len()
+            format_whole_number(response.trade_ids.len() as u64)
         )
     } else if is_retryable_no_fill_response(response) {
         format!(
@@ -2728,9 +2802,10 @@ mod tests {
     };
 
     use super::{
-        AccountPnlSnapshot, AccountWinLossCounts, MarketPricePath, MonitorState, PathState,
-        PositionPnlRow, PreparedTrade, SlotLine, account_pnl_line,
-        account_position_win_loss_counts, asset_ids_for_markets, distance_bps,
+        AccountOpenPositionSummary, AccountPnlSnapshot, AccountWinLossCounts, MarketPricePath,
+        MonitorState, PathState, PositionPnlRow, PreparedTrade, SlotLine,
+        account_open_position_summary, account_pnl_line, account_position_win_loss_counts,
+        asset_ids_for_markets, distance_bps, format_market_price, format_signed_usdc, format_usdc,
         is_retryable_no_fill_error, pnl_from_trade_record, pre_submit_matches_initial,
         required_edge_probability, summarize_asks,
     };
@@ -3287,21 +3362,22 @@ mod tests {
     #[test]
     fn account_pnl_line_prefers_profile_snapshot() {
         let snapshot = AccountPnlSnapshot {
-            profile_pnl_usdc: 12.34,
-            volume_usdc: Some(100.0),
-            positions_value_usdc: Some(5.67),
-            positions_cash_pnl_usdc: Some(-8.9),
-            wins: Some(3),
-            losses: Some(2),
+            profile_pnl_usdc: 1234.56,
+            volume_usdc: Some(9876.54),
+            positions_value_usdc: Some(5678.9),
+            open_positions_count: Some(5),
+            open_positions_cash_pnl_usdc: Some(-89.01),
+            wins: Some(1234),
+            losses: Some(56),
         };
 
         let line = account_pnl_line(Some(&snapshot));
 
-        assert!(line.contains("Polymarket account P/L: +$12.34 all-time"));
-        assert!(line.contains("(3 wins / 2 losses)"));
-        assert!(line.contains("positions value $5.67"));
-        assert!(line.contains("current positions P/L -$8.90"));
-        assert!(line.contains("volume $100.00"));
+        assert!(line.contains("Polymarket account P/L: +$1,234.56 all-time"));
+        assert!(line.contains("(1,234 wins / 56 losses)"));
+        assert!(line.contains("open positions: 5 worth $5,678.90"));
+        assert!(line.contains("unrealized P/L -$89.01"));
+        assert!(line.contains("volume $9,876.54"));
     }
 
     #[test]
@@ -3318,14 +3394,17 @@ mod tests {
             PositionPnlRow {
                 cash_pnl: Some(10.0),
                 redeemable: Some(true),
+                mergeable: Some(false),
             },
             PositionPnlRow {
                 cash_pnl: Some(-5.0),
-                redeemable: Some(true),
+                redeemable: Some(false),
+                mergeable: Some(true),
             },
             PositionPnlRow {
                 cash_pnl: Some(20.0),
                 redeemable: Some(false),
+                mergeable: Some(false),
             },
         ];
 
@@ -3333,6 +3412,43 @@ mod tests {
             account_position_win_loss_counts(&rows),
             AccountWinLossCounts { wins: 1, losses: 1 }
         );
+    }
+
+    #[test]
+    fn account_open_position_summary_excludes_resolved_rows() {
+        let rows = vec![
+            PositionPnlRow {
+                cash_pnl: Some(10.0),
+                redeemable: Some(false),
+                mergeable: Some(false),
+            },
+            PositionPnlRow {
+                cash_pnl: Some(-5.0),
+                redeemable: Some(true),
+                mergeable: Some(false),
+            },
+            PositionPnlRow {
+                cash_pnl: Some(-7.5),
+                redeemable: Some(false),
+                mergeable: Some(true),
+            },
+        ];
+
+        assert_eq!(
+            account_open_position_summary(&rows),
+            AccountOpenPositionSummary {
+                count: 1,
+                cash_pnl: 10.0
+            }
+        );
+    }
+
+    #[test]
+    fn money_and_market_prices_use_grouping() {
+        assert_eq!(format_usdc(8751.006), "$8,751.01");
+        assert_eq!(format_signed_usdc(-1744.1871), "-$1,744.19");
+        assert_eq!(format_market_price(Asset::Btc, 77972.55), "$77,972.55");
+        assert_eq!(format_market_price(Asset::Sol, 184.3668), "$184.3668");
     }
 
     fn market_with_tokens(asset_ids: Vec<&str>) -> MonitoredMarket {
