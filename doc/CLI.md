@@ -60,6 +60,8 @@ Default behavior:
 
 Output is formatted for a terminal and includes overall results plus breakdowns
 by asset, time remaining, entry-vs-line availability, and average entry odds.
+Each section includes absolute fees, fee drag as a share of gross edge before
+fees, and fees as a share of pre-fee traded notional.
 
 The report computes each buy fill's net PnL from Data API trade rows plus
 Gamma's resolved outcome prices, then subtracts the runtime-bundle estimated

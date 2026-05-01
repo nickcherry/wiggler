@@ -470,6 +470,12 @@ impl PerformanceReport {
             self.fee_model,
         )
         .unwrap();
+        writeln!(
+            output,
+            "{} Fee Drag = fees / gross edge before fees; Fee/Notional = fees / pre-fee notional.",
+            theme.dim("Fee efficiency:")
+        )
+        .unwrap();
         writeln!(output, "{} {}", theme.dim("Wallet:"), self.user).unwrap();
         writeln!(
             output,
@@ -531,10 +537,12 @@ impl PerformanceReport {
         let total = self.overall.trades;
         writeln!(
             output,
-            "Trades: {} | Net PnL: {} | Fees: {} | ROI: {} | Wins: {} | Losses: {} | Flats: {}",
+            "Trades: {} | Net PnL: {} | Fees: {} | Fee Drag: {} | Fee/Notional: {} | ROI: {} | Wins: {} | Losses: {} | Flats: {}",
             format_whole_number(total),
             theme.pnl(&format_signed_usdc(self.overall.pnl), self.overall.pnl),
             format_usdc(self.overall.fees),
+            format_optional_percent(self.overall.fee_drag_pct()),
+            format_optional_percent(self.overall.fee_notional_pct()),
             theme.pnl(
                 &format_optional_signed_percent(self.overall.roi_pct()),
                 self.overall.pnl
@@ -572,6 +580,8 @@ impl PerformanceReport {
                 Column::right("% Trades"),
                 Column::right("Net PnL"),
                 Column::right("Fees"),
+                Column::right("Fee Drag"),
+                Column::right("Fee/Notional"),
                 Column::right("% Net PnL"),
                 Column::right("ROI"),
                 Column::right("Wins"),
@@ -588,6 +598,8 @@ impl PerformanceReport {
                         )),
                         Cell::pnl(format_signed_usdc(row.stats.pnl), row.stats.pnl),
                         Cell::plain(format_usdc(row.stats.fees)),
+                        Cell::plain(format_optional_percent(row.stats.fee_drag_pct())),
+                        Cell::plain(format_optional_percent(row.stats.fee_notional_pct())),
                         Cell::pnl(
                             format_optional_signed_percent(
                                 row.stats.pnl_share_pct(self.overall.pnl),
@@ -692,6 +704,19 @@ impl SummaryStats {
 
     fn pnl_share_pct(self, total_pnl: f64) -> Option<f64> {
         percent_of(self.pnl, total_pnl)
+    }
+
+    fn fee_drag_pct(self) -> Option<f64> {
+        let gross_edge = self.pnl + self.fees;
+        if gross_edge <= f64::EPSILON {
+            None
+        } else {
+            percent_of(self.fees, gross_edge)
+        }
+    }
+
+    fn fee_notional_pct(self) -> Option<f64> {
+        percent_of(self.fees, self.cost_basis - self.fees)
     }
 
     fn roi_pct(self) -> Option<f64> {
@@ -1084,6 +1109,12 @@ fn format_optional_signed_percent(value: Option<f64>) -> String {
         .unwrap_or_else(|| "n/a".to_string())
 }
 
+fn format_optional_percent(value: Option<f64>) -> String {
+    value
+        .map(format_percent)
+        .unwrap_or_else(|| "n/a".to_string())
+}
+
 fn format_count_pct(count: u64, pct: f64) -> String {
     format!("{} ({})", format_whole_number(count), format_percent(pct))
 }
@@ -1148,7 +1179,20 @@ mod tests {
         assert_eq!(stats.flats, 1);
         assert!((stats.pnl - 5.0).abs() < 0.000001);
         assert!((stats.fees - 1.5).abs() < 0.000001);
+        assert!((stats.fee_drag_pct().unwrap() - 23.076923).abs() < 0.0001);
+        assert!((stats.fee_notional_pct().unwrap() - 0.88235294).abs() < 0.0001);
         assert!((stats.roi_pct().unwrap() - 2.91545189).abs() < 0.0001);
+    }
+
+    #[test]
+    fn fee_drag_is_unavailable_when_gross_edge_is_not_positive() {
+        let stats = SummaryStats {
+            fees: 2.0,
+            pnl: -3.0,
+            ..SummaryStats::default()
+        };
+
+        assert_eq!(stats.fee_drag_pct(), None);
     }
 
     #[test]
@@ -1194,6 +1238,8 @@ mod tests {
         assert!(rendered.contains("Trade Performance Analysis"));
         assert!(rendered.contains("Fee model"));
         assert!(rendered.contains("Net PnL"));
+        assert!(rendered.contains("Fee Drag"));
+        assert!(rendered.contains("Fee/Notional"));
         assert!(rendered.contains("By Asset"));
         assert!(rendered.contains("By Time Remaining"));
         assert!(rendered.contains("By Entry Vs Start Line"));
