@@ -1,4 +1,8 @@
-use std::{str::FromStr, sync::Arc, time::Duration};
+use std::{
+    str::FromStr,
+    sync::Arc,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 
 use alloy::{signers::Signer as _, signers::local::PrivateKeySigner};
 use anyhow::{Context, Result, bail};
@@ -10,7 +14,7 @@ use polymarket_client_sdk_v2::{
         types::{
             Amount, AssetType, OrderType, Side, SignatureType,
             request::{BalanceAllowanceRequest, OrdersRequest, TradesRequest},
-            response::{HeartbeatResponse, PostOrderResponse},
+            response::{BalanceAllowanceResponse, HeartbeatResponse, PostOrderResponse},
         },
     },
     error::{Error as PolymarketError, Status as PolymarketStatus},
@@ -29,12 +33,14 @@ use crate::{
 type AuthenticatedClient = Client<
     polymarket_client_sdk_v2::auth::state::Authenticated<polymarket_client_sdk_v2::auth::Normal>,
 >;
+type ClientState = Arc<Mutex<AuthenticatedClient>>;
 type HeartbeatState = Arc<Mutex<Option<Uuid>>>;
 const INITIAL_CURSOR: &str = "MA==";
 
 pub struct LiveTradeExecutor {
-    client: AuthenticatedClient,
+    client: ClientState,
     signer: PrivateKeySigner,
+    auth_config: LiveAuthConfig,
     order_type: OrderType,
     heartbeat_state: HeartbeatState,
     _heartbeat_task: JoinHandle<()>,
@@ -50,10 +56,12 @@ impl LiveTradeExecutor {
             .context("parse POLYMARKET_PRIVATE_KEY")?
             .with_chain_id(Some(POLYGON));
 
-        let clob_config = Config::builder().use_server_time(true).build();
-        let client = Client::new(&config.clob_api_url, clob_config)
-            .with_context(|| format!("create CLOB client for {}", config.clob_api_url))?;
-        let geoblock = client
+        let unauthenticated_client = Client::new(
+            &config.clob_api_url,
+            Config::builder().use_server_time(true).build(),
+        )
+        .with_context(|| format!("create CLOB client for {}", config.clob_api_url))?;
+        let geoblock = unauthenticated_client
             .check_geoblock()
             .await
             .context("check Polymarket geoblock status")?;
@@ -70,11 +78,7 @@ impl LiveTradeExecutor {
             "Polymarket geoblock check passed"
         );
 
-        let mut auth = client
-            .authentication_builder(&signer)
-            .signature_type(map_signature_type(config.polymarket_signature_type));
-
-        if let Some(funder) = &config.polymarket_funder_address {
+        let funder_address = if let Some(funder) = &config.polymarket_funder_address {
             let funder_address =
                 Address::from_str(funder).context("parse POLYMARKET_FUNDER_ADDRESS")?;
             validate_funder_address(
@@ -82,99 +86,54 @@ impl LiveTradeExecutor {
                 signer.address(),
                 funder_address,
             )?;
-            auth = auth.funder(funder_address);
-        }
-
-        if let Some(credentials) = credentials_from_config(config)? {
-            auth = auth.credentials(credentials);
-        } else if let Some(nonce) = config.polymarket_api_nonce {
-            auth = auth.nonce(nonce);
-        }
-
-        let client = auth
-            .authenticate()
+            Some(funder_address)
+        } else {
+            None
+        };
+        let auth_config = LiveAuthConfig {
+            clob_api_url: config.clob_api_url.clone(),
+            credentials: credentials_from_config(config)?,
+            nonce: config.polymarket_api_nonce,
+            signature_type: config.polymarket_signature_type,
+            funder_address,
+        };
+        let mut client = authenticate_client(&auth_config, &signer, CredentialSource::Configured)
             .await
             .context("authenticate CLOB client")?;
         let heartbeat_state = Arc::new(Mutex::new(None));
         refresh_heartbeat(&client, &heartbeat_state)
             .await
             .context("initialize CLOB heartbeat")?;
-        let closed_only = match client.closed_only_mode().await {
-            Ok(closed_only) => closed_only,
-            Err(error) if is_l2_auth_error(&error) => {
-                warn!(
-                    event = "live_auth_refresh",
-                    endpoint = "auth/ban-status/closed-only",
-                    error = %error,
-                    "refreshing heartbeat after startup L2 auth error"
-                );
-                refresh_heartbeat(&client, &heartbeat_state)
-                    .await
-                    .context("refresh CLOB heartbeat after closed-only auth error")?;
-                client
-                    .closed_only_mode()
-                    .await
-                    .context("check CLOB closed-only mode after heartbeat refresh")?
-            }
-            Err(error) => return Err(error).context("check CLOB closed-only mode"),
-        };
-        if closed_only.closed_only {
-            bail!("Polymarket account is in closed-only mode");
-        }
-
-        let collateral_request = BalanceAllowanceRequest::builder()
-            .asset_type(AssetType::Collateral)
-            .build();
-        match client
-            .update_balance_allowance(collateral_request.clone())
-            .await
-        {
-            Ok(()) => {}
-            Err(error) if is_l2_auth_error(&error) => {
-                warn!(
-                    event = "live_auth_refresh",
-                    endpoint = "balance-allowance/update",
-                    error = %error,
-                    "refreshing heartbeat after balance refresh auth error"
-                );
-                refresh_heartbeat(&client, &heartbeat_state)
-                    .await
-                    .context("refresh CLOB heartbeat after balance refresh auth error")?;
-                if let Err(retry_error) = client
-                    .update_balance_allowance(collateral_request.clone())
-                    .await
-                {
-                    warn!(
-                        error = %format!("{retry_error:#}"),
-                        "failed to refresh CLOB collateral balance allowance after heartbeat refresh"
-                    );
-                }
-            }
-            Err(error) => {
-                warn!(
-                    error = %format!("{error:#}"),
-                    "failed to refresh CLOB collateral balance allowance"
-                );
-            }
-        }
-        let collateral = match client.balance_allowance(collateral_request.clone()).await {
+        let collateral = match validate_live_account(&client, &heartbeat_state).await {
             Ok(collateral) => collateral,
-            Err(error) if is_l2_auth_error(&error) => {
+            Err(error) if is_l2_auth_error_chain(&error) => {
+                let nonce = fresh_api_nonce()?;
                 warn!(
-                    event = "live_auth_refresh",
-                    endpoint = "balance-allowance",
-                    error = %error,
-                    "refreshing heartbeat after balance query auth error"
+                    event = "live_api_key_rotate",
+                    nonce,
+                    error = %format!("{error:#}"),
+                    "creating fresh Polymarket API credentials after startup L2 auth error"
                 );
+                client =
+                    authenticate_client(&auth_config, &signer, CredentialSource::FreshNonce(nonce))
+                        .await
+                        .context("authenticate CLOB client with fresh API credentials")?;
+                reset_heartbeat(&heartbeat_state).await;
                 refresh_heartbeat(&client, &heartbeat_state)
                     .await
-                    .context("refresh CLOB heartbeat after balance query auth error")?;
-                client
-                    .balance_allowance(collateral_request)
+                    .context("initialize CLOB heartbeat after API credential rotation")?;
+                let collateral = validate_live_account(&client, &heartbeat_state)
                     .await
-                    .context("query CLOB collateral balance allowance after heartbeat refresh")?
+                    .context("validate live account after API credential rotation")?;
+                info!(
+                    event = "live_api_key_rotated",
+                    nonce,
+                    api_key = %redacted_uuid(client.credentials().key()),
+                    "fresh Polymarket API credentials installed"
+                );
+                collateral
             }
-            Err(error) => return Err(error).context("query CLOB collateral balance allowance"),
+            Err(error) => return Err(error),
         };
         let min_order_usdc =
             Decimal::from_f64(config.min_order_usdc).context("convert min order USDC")?;
@@ -199,10 +158,15 @@ impl LiveTradeExecutor {
             "live trading executor authenticated"
         );
 
+        let client = Arc::new(Mutex::new(client));
         Ok(Self {
-            _heartbeat_task: spawn_heartbeat_task(client.clone(), Arc::clone(&heartbeat_state)),
+            _heartbeat_task: spawn_heartbeat_task(
+                Arc::clone(&client),
+                Arc::clone(&heartbeat_state),
+            ),
             client,
             signer,
+            auth_config,
             order_type: map_order_type(config.live_order_type),
             heartbeat_state,
         })
@@ -211,8 +175,8 @@ impl LiveTradeExecutor {
     pub async fn has_market_exposure(&self, condition_id: &str) -> Result<bool> {
         let market = B256::from_str(condition_id).context("parse market condition id")?;
         let orders_request = OrdersRequest::builder().market(market).build();
-        let orders = match self
-            .client
+        let mut client = self.current_client().await;
+        let orders = match client
             .orders(&orders_request, Some(INITIAL_CURSOR.to_string()))
             .await
         {
@@ -224,16 +188,34 @@ impl LiveTradeExecutor {
                     error = %error,
                     "refreshing heartbeat after L2 auth error"
                 );
-                refresh_heartbeat(&self.client, &self.heartbeat_state)
+                refresh_heartbeat(&client, &self.heartbeat_state)
                     .await
                     .context("refresh CLOB heartbeat after open-orders auth error")?;
-                self.client
+                match client
                     .orders(
                         &OrdersRequest::builder().market(market).build(),
                         Some(INITIAL_CURSOR.to_string()),
                     )
                     .await
-                    .context("query open orders after heartbeat refresh")?
+                {
+                    Ok(orders) => orders,
+                    Err(retry_error) if is_l2_auth_error(&retry_error) => {
+                        client = self
+                            .rotate_api_key_after_l2_auth_error("data/orders", &retry_error)
+                            .await?;
+                        client
+                            .orders(
+                                &OrdersRequest::builder().market(market).build(),
+                                Some(INITIAL_CURSOR.to_string()),
+                            )
+                            .await
+                            .context("query open orders after API credential rotation")?
+                    }
+                    Err(retry_error) => {
+                        return Err(retry_error)
+                            .context("query open orders after heartbeat refresh");
+                    }
+                }
             }
             Err(error) => return Err(error).context("query open orders"),
         };
@@ -242,8 +224,7 @@ impl LiveTradeExecutor {
         }
 
         let trades_request = TradesRequest::builder().market(market).build();
-        let trades = match self
-            .client
+        let trades = match client
             .trades(&trades_request, Some(INITIAL_CURSOR.to_string()))
             .await
         {
@@ -255,16 +236,34 @@ impl LiveTradeExecutor {
                     error = %error,
                     "refreshing heartbeat after L2 auth error"
                 );
-                refresh_heartbeat(&self.client, &self.heartbeat_state)
+                refresh_heartbeat(&client, &self.heartbeat_state)
                     .await
                     .context("refresh CLOB heartbeat after trades auth error")?;
-                self.client
+                match client
                     .trades(
                         &TradesRequest::builder().market(market).build(),
                         Some(INITIAL_CURSOR.to_string()),
                     )
                     .await
-                    .context("query trade history after heartbeat refresh")?
+                {
+                    Ok(trades) => trades,
+                    Err(retry_error) if is_l2_auth_error(&retry_error) => {
+                        client = self
+                            .rotate_api_key_after_l2_auth_error("data/trades", &retry_error)
+                            .await?;
+                        client
+                            .trades(
+                                &TradesRequest::builder().market(market).build(),
+                                Some(INITIAL_CURSOR.to_string()),
+                            )
+                            .await
+                            .context("query trade history after API credential rotation")?
+                    }
+                    Err(retry_error) => {
+                        return Err(retry_error)
+                            .context("query trade history after heartbeat refresh");
+                    }
+                }
             }
             Err(error) => return Err(error).context("query trade history"),
         };
@@ -277,8 +276,8 @@ impl LiveTradeExecutor {
         let amount = positive_decimal_truncated("amount_usdc", request.amount_usdc, 2)?;
         let price = probability_decimal_truncated("max_price", request.max_price, 2)?;
 
-        let response = self
-            .client
+        let client = self.current_client().await;
+        let response = match client
             .market_order()
             .token_id(token_id)
             .side(Side::Buy)
@@ -287,9 +286,201 @@ impl LiveTradeExecutor {
             .order_type(self.order_type.clone())
             .build_sign_and_post(&self.signer)
             .await
-            .context("post live Polymarket order")?;
+        {
+            Ok(response) => response,
+            Err(error) if is_l2_auth_error(&error) => {
+                if let Err(rotate_error) = self
+                    .rotate_api_key_after_l2_auth_error("order", &error)
+                    .await
+                {
+                    warn!(
+                        event = "live_api_key_rotate_error",
+                        error = %format!("{rotate_error:#}"),
+                        "failed to rotate Polymarket API credentials after order auth error"
+                    );
+                }
+                return Err(error).context("post live Polymarket order");
+            }
+            Err(error) => return Err(error).context("post live Polymarket order"),
+        };
 
         Ok(LiveOrderResponse::from(response))
+    }
+
+    async fn current_client(&self) -> AuthenticatedClient {
+        self.client.lock().await.clone()
+    }
+
+    async fn rotate_api_key_after_l2_auth_error(
+        &self,
+        endpoint: &'static str,
+        error: &PolymarketError,
+    ) -> Result<AuthenticatedClient> {
+        let nonce = fresh_api_nonce()?;
+        warn!(
+            event = "live_api_key_rotate",
+            endpoint,
+            nonce,
+            error = %error,
+            "creating fresh Polymarket API credentials after L2 auth error"
+        );
+        let client = authenticate_client(
+            &self.auth_config,
+            &self.signer,
+            CredentialSource::FreshNonce(nonce),
+        )
+        .await
+        .context("authenticate CLOB client with fresh API credentials")?;
+        reset_heartbeat(&self.heartbeat_state).await;
+        refresh_heartbeat(&client, &self.heartbeat_state)
+            .await
+            .context("refresh CLOB heartbeat after API credential rotation")?;
+        {
+            let mut current = self.client.lock().await;
+            *current = client.clone();
+        }
+        info!(
+            event = "live_api_key_rotated",
+            endpoint,
+            nonce,
+            api_key = %redacted_uuid(client.credentials().key()),
+            "fresh Polymarket API credentials installed"
+        );
+        Ok(client)
+    }
+}
+
+#[derive(Clone, Debug)]
+struct LiveAuthConfig {
+    clob_api_url: String,
+    credentials: Option<Credentials>,
+    nonce: Option<u32>,
+    signature_type: PolymarketSignatureType,
+    funder_address: Option<Address>,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum CredentialSource {
+    Configured,
+    FreshNonce(u32),
+}
+
+async fn authenticate_client(
+    config: &LiveAuthConfig,
+    signer: &PrivateKeySigner,
+    credential_source: CredentialSource,
+) -> Result<AuthenticatedClient> {
+    let client = Client::new(
+        &config.clob_api_url,
+        Config::builder().use_server_time(true).build(),
+    )
+    .with_context(|| format!("create CLOB client for {}", config.clob_api_url))?;
+    let mut auth = client
+        .authentication_builder(signer)
+        .signature_type(map_signature_type(config.signature_type));
+
+    if let Some(funder_address) = config.funder_address {
+        auth = auth.funder(funder_address);
+    }
+
+    match credential_source {
+        CredentialSource::Configured => {
+            if let Some(credentials) = config.credentials.clone() {
+                auth = auth.credentials(credentials);
+            } else if let Some(nonce) = config.nonce {
+                auth = auth.nonce(nonce);
+            }
+        }
+        CredentialSource::FreshNonce(nonce) => {
+            auth = auth.nonce(nonce);
+        }
+    }
+
+    auth.authenticate()
+        .await
+        .context("authenticate CLOB client")
+}
+
+async fn validate_live_account(
+    client: &AuthenticatedClient,
+    heartbeat_state: &HeartbeatState,
+) -> Result<BalanceAllowanceResponse> {
+    let closed_only = match client.closed_only_mode().await {
+        Ok(closed_only) => closed_only,
+        Err(error) if is_l2_auth_error(&error) => {
+            warn!(
+                event = "live_auth_refresh",
+                endpoint = "auth/ban-status/closed-only",
+                error = %error,
+                "refreshing heartbeat after startup L2 auth error"
+            );
+            refresh_heartbeat(client, heartbeat_state)
+                .await
+                .context("refresh CLOB heartbeat after closed-only auth error")?;
+            client
+                .closed_only_mode()
+                .await
+                .context("check CLOB closed-only mode after heartbeat refresh")?
+        }
+        Err(error) => return Err(error).context("check CLOB closed-only mode"),
+    };
+    if closed_only.closed_only {
+        bail!("Polymarket account is in closed-only mode");
+    }
+
+    let collateral_request = BalanceAllowanceRequest::builder()
+        .asset_type(AssetType::Collateral)
+        .build();
+    match client
+        .update_balance_allowance(collateral_request.clone())
+        .await
+    {
+        Ok(()) => {}
+        Err(error) if is_l2_auth_error(&error) => {
+            warn!(
+                event = "live_auth_refresh",
+                endpoint = "balance-allowance/update",
+                error = %error,
+                "refreshing heartbeat after balance refresh auth error"
+            );
+            refresh_heartbeat(client, heartbeat_state)
+                .await
+                .context("refresh CLOB heartbeat after balance refresh auth error")?;
+            if let Err(retry_error) = client
+                .update_balance_allowance(collateral_request.clone())
+                .await
+            {
+                warn!(
+                    error = %format!("{retry_error:#}"),
+                    "failed to refresh CLOB collateral balance allowance after heartbeat refresh"
+                );
+            }
+        }
+        Err(error) => {
+            warn!(
+                error = %format!("{error:#}"),
+                "failed to refresh CLOB collateral balance allowance"
+            );
+        }
+    }
+    match client.balance_allowance(collateral_request.clone()).await {
+        Ok(collateral) => Ok(collateral),
+        Err(error) if is_l2_auth_error(&error) => {
+            warn!(
+                event = "live_auth_refresh",
+                endpoint = "balance-allowance",
+                error = %error,
+                "refreshing heartbeat after balance query auth error"
+            );
+            refresh_heartbeat(client, heartbeat_state)
+                .await
+                .context("refresh CLOB heartbeat after balance query auth error")?;
+            client
+                .balance_allowance(collateral_request)
+                .await
+                .context("query CLOB collateral balance allowance after heartbeat refresh")
+        }
+        Err(error) => Err(error).context("query CLOB collateral balance allowance"),
     }
 }
 
@@ -335,10 +526,11 @@ async fn refresh_heartbeat(
     }
 }
 
-fn spawn_heartbeat_task(
-    client: AuthenticatedClient,
-    heartbeat_state: HeartbeatState,
-) -> JoinHandle<()> {
+async fn reset_heartbeat(heartbeat_state: &HeartbeatState) {
+    *heartbeat_state.lock().await = None;
+}
+
+fn spawn_heartbeat_task(client: ClientState, heartbeat_state: HeartbeatState) -> JoinHandle<()> {
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(5));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -346,6 +538,7 @@ fn spawn_heartbeat_task(
 
         loop {
             interval.tick().await;
+            let client = client.lock().await.clone();
             if let Err(error) = refresh_heartbeat(&client, &heartbeat_state).await {
                 warn!(
                     event = "live_heartbeat_error",
@@ -388,11 +581,40 @@ fn heartbeat_id_from_error(error: &PolymarketError) -> Option<Uuid> {
     body.heartbeat_id
 }
 
+fn fresh_api_nonce() -> Result<u32> {
+    let seconds = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .context("system clock is before Unix epoch")?
+        .as_secs();
+    u32::try_from(seconds).context("current Unix timestamp exceeds u32 nonce range")
+}
+
+fn redacted_uuid(value: Uuid) -> String {
+    let value = value.to_string();
+    let suffix_start = value.len().saturating_sub(4);
+    format!("{}...{}", &value[..8], &value[suffix_start..])
+}
+
 fn is_l2_auth_error(error: &PolymarketError) -> bool {
     let Some(status) = error.downcast_ref::<PolymarketStatus>() else {
         return false;
     };
 
+    is_invalid_api_key_status(status)
+}
+
+fn is_l2_auth_error_chain(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause
+            .downcast_ref::<PolymarketError>()
+            .is_some_and(is_l2_auth_error)
+            || cause
+                .downcast_ref::<PolymarketStatus>()
+                .is_some_and(is_invalid_api_key_status)
+    })
+}
+
+fn is_invalid_api_key_status(status: &PolymarketStatus) -> bool {
     status.status_code == polymarket_client_sdk_v2::error::StatusCode::UNAUTHORIZED
         && status.message.contains("Invalid api key")
 }
