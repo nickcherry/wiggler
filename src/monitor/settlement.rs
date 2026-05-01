@@ -77,18 +77,18 @@ pub(super) fn live_settlement_summary_text(
 
     lines.push(String::new());
     lines.push(format!(
-        "Bot total wins: {} ({})",
+        "Total wins: {} ({})",
         format_whole_number(all_time_totals.wins),
         format_percent(win_pct)
     ));
     lines.push(format!(
-        "Bot total losses: {} ({})",
+        "Total losses: {} ({})",
         format_whole_number(all_time_totals.losses),
         format_percent(loss_pct)
     ));
     lines.push(String::new());
     lines.push(format!(
-        "Bot total PnL: {}",
+        "Total PnL: {}",
         format_signed_usdc(all_time_totals.total_pnl)
     ));
     lines.join("\n")

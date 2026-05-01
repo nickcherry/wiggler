@@ -39,7 +39,11 @@ Polymarket history.
 Live entry fill messages use this shape:
 
 ```text
-Entered BTC ↑ for $49.99, price line @ $77,972.55
+Entered BTC ↑ for $49.99 @ $78,000.00
+
+Price line is $77,972.55
+
+Current price is 0.04% above the price line
 ```
 
 Live entry rejection messages use this shape:
@@ -54,10 +58,10 @@ Five-minute settlement summaries use this shape:
 BTC ↑ won +$58.35
 ETH ↓ lost -$49.99
 
-Bot total wins: 1 (50%)
-Bot total losses: 1 (50%)
+Total wins: 1 (50%)
+Total losses: 1 (50%)
 
-Bot total PnL: +$8.36
+Total PnL: +$8.36
 ```
 
 Keep messages terse enough to scan on mobile.

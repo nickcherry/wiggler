@@ -2184,6 +2184,35 @@ fn format_percent(value: f64) -> String {
     }
 }
 
+fn format_percent_limited(value: f64, max_decimals: usize) -> String {
+    let mut text = format!("{:.*}", max_decimals, value);
+    if let Some(dot_index) = text.find('.') {
+        while text.ends_with('0') {
+            text.pop();
+        }
+        if text.len() == dot_index + 1 {
+            text.pop();
+        }
+    }
+    format!("{text}%")
+}
+
+fn format_price_line_distance_percent(current_price: f64, line_price: f64) -> String {
+    let line_abs = line_price.abs();
+    if line_abs <= f64::EPSILON {
+        return format_percent_limited(0.0, 2);
+    }
+    format_percent_limited(((current_price - line_price).abs() / line_abs) * 100.0, 2)
+}
+
+fn price_line_position(current_price: f64, line_price: f64) -> &'static str {
+    if current_price < line_price {
+        "below"
+    } else {
+        "above"
+    }
+}
+
 fn add_digit_grouping(digits: &str) -> String {
     let mut grouped = String::with_capacity(digits.len() + digits.len() / 3);
     for (index, ch) in digits.chars().rev().enumerate() {
@@ -2218,11 +2247,14 @@ fn live_entry_filled_text(prepared: &PreparedTrade, response: &LiveOrderResponse
         .filled_amount_usdc()
         .unwrap_or(prepared.amount_usdc);
     format!(
-        "Entered {} {} for {}, price line @ {}",
+        "Entered {} {} for {} @ {}\n\nPrice line is {}\n\nCurrent price is {} {} the price line",
         asset_ticker(prepared.asset),
         outcome_arrow(&prepared.outcome),
         format_usdc(filled_amount),
-        format_market_price(prepared.asset, prepared.line_price)
+        format_market_price(prepared.asset, prepared.current_price),
+        format_market_price(prepared.asset, prepared.line_price),
+        format_price_line_distance_percent(prepared.current_price, prepared.line_price),
+        price_line_position(prepared.current_price, prepared.line_price)
     )
 }
 
@@ -3183,6 +3215,7 @@ mod tests {
         let mut prepared = prepared_trade(Outcome::Up, "up-token");
         prepared.asset = Asset::Btc;
         prepared.line_price = 77972.55;
+        prepared.current_price = 78000.0;
         prepared.amount_usdc = 50.0;
         let response = LiveOrderResponse {
             order_id: "0xorder".to_string(),
@@ -3196,7 +3229,13 @@ mod tests {
 
         assert_eq!(
             live_entry_filled_text(&prepared, &response),
-            "Entered BTC ↑ for $50.00, price line @ $77,972.55"
+            "Entered BTC ↑ for $50.00 @ $78,000.00\n\nPrice line is $77,972.55\n\nCurrent price is 0.04% above the price line"
+        );
+
+        prepared.current_price = 77900.0;
+        assert_eq!(
+            live_entry_filled_text(&prepared, &response),
+            "Entered BTC ↑ for $50.00 @ $77,900.00\n\nPrice line is $77,972.55\n\nCurrent price is 0.09% below the price line"
         );
     }
 
@@ -3241,7 +3280,7 @@ mod tests {
 
         assert_eq!(
             live_settlement_summary_text(&window_rows, closed_position_totals(&all_time_rows)),
-            "BTC ↑ won +$58.35\nETH ↓ lost -$50.00\n\nBot total wins: 2 (66.7%)\nBot total losses: 1 (33.3%)\n\nBot total PnL: +$108.35"
+            "BTC ↑ won +$58.35\nETH ↓ lost -$50.00\n\nTotal wins: 2 (66.7%)\nTotal losses: 1 (33.3%)\n\nTotal PnL: +$108.35"
         );
     }
 
