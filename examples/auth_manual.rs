@@ -121,8 +121,8 @@ async fn main() -> Result<()> {
         fs::write(
             &path,
             format!(
-                "POLYMARKET_API_KEY={}\nPOLYMARKET_API_SECRET={}\nPOLYMARKET_API_PASSPHRASE={}\n",
-                creds.api_key, creds.secret, creds.passphrase
+                "POLYMARKET_API_KEY={}\nPOLYMARKET_API_SECRET={}\nPOLYMARKET_API_PASSPHRASE={}\nPOLYMARKET_API_NONCE={}\n",
+                creds.api_key, creds.secret, creds.passphrase, nonce
             ),
         )
         .with_context(|| format!("write {path}"))?;

@@ -119,7 +119,9 @@ For API-key setup, prefer the checked-in auth helper:
 set -a
 . ./.env
 set +a
+export POLYMARKET_API_NONCE="$(date +%s)"
 AUTH_MANUAL_MODE=create \
+AUTH_MANUAL_BODY='{}' \
 AUTH_MANUAL_WRITE_ENV=tmp/polymarket-api.env \
 cargo run --release --example auth_manual
 ```
@@ -128,7 +130,23 @@ The helper uses the same L1 EIP-712 auth as the Rust SDK but sends an explicit
 empty JSON body on `POST /auth/api-key`. That request shape avoids Cloudflare
 blocks observed from the stock SDK bodyless create call. The generated file
 contains `POLYMARKET_API_KEY`, `POLYMARKET_API_SECRET`, and
-`POLYMARKET_API_PASSPHRASE`; keep it out of git.
+`POLYMARKET_API_PASSPHRASE`; keep it out of git. It also writes the nonce used
+to mint the credentials so the key can be derived again later if needed. If L2
+read endpoints start returning `401 Unauthorized/Invalid api key`, create fresh
+credentials with a new nonce before resuming live trading.
+
+To test the configured credentials without placing orders, run:
+
+```bash
+set -a
+. ./.env
+set +a
+cargo run --example l2_probe
+```
+
+The probe checks `closed_only`, balance/allowance, open orders, and trade
+history with the current L2 credentials. Set `WIGGLER_PROBE_MARKET=<condition
+id>` to include a market-filtered orders/trades check.
 
 When the account is a Polymarket proxy wallet, verify the signature type before
 live trading. `proxy`, `gnosis-safe`, and `eoa` can all authenticate, but only
