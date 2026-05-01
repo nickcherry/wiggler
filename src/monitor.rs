@@ -334,6 +334,7 @@ struct MonitorState {
     tracked_entries: HashMap<String, TrackedEntry>,
     resolved_markets: HashSet<String>,
     initial_books_seen: HashSet<String>,
+    live_pre_submit_error_cooldown_until: Option<DateTime<Utc>>,
     event_counts: EventCounts,
 }
 
@@ -949,6 +950,14 @@ impl MonitorState {
         telegram: &TelegramClient,
         initial_prepared: &PreparedTrade,
     ) {
+        let now = Utc::now();
+        if self
+            .live_pre_submit_error_cooldown_until
+            .is_some_and(|until| now < until)
+        {
+            return;
+        }
+
         if self.pending_markets.contains(&market.condition_id)
             || self.positioned_markets.contains(&market.condition_id)
             || self.failed_order_markets.contains(&market.condition_id)
@@ -968,9 +977,13 @@ impl MonitorState {
                 );
                 return;
             }
-            Ok(false) => {}
+            Ok(false) => {
+                self.live_pre_submit_error_cooldown_until = None;
+            }
             Err(error) => {
                 let error_chain = format!("{error:#}");
+                self.live_pre_submit_error_cooldown_until =
+                    Some(Utc::now() + TimeDelta::seconds(60));
                 warn!(
                     event = "live_exposure_reconcile_error",
                     error = %error_chain,

@@ -30,6 +30,7 @@ type AuthenticatedClient = Client<
     polymarket_client_sdk_v2::auth::state::Authenticated<polymarket_client_sdk_v2::auth::Normal>,
 >;
 type HeartbeatState = Arc<Mutex<Option<Uuid>>>;
+const INITIAL_CURSOR: &str = "MA==";
 
 pub struct LiveTradeExecutor {
     client: AuthenticatedClient,
@@ -210,7 +211,11 @@ impl LiveTradeExecutor {
     pub async fn has_market_exposure(&self, condition_id: &str) -> Result<bool> {
         let market = B256::from_str(condition_id).context("parse market condition id")?;
         let orders_request = OrdersRequest::builder().market(market).build();
-        let orders = match self.client.orders(&orders_request, None).await {
+        let orders = match self
+            .client
+            .orders(&orders_request, Some(INITIAL_CURSOR.to_string()))
+            .await
+        {
             Ok(orders) => orders,
             Err(error) if is_l2_auth_error(&error) => {
                 warn!(
@@ -223,7 +228,10 @@ impl LiveTradeExecutor {
                     .await
                     .context("refresh CLOB heartbeat after open-orders auth error")?;
                 self.client
-                    .orders(&OrdersRequest::builder().market(market).build(), None)
+                    .orders(
+                        &OrdersRequest::builder().market(market).build(),
+                        Some(INITIAL_CURSOR.to_string()),
+                    )
                     .await
                     .context("query open orders after heartbeat refresh")?
             }
@@ -234,7 +242,11 @@ impl LiveTradeExecutor {
         }
 
         let trades_request = TradesRequest::builder().market(market).build();
-        let trades = match self.client.trades(&trades_request, None).await {
+        let trades = match self
+            .client
+            .trades(&trades_request, Some(INITIAL_CURSOR.to_string()))
+            .await
+        {
             Ok(trades) => trades,
             Err(error) if is_l2_auth_error(&error) => {
                 warn!(
@@ -247,7 +259,10 @@ impl LiveTradeExecutor {
                     .await
                     .context("refresh CLOB heartbeat after trades auth error")?;
                 self.client
-                    .trades(&TradesRequest::builder().market(market).build(), None)
+                    .trades(
+                        &TradesRequest::builder().market(market).build(),
+                        Some(INITIAL_CURSOR.to_string()),
+                    )
                     .await
                     .context("query trade history after heartbeat refresh")?
             }
