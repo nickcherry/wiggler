@@ -27,9 +27,12 @@ sent as concise rejection messages, logged, and recorded, but they do not block
 the monitor from looking for another entry in the same market.
 
 Live settlement Telegram win/loss/PnL values are fetched from Polymarket
-`closed-positions` data using `POLYMARKET_FUNDER_ADDRESS`. The local
-trade-record ledger remains available for debugging exact bot attempts and
-closeout timing, but it is not used as the Telegram settlement source of truth.
+`closed-positions` data using `POLYMARKET_FUNDER_ADDRESS`. The listed positions
+are scoped to the most recent settled five-minute window; the total wins,
+losses, and PnL underneath are all-time account totals from the fetched
+Polymarket closed-position history. The local trade-record ledger remains
+available for debugging exact bot attempts and closeout timing, but it is not
+used as the Telegram settlement source of truth.
 
 ## Message Content
 

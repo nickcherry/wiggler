@@ -367,15 +367,24 @@ impl AccountPnlClient {
     }
 
     async fn fetch_recent_closed_positions(&self) -> Option<Vec<ClosedPositionPnlRow>> {
+        self.fetch_closed_positions(MAX_RECENT_CLOSED_POSITION_ROWS)
+            .await
+    }
+
+    async fn fetch_all_closed_positions(&self) -> Option<Vec<ClosedPositionPnlRow>> {
+        self.fetch_closed_positions(MAX_CLOSED_POSITION_ROWS).await
+    }
+
+    async fn fetch_closed_positions(&self, max_rows: usize) -> Option<Vec<ClosedPositionPnlRow>> {
         let Some(user) = self.user.as_deref() else {
             return None;
         };
-        match self.fetch_closed_position_rows(user, 500).await {
+        match self.fetch_closed_position_rows(user, max_rows).await {
             Some(rows) => Some(rows),
             None => {
                 warn!(
                     user,
-                    "failed to fetch Polymarket recent closed positions for Telegram summary"
+                    "failed to fetch Polymarket closed positions for Telegram summary"
                 );
                 None
             }
@@ -390,8 +399,9 @@ impl AccountPnlClient {
         let closed_url = format!("{}/closed-positions", self.data_api_base_url);
         let limit = 50usize;
         let mut all_rows = Vec::new();
+        let mut offset = 0usize;
 
-        for offset in (0..=max_rows).step_by(limit) {
+        while all_rows.len() < max_rows {
             let response = match self
                 .http
                 .get(&closed_url)
@@ -431,8 +441,13 @@ impl AccountPnlClient {
             if done {
                 return Some(all_rows);
             }
+            offset += limit;
         }
 
+        warn!(
+            max_rows,
+            "Polymarket closed position fetch hit row cap; Telegram all-time totals may be partial"
+        );
         Some(all_rows)
     }
 }
@@ -445,6 +460,13 @@ struct ClosedPositionPnlRow {
     event_slug: Option<String>,
     title: Option<String>,
     outcome: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct ClosedPositionTotals {
+    wins: u64,
+    losses: u64,
+    total_pnl: f64,
 }
 
 fn live_settlement_candidate_slots(now: DateTime<Utc>, duration: TimeDelta) -> Vec<DateTime<Utc>> {
@@ -463,38 +485,31 @@ fn live_settlement_candidate_slots(now: DateTime<Utc>, duration: TimeDelta) -> V
         .collect()
 }
 
-fn live_settlement_summary_text(rows: &[ClosedPositionPnlRow]) -> String {
-    let mut wins = 0u64;
-    let mut losses = 0u64;
-    let mut total_pnl = 0.0;
+fn live_settlement_summary_text(
+    window_rows: &[ClosedPositionPnlRow],
+    all_time_totals: ClosedPositionTotals,
+) -> String {
     let mut lines = Vec::new();
 
-    for row in rows {
+    for row in window_rows {
         let pnl = row.realized_pnl.unwrap_or(0.0);
-        total_pnl += pnl;
-        let won = pnl > 0.0;
-        if won {
-            wins += 1;
-        } else {
-            losses += 1;
-        }
         lines.push(format!(
             "{} {} {} {}",
             closed_position_ticker(row),
             closed_position_outcome_arrow(row),
-            if won { "won" } else { "lost" },
+            if pnl > 0.0 { "won" } else { "lost" },
             format_signed_usdc(pnl)
         ));
     }
 
-    let total = wins + losses;
+    let total = all_time_totals.wins + all_time_totals.losses;
     let win_pct = if total > 0 {
-        (wins as f64 / total as f64) * 100.0
+        (all_time_totals.wins as f64 / total as f64) * 100.0
     } else {
         0.0
     };
     let loss_pct = if total > 0 {
-        (losses as f64 / total as f64) * 100.0
+        (all_time_totals.losses as f64 / total as f64) * 100.0
     } else {
         0.0
     };
@@ -502,17 +517,34 @@ fn live_settlement_summary_text(rows: &[ClosedPositionPnlRow]) -> String {
     lines.push(String::new());
     lines.push(format!(
         "Total wins: {} ({})",
-        format_whole_number(wins),
+        format_whole_number(all_time_totals.wins),
         format_percent(win_pct)
     ));
     lines.push(format!(
         "Total losses: {} ({})",
-        format_whole_number(losses),
+        format_whole_number(all_time_totals.losses),
         format_percent(loss_pct)
     ));
     lines.push(String::new());
-    lines.push(format!("Total PnL: {}", format_signed_usdc(total_pnl)));
+    lines.push(format!(
+        "Total PnL: {}",
+        format_signed_usdc(all_time_totals.total_pnl)
+    ));
     lines.join("\n")
+}
+
+fn closed_position_totals(rows: &[ClosedPositionPnlRow]) -> ClosedPositionTotals {
+    let mut totals = ClosedPositionTotals::default();
+    for row in rows {
+        let pnl = row.realized_pnl.unwrap_or(0.0);
+        totals.total_pnl += pnl;
+        if pnl > 0.0 {
+            totals.wins += 1;
+        } else {
+            totals.losses += 1;
+        }
+    }
+    totals
 }
 
 fn closed_position_slot_start(row: &ClosedPositionPnlRow) -> Option<DateTime<Utc>> {
@@ -621,12 +653,13 @@ impl MonitorState {
             return;
         }
 
-        let Some(rows) = account_pnl.fetch_recent_closed_positions().await else {
+        let Some(recent_rows) = account_pnl.fetch_recent_closed_positions().await else {
             return;
         };
 
+        let mut summaries = Vec::new();
         for slot_start in unsent_slots {
-            let mut slot_rows = rows
+            let mut slot_rows = recent_rows
                 .iter()
                 .filter(|row| closed_position_slot_start(row) == Some(slot_start))
                 .cloned()
@@ -647,8 +680,20 @@ impl MonitorState {
                             .total_cmp(&right.realized_pnl.unwrap_or(0.0))
                     })
             });
+            summaries.push((slot_start, slot_rows));
+        }
 
-            let message = live_settlement_summary_text(&slot_rows);
+        if summaries.is_empty() {
+            return;
+        }
+
+        let Some(all_rows) = account_pnl.fetch_all_closed_positions().await else {
+            return;
+        };
+        let all_time_totals = closed_position_totals(&all_rows);
+
+        for (slot_start, slot_rows) in summaries {
+            let message = live_settlement_summary_text(&slot_rows, all_time_totals);
             match telegram.send_message(&message).await {
                 Ok(()) => {
                     self.sent_live_settlement_slots.insert(slot_start);
@@ -2331,6 +2376,8 @@ const RETRYABLE_NO_FILL_COOLDOWN_SECONDS: i64 = 10;
 const LIVE_SETTLEMENT_POLL_SECONDS: u64 = 15;
 const LIVE_SETTLEMENT_DELAY_SECONDS: u64 = 20;
 const LIVE_SETTLEMENT_LOOKBACK_SLOTS: u32 = 3;
+const MAX_RECENT_CLOSED_POSITION_ROWS: usize = 500;
+const MAX_CLOSED_POSITION_ROWS: usize = 50_000;
 
 #[derive(Clone, Debug, Default)]
 struct MarketPricePath {
@@ -2525,10 +2572,10 @@ mod tests {
 
     use super::{
         ClosedPositionPnlRow, MarketPricePath, MonitorState, PathState, PreparedTrade, SlotLine,
-        asset_ids_for_markets, distance_bps, format_market_price, format_signed_usdc, format_usdc,
-        is_retryable_no_fill_error, live_entry_filled_text, live_entry_rejected_text,
-        live_settlement_summary_text, pre_submit_matches_initial, required_edge_probability,
-        slot_start_from_market_slug, summarize_asks,
+        asset_ids_for_markets, closed_position_totals, distance_bps, format_market_price,
+        format_signed_usdc, format_usdc, is_retryable_no_fill_error, live_entry_filled_text,
+        live_entry_rejected_text, live_settlement_summary_text, pre_submit_matches_initial,
+        required_edge_probability, slot_start_from_market_slug, summarize_asks,
     };
 
     #[test]
@@ -3076,7 +3123,7 @@ mod tests {
 
     #[test]
     fn settlement_summary_uses_polymarket_closed_rows() {
-        let rows = vec![
+        let window_rows = vec![
             ClosedPositionPnlRow {
                 realized_pnl: Some(58.352126999999996),
                 slug: Some("btc-updown-5m-1777648800".to_string()),
@@ -3092,11 +3139,51 @@ mod tests {
                 outcome: Some("Down".to_string()),
             },
         ];
+        let mut all_time_rows = window_rows.clone();
+        all_time_rows.push(ClosedPositionPnlRow {
+            realized_pnl: Some(100.0),
+            slug: Some("sol-updown-5m-1777648500".to_string()),
+            event_slug: None,
+            title: Some("Solana Up or Down - May 1, 11:15AM-11:20AM ET".to_string()),
+            outcome: Some("Up".to_string()),
+        });
 
         assert_eq!(
-            live_settlement_summary_text(&rows),
-            "BTC ↑ won +$58.35\nETH ↓ lost -$50.00\n\nTotal wins: 1 (50%)\nTotal losses: 1 (50%)\n\nTotal PnL: +$8.35"
+            live_settlement_summary_text(&window_rows, closed_position_totals(&all_time_rows)),
+            "BTC ↑ won +$58.35\nETH ↓ lost -$50.00\n\nTotal wins: 2 (66.7%)\nTotal losses: 1 (33.3%)\n\nTotal PnL: +$108.35"
         );
+    }
+
+    #[test]
+    fn closed_position_totals_are_all_time() {
+        let rows = vec![
+            ClosedPositionPnlRow {
+                realized_pnl: Some(58.352126999999996),
+                slug: None,
+                event_slug: None,
+                title: None,
+                outcome: None,
+            },
+            ClosedPositionPnlRow {
+                realized_pnl: Some(-50.0),
+                slug: None,
+                event_slug: None,
+                title: None,
+                outcome: None,
+            },
+            ClosedPositionPnlRow {
+                realized_pnl: Some(100.0),
+                slug: None,
+                event_slug: None,
+                title: None,
+                outcome: None,
+            },
+        ];
+
+        let totals = closed_position_totals(&rows);
+        assert_eq!(totals.wins, 2);
+        assert_eq!(totals.losses, 1);
+        assert!((totals.total_pnl - 108.352127).abs() < 0.000001);
     }
 
     #[test]
