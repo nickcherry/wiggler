@@ -113,6 +113,28 @@ Before enabling live trading, the funder wallet must have the required
 Polymarket collateral allowance. The SDK/API will reject orders with
 insufficient balance or allowance.
 
+For API-key setup, prefer the checked-in auth helper:
+
+```bash
+set -a
+. ./.env
+set +a
+AUTH_MANUAL_MODE=create \
+AUTH_MANUAL_WRITE_ENV=tmp/polymarket-api.env \
+cargo run --release --example auth_manual
+```
+
+The helper uses the same L1 EIP-712 auth as the Rust SDK but sends an explicit
+empty JSON body on `POST /auth/api-key`. That request shape avoids Cloudflare
+blocks observed from the stock SDK bodyless create call. The generated file
+contains `POLYMARKET_API_KEY`, `POLYMARKET_API_SECRET`, and
+`POLYMARKET_API_PASSPHRASE`; keep it out of git.
+
+When the account is a Polymarket proxy wallet, verify the signature type before
+live trading. `proxy`, `gnosis-safe`, and `eoa` can all authenticate, but only
+the correct type reports the funded collateral balance. On the current prod
+account, `gnosis-safe` is the type that returns collateral and allowances.
+
 ## Underlying Price Feed
 
 The 5-minute crypto market descriptions say resolution uses Chainlink streams,
