@@ -1,7 +1,7 @@
 use std::{
     str::FromStr,
     sync::Arc,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use alloy::{
@@ -34,6 +34,7 @@ use tracing::{info, warn};
 
 use crate::{
     config::{LiveOrderType, PolymarketSignatureType, RuntimeConfig},
+    telegram::TelegramClient,
     trading::order::{LiveOrderRequest, LiveOrderResponse},
 };
 
@@ -63,7 +64,7 @@ pub struct LiveTradeExecutor {
 }
 
 impl LiveTradeExecutor {
-    pub async fn from_config(config: &RuntimeConfig) -> Result<Self> {
+    pub async fn from_config(config: &RuntimeConfig, telegram: TelegramClient) -> Result<Self> {
         let private_key = config
             .polymarket_private_key
             .as_deref()
@@ -205,6 +206,9 @@ impl LiveTradeExecutor {
             _heartbeat_task: spawn_heartbeat_task(
                 Arc::clone(&client),
                 Arc::clone(&heartbeat_state),
+                auth_config.clone(),
+                signer.clone(),
+                telegram,
             ),
             client,
             signer,
@@ -688,16 +692,57 @@ async fn reset_heartbeat(heartbeat_state: &HeartbeatState) {
     *heartbeat_state.lock().await = None;
 }
 
-fn spawn_heartbeat_task(client: ClientState, heartbeat_state: HeartbeatState) -> JoinHandle<()> {
+fn spawn_heartbeat_task(
+    client_state: ClientState,
+    heartbeat_state: HeartbeatState,
+    auth_config: LiveAuthConfig,
+    signer: PrivateKeySigner,
+    telegram: TelegramClient,
+) -> JoinHandle<()> {
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(5));
+        let mut next_auth_error_telegram_at = Instant::now();
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         interval.tick().await;
 
         loop {
             interval.tick().await;
-            let client = client.lock().await.clone();
+            let client = client_state.lock().await.clone();
             if let Err(error) = refresh_heartbeat(&client, &heartbeat_state).await {
+                if is_l2_auth_error_chain(&error) {
+                    let rotate_result = rotate_client_after_heartbeat_auth_error(
+                        &client_state,
+                        &heartbeat_state,
+                        &auth_config,
+                        &signer,
+                        &error,
+                    )
+                    .await;
+                    if let Err(rotate_error) = rotate_result {
+                        let rotate_error = format!("{rotate_error:#}");
+                        warn!(
+                            event = "live_heartbeat_auth_recovery_error",
+                            error = %rotate_error,
+                            "failed to rotate Polymarket API credentials after heartbeat auth error"
+                        );
+                        let now = Instant::now();
+                        if now >= next_auth_error_telegram_at {
+                            next_auth_error_telegram_at = now + Duration::from_secs(300);
+                            if let Err(telegram_error) = telegram
+                                .send_message(&format!(
+                                    "Live auth error: Polymarket heartbeat rejected the API key and automatic credential rotation failed. {rotate_error}"
+                                ))
+                                .await
+                            {
+                                warn!(
+                                    error = %telegram_error,
+                                    "failed to send live heartbeat auth error Telegram message"
+                                );
+                            }
+                        }
+                    }
+                    continue;
+                }
                 warn!(
                     event = "live_heartbeat_error",
                     error = %format!("{error:#}"),
@@ -706,6 +751,42 @@ fn spawn_heartbeat_task(client: ClientState, heartbeat_state: HeartbeatState) ->
             }
         }
     })
+}
+
+async fn rotate_client_after_heartbeat_auth_error(
+    client_state: &ClientState,
+    heartbeat_state: &HeartbeatState,
+    auth_config: &LiveAuthConfig,
+    signer: &PrivateKeySigner,
+    error: &anyhow::Error,
+) -> Result<()> {
+    let nonce = fresh_api_nonce()?;
+    warn!(
+        event = "live_api_key_rotate",
+        endpoint = "heartbeat",
+        nonce,
+        error = %format!("{error:#}"),
+        "creating fresh Polymarket API credentials after heartbeat auth error"
+    );
+    let client = authenticate_client(auth_config, signer, CredentialSource::FreshNonce(nonce))
+        .await
+        .context("authenticate CLOB client with fresh API credentials")?;
+    reset_heartbeat(heartbeat_state).await;
+    refresh_heartbeat(&client, heartbeat_state)
+        .await
+        .context("refresh CLOB heartbeat after heartbeat API credential rotation")?;
+    {
+        let mut current = client_state.lock().await;
+        *current = client.clone();
+    }
+    info!(
+        event = "live_api_key_rotated",
+        endpoint = "heartbeat",
+        nonce,
+        api_key = %redacted_uuid(client.credentials().key()),
+        "fresh Polymarket API credentials installed after heartbeat auth error"
+    );
+    Ok(())
 }
 
 fn log_heartbeat_response(event: &'static str, response: &HeartbeatResponse) {

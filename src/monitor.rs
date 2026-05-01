@@ -59,7 +59,7 @@ pub async fn run(args: MonitorArgs, config: RuntimeConfig) -> Result<()> {
     let candle_lookback_min = max_vol_lookback_min(&runtime_bundle, &assets);
     let telegram = TelegramClient::from_config(&config);
     let live_executor = if config.live_trading {
-        match LiveTradeExecutor::from_config(&config).await {
+        match LiveTradeExecutor::from_config(&config, telegram.clone()).await {
             Ok(executor) => Some(executor),
             Err(error) => {
                 let error_chain = format!("{error:#}");
