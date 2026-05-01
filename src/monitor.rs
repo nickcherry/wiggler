@@ -359,6 +359,7 @@ struct MonitorState {
     positioned_markets: HashSet<String>,
     pending_markets: HashSet<String>,
     failed_order_markets: HashSet<String>,
+    retryable_no_fill_cooldown_until: HashMap<String, DateTime<Utc>>,
     shadow_decision_markets: HashSet<String>,
     tracked_entries: HashMap<String, TrackedEntry>,
     resolved_markets: HashSet<String>,
@@ -1038,6 +1039,18 @@ impl MonitorState {
         {
             return;
         }
+        let no_fill_key =
+            retryable_no_fill_key(&initial_prepared.condition_id, &initial_prepared.token_id);
+        if let Some(until) = self
+            .retryable_no_fill_cooldown_until
+            .get(&no_fill_key)
+            .copied()
+        {
+            if now < until {
+                return;
+            }
+            self.retryable_no_fill_cooldown_until.remove(&no_fill_key);
+        }
 
         if self.pending_markets.contains(&market.condition_id)
             || self.positioned_markets.contains(&market.condition_id)
@@ -1176,9 +1189,16 @@ impl MonitorState {
 
         match result {
             Ok(response) => {
+                let retryable_no_fill = is_retryable_no_fill_response(&response);
                 if response.has_fill() {
                     self.positioned_markets.insert(market.condition_id.clone());
-                } else if !is_retryable_no_fill_response(&response) {
+                    self.retryable_no_fill_cooldown_until.remove(&no_fill_key);
+                } else if retryable_no_fill {
+                    self.retryable_no_fill_cooldown_until.insert(
+                        no_fill_key,
+                        Utc::now() + TimeDelta::seconds(RETRYABLE_NO_FILL_COOLDOWN_SECONDS),
+                    );
+                } else {
                     self.failed_order_markets
                         .insert(market.condition_id.clone());
                 }
@@ -1231,11 +1251,13 @@ impl MonitorState {
                         "live order rejected"
                     );
                 }
-                if let Err(error) = telegram
-                    .send_message(&live_response_text(&request, &response))
-                    .await
-                {
-                    warn!(error = %error, slug = market.slug, "failed to send live response Telegram message");
+                if !retryable_no_fill {
+                    if let Err(error) = telegram
+                        .send_message(&live_response_text(&request, &response))
+                        .await
+                    {
+                        warn!(error = %error, slug = market.slug, "failed to send live response Telegram message");
+                    }
                 }
             }
             Err(error) => {
@@ -1244,6 +1266,11 @@ impl MonitorState {
                 if !retryable_no_fill {
                     self.failed_order_markets
                         .insert(market.condition_id.clone());
+                } else {
+                    self.retryable_no_fill_cooldown_until.insert(
+                        no_fill_key,
+                        Utc::now() + TimeDelta::seconds(RETRYABLE_NO_FILL_COOLDOWN_SECONDS),
+                    );
                 }
                 self.record_live_error(&market.condition_id, &error_chain);
                 warn!(
@@ -1256,15 +1283,13 @@ impl MonitorState {
                     error = %error_chain,
                     "live order failed"
                 );
-                if let Err(telegram_error) = telegram
-                    .send_message(&live_order_error_text(
-                        &request,
-                        &error_chain,
-                        retryable_no_fill,
-                    ))
-                    .await
-                {
-                    warn!(error = %telegram_error, slug = market.slug, "failed to send live error Telegram message");
+                if !retryable_no_fill {
+                    if let Err(telegram_error) = telegram
+                        .send_message(&live_order_error_text(&request, &error_chain))
+                        .await
+                    {
+                        warn!(error = %telegram_error, slug = market.slug, "failed to send live error Telegram message");
+                    }
                 }
             }
         }
@@ -2141,22 +2166,13 @@ fn live_response_text(request: &LiveOrderRequest, response: &LiveOrderResponse) 
     }
 }
 
-fn live_order_error_text(
-    request: &LiveOrderRequest,
-    error: &str,
-    retryable_no_fill: bool,
-) -> String {
-    let suffix = if retryable_no_fill {
-        "\nNo fill landed; wiggler will keep looking for another entry in this market."
-    } else {
-        ""
-    };
+fn live_order_error_text(request: &LiveOrderRequest, error: &str) -> String {
     format!(
         "Live order failed: {} {}\nBet: {}\nReason: {error}",
         request.asset.to_string().to_ascii_uppercase(),
         request.outcome_label(),
         format_usdc(request.amount_usdc)
-    ) + suffix
+    )
 }
 
 fn is_retryable_no_fill_response(response: &LiveOrderResponse) -> bool {
@@ -2172,6 +2188,10 @@ fn is_retryable_no_fill_error(error: &str) -> bool {
     let normalized = error.to_ascii_lowercase();
     normalized.contains("no orders found to match")
         && (normalized.contains("fak") || normalized.contains("fok"))
+}
+
+fn retryable_no_fill_key(condition_id: &str, token_id: &str) -> String {
+    format!("{condition_id}:{token_id}")
 }
 
 fn distance_bps(price: Decimal, line: Decimal) -> Option<Decimal> {
@@ -2216,6 +2236,7 @@ const PATH_LOOKBACK_SECONDS: i64 = 60;
 const MAX_PATH_LOOKBACK_DRIFT_SECONDS: i64 = 30;
 const LEAD_DECAY_PENALTY_THRESHOLD: f64 = 0.75;
 const LEAD_DECAY_EDGE_PENALTY: f64 = 0.005;
+const RETRYABLE_NO_FILL_COOLDOWN_SECONDS: i64 = 10;
 
 #[derive(Clone, Debug, Default)]
 struct MarketPricePath {
