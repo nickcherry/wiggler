@@ -79,6 +79,7 @@ cargo run -- monitor --runtime-bundle-dir runtime/wiggler-prod-v1
 | `WIGGLER_PRICE_STALE_AFTER_MS` | `20000` | Max current-price age for an eligible evaluation |
 | `WIGGLER_ORDERBOOK_STALE_AFTER_MS` | `10000` | Max orderbook age for an eligible evaluation |
 | `WIGGLER_MIN_ABS_D_BPS` | `0.01` | Dust threshold around the market line |
+| `WIGGLER_TELEGRAM_PNL_INTERVAL_SECS` | `900` | Periodic Telegram realized-PnL summary interval; `0` disables summaries |
 | `POLYMARKET_GAMMA_BASE_URL` | `https://gamma-api.polymarket.com` | Market discovery |
 | `POLYMARKET_CLOB_API_URL` | `https://clob.polymarket.com` | CLOB trading/auth API |
 | `POLYMARKET_CLOB_MARKET_WS_URL` | `wss://ws-subscriptions-clob.polymarket.com/ws/market` | Orderbook websocket |

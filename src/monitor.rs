@@ -78,7 +78,7 @@ pub async fn run(args: MonitorArgs, config: RuntimeConfig) -> Result<()> {
         duration,
         lookahead_slots: args.lookahead_slots,
     };
-    let mut state = MonitorState::default();
+    let mut state = MonitorState::from_trade_records(&config.trade_record_dir);
     let (price_tx, mut price_rx) = mpsc::channel::<PriceTick>(1024);
     let (market_tx, mut market_rx) = mpsc::channel::<MarketWsEvent>(4096);
 
@@ -99,9 +99,13 @@ pub async fn run(args: MonitorArgs, config: RuntimeConfig) -> Result<()> {
     let mut refresh_interval = time::interval(Duration::from_secs(10));
     let mut status_interval = time::interval(Duration::from_secs(15));
     let mut evaluation_interval = time::interval(config.evaluation_interval);
+    let mut pnl_interval = telegram_pnl_interval(&config, &telegram);
     refresh_interval.tick().await;
     status_interval.tick().await;
     evaluation_interval.tick().await;
+    if let Some(interval) = pnl_interval.as_mut() {
+        interval.tick().await;
+    }
     let deadline = args
         .max_runtime_seconds
         .map(|seconds| time::Instant::now() + Duration::from_secs(seconds));
@@ -168,6 +172,12 @@ pub async fn run(args: MonitorArgs, config: RuntimeConfig) -> Result<()> {
             _ = status_interval.tick() => {
                 state.log_status();
             }
+            _ = optional_interval_tick(&mut pnl_interval) => {
+                let message = state.pnl_summary_text();
+                if let Err(error) = telegram.send_message(&message).await {
+                    warn!(error = %error, "failed to send Telegram PnL summary");
+                }
+            }
             _ = evaluation_interval.tick() => {
                 state.evaluate_and_maybe_execute(
                     &runtime_bundle,
@@ -179,7 +189,7 @@ pub async fn run(args: MonitorArgs, config: RuntimeConfig) -> Result<()> {
             Some(tick) = price_rx.recv() => {
                 let closeouts = state.apply_price_tick(tick);
                 for closeout in closeouts {
-                    if let Err(error) = telegram.send_message(&closeout.telegram_text()).await {
+                    if let Err(error) = telegram.send_message(&closeout.telegram_text(state.pnl_stats())).await {
                         warn!(error = %error, slug = closeout.slug, "failed to send trade closeout Telegram message");
                     }
                 }
@@ -312,6 +322,25 @@ async fn sleep_until(deadline: Option<time::Instant>) {
     }
 }
 
+fn telegram_pnl_interval(
+    config: &RuntimeConfig,
+    telegram: &TelegramClient,
+) -> Option<time::Interval> {
+    if !telegram.is_configured() || config.telegram_pnl_interval.is_zero() {
+        return None;
+    }
+
+    Some(time::interval(config.telegram_pnl_interval))
+}
+
+async fn optional_interval_tick(interval: &mut Option<time::Interval>) {
+    if let Some(interval) = interval {
+        interval.tick().await;
+    } else {
+        future::pending::<()>().await;
+    }
+}
+
 #[derive(Clone, Debug)]
 struct SlotLine {
     price: Decimal,
@@ -336,9 +365,61 @@ struct MonitorState {
     initial_books_seen: HashSet<String>,
     live_pre_submit_error_cooldown_until: Option<DateTime<Utc>>,
     event_counts: EventCounts,
+    pnl_stats: PnlStats,
+    last_pnl_summary: PnlStats,
 }
 
 impl MonitorState {
+    fn from_trade_records(trade_record_dir: &Path) -> Self {
+        let pnl_stats = load_pnl_stats(trade_record_dir);
+        Self {
+            pnl_stats,
+            last_pnl_summary: pnl_stats,
+            ..Self::default()
+        }
+    }
+
+    fn pnl_stats(&self) -> &PnlStats {
+        &self.pnl_stats
+    }
+
+    fn pnl_summary_text(&mut self) -> String {
+        let total = self.pnl_stats;
+        let delta = total.diff(self.last_pnl_summary);
+        self.last_pnl_summary = total;
+        let (open_count, open_amount) = self.open_live_position_summary();
+        format!(
+            "Wiggler PnL update\nTotal recorded live P/L: {} ({} closed, {} wins / {} losses{})\nSince last update: {} ({} closed, {} wins / {} losses{})\nOpen positions: {}{}",
+            format_signed_usdc(total.estimated_pnl_usdc),
+            total.closed,
+            total.wins,
+            total.losses,
+            total.tie_suffix(),
+            format_signed_usdc(delta.estimated_pnl_usdc),
+            delta.closed,
+            delta.wins,
+            delta.losses,
+            delta.tie_suffix(),
+            open_count,
+            if open_count > 0 {
+                format!(" totaling {}", format_usdc(open_amount))
+            } else {
+                String::new()
+            }
+        )
+    }
+
+    fn open_live_position_summary(&self) -> (u64, f64) {
+        self.tracked_entries
+            .values()
+            .filter(|entry| {
+                entry.mode == TradeMode::Live && entry.track_closeout && !entry.closeout_sent
+            })
+            .fold((0, 0.0), |(count, amount), entry| {
+                (count + 1, amount + entry.filled_amount_usdc())
+            })
+    }
+
     fn replace_markets(&mut self, markets: Vec<MonitoredMarket>) {
         let active_slugs = markets
             .iter()
@@ -1095,9 +1176,9 @@ impl MonitorState {
 
         match result {
             Ok(response) => {
-                if response.success {
+                if response.has_fill() {
                     self.positioned_markets.insert(market.condition_id.clone());
-                } else {
+                } else if !is_retryable_no_fill_response(&response) {
                     self.failed_order_markets
                         .insert(market.condition_id.clone());
                 }
@@ -1158,9 +1239,12 @@ impl MonitorState {
                 }
             }
             Err(error) => {
-                self.failed_order_markets
-                    .insert(market.condition_id.clone());
                 let error_chain = format!("{error:#}");
+                let retryable_no_fill = is_retryable_no_fill_error(&error_chain);
+                if !retryable_no_fill {
+                    self.failed_order_markets
+                        .insert(market.condition_id.clone());
+                }
                 self.record_live_error(&market.condition_id, &error_chain);
                 warn!(
                     event = "live_order_error",
@@ -1168,12 +1252,16 @@ impl MonitorState {
                     mode = "live",
                     slug = market.slug,
                     condition_id = market.condition_id,
-                    decision = "rejected",
+                    decision = if retryable_no_fill { "no_fill_retryable" } else { "rejected" },
                     error = %error_chain,
                     "live order failed"
                 );
                 if let Err(telegram_error) = telegram
-                    .send_message(&live_order_error_text(&request, &error_chain))
+                    .send_message(&live_order_error_text(
+                        &request,
+                        &error_chain,
+                        retryable_no_fill,
+                    ))
                     .await
                 {
                     warn!(error = %telegram_error, slug = market.slug, "failed to send live error Telegram message");
@@ -1356,6 +1444,8 @@ impl MonitorState {
                 track_closeout,
                 notify_closeout,
                 closeout_sent: false,
+                filled_amount_usdc: None,
+                filled_payout_usdc: None,
             },
         );
     }
@@ -1366,6 +1456,14 @@ impl MonitorState {
         };
         entry.track_closeout = response.has_fill();
         entry.notify_closeout = response.has_fill();
+        if response.has_fill() {
+            entry.filled_amount_usdc = response
+                .filled_amount_usdc()
+                .or(Some(entry.prepared.amount_usdc));
+            entry.filled_payout_usdc = response
+                .filled_payout_usdc()
+                .or(entry.prepared.estimated_payout_usdc);
+        }
         entry.record["order_response"] = json!({
             "received_at": Utc::now().to_rfc3339(),
             "order_id": response.order_id.as_str(),
@@ -1376,6 +1474,8 @@ impl MonitorState {
             "taking_amount": response.taking_amount.as_str(),
             "trade_ids": &response.trade_ids,
             "has_fill": response.has_fill(),
+            "filled_amount_usdc": entry.filled_amount_usdc,
+            "filled_payout_usdc": entry.filled_payout_usdc,
         });
         entry.record["state"] = json!(if response.has_fill() {
             "filled"
@@ -1421,11 +1521,9 @@ impl MonitorState {
                 close_price,
                 entry.prepared.line_price,
             );
-            let estimated_pnl = closeout_estimated_pnl(
-                entry.prepared.amount_usdc,
-                entry.prepared.estimated_profit_usdc,
-                won,
-            );
+            let amount_usdc = entry.filled_amount_usdc();
+            let estimated_profit_usdc = entry.filled_profit_usdc();
+            let estimated_pnl = closeout_estimated_pnl(amount_usdc, estimated_profit_usdc, won);
             entry.closeout_sent = true;
             entry.record["closeout"] = json!({
                 "closed_at": Utc::now().to_rfc3339(),
@@ -1437,10 +1535,16 @@ impl MonitorState {
                 "line_price": entry.prepared.line_price,
                 "outcome": outcome_label(&entry.prepared.outcome),
                 "won": won,
+                "filled_amount_usdc": amount_usdc,
+                "estimated_payout_usdc": entry.filled_payout_usdc,
+                "estimated_profit_usdc": estimated_profit_usdc,
                 "estimated_pnl_usdc": estimated_pnl,
             });
             entry.record["state"] = json!("closed");
             entry.write_record();
+            if entry.mode == TradeMode::Live {
+                self.pnl_stats.add(won, estimated_pnl);
+            }
             if entry.notify_closeout {
                 closeouts.push(TradeCloseout {
                     mode: entry.mode,
@@ -1449,8 +1553,8 @@ impl MonitorState {
                     outcome: entry.prepared.outcome.clone(),
                     line_price: entry.prepared.line_price,
                     close_price,
-                    amount_usdc: entry.prepared.amount_usdc,
-                    estimated_profit_usdc: entry.prepared.estimated_profit_usdc,
+                    amount_usdc,
+                    estimated_profit_usdc,
                     won,
                 });
             }
@@ -1507,6 +1611,8 @@ struct TrackedEntry {
     track_closeout: bool,
     notify_closeout: bool,
     closeout_sent: bool,
+    filled_amount_usdc: Option<f64>,
+    filled_payout_usdc: Option<f64>,
 }
 
 #[derive(Clone, Debug)]
@@ -1522,8 +1628,50 @@ struct TradeCloseout {
     won: Option<bool>,
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+struct PnlStats {
+    closed: u64,
+    wins: u64,
+    losses: u64,
+    ties: u64,
+    estimated_pnl_usdc: f64,
+}
+
+impl PnlStats {
+    fn add(&mut self, won: Option<bool>, estimated_pnl_usdc: Option<f64>) {
+        let Some(estimated_pnl_usdc) = estimated_pnl_usdc else {
+            return;
+        };
+        self.closed += 1;
+        match won {
+            Some(true) => self.wins += 1,
+            Some(false) => self.losses += 1,
+            None => self.ties += 1,
+        }
+        self.estimated_pnl_usdc += estimated_pnl_usdc;
+    }
+
+    fn diff(self, previous: Self) -> Self {
+        Self {
+            closed: self.closed.saturating_sub(previous.closed),
+            wins: self.wins.saturating_sub(previous.wins),
+            losses: self.losses.saturating_sub(previous.losses),
+            ties: self.ties.saturating_sub(previous.ties),
+            estimated_pnl_usdc: self.estimated_pnl_usdc - previous.estimated_pnl_usdc,
+        }
+    }
+
+    fn tie_suffix(&self) -> String {
+        if self.ties > 0 {
+            format!(" / {} ties", self.ties)
+        } else {
+            String::new()
+        }
+    }
+}
+
 impl TradeCloseout {
-    fn telegram_text(&self) -> String {
+    fn telegram_text(&self, pnl_stats: &PnlStats) -> String {
         let status = match self.won {
             Some(true) => "won",
             Some(false) => "lost",
@@ -1535,7 +1683,7 @@ impl TradeCloseout {
             _ => "Estimated P/L: flat/unknown".to_string(),
         };
         format!(
-            "{} closeout: {} {} {}\nTarget: {}\nClose: {}\nBet: {}\n{}",
+            "{} closeout: {} {} {}\nTarget: {}\nClose: {}\nBet: {}\n{}\nRunning live P/L: {} ({} closed, {} wins / {} losses{})",
             match self.mode {
                 TradeMode::Live => "Live",
                 TradeMode::Shadow => "Shadow",
@@ -1546,12 +1694,28 @@ impl TradeCloseout {
             format_market_price(self.asset, self.line_price),
             format_market_price(self.asset, self.close_price),
             format_usdc(self.amount_usdc),
-            pnl
+            pnl,
+            format_signed_usdc(pnl_stats.estimated_pnl_usdc),
+            pnl_stats.closed,
+            pnl_stats.wins,
+            pnl_stats.losses,
+            pnl_stats.tie_suffix()
         )
     }
 }
 
 impl TrackedEntry {
+    fn filled_amount_usdc(&self) -> f64 {
+        self.filled_amount_usdc.unwrap_or(self.prepared.amount_usdc)
+    }
+
+    fn filled_profit_usdc(&self) -> Option<f64> {
+        match (self.filled_amount_usdc, self.filled_payout_usdc) {
+            (Some(amount), Some(payout)) => Some(payout - amount),
+            _ => self.prepared.estimated_profit_usdc,
+        }
+    }
+
     fn write_record(&self) {
         let Some(record_path) = &self.record_path else {
             return;
@@ -1702,6 +1866,101 @@ fn closeout_estimated_pnl(
     }
 }
 
+fn load_pnl_stats(trade_record_dir: &Path) -> PnlStats {
+    let mut stats = PnlStats::default();
+    let entries = match fs::read_dir(trade_record_dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return stats,
+        Err(error) => {
+            warn!(
+                error = %error,
+                path = %trade_record_dir.display(),
+                "failed to read trade record dir for PnL stats"
+            );
+            return stats;
+        }
+    };
+
+    for entry in entries {
+        let Ok(entry) = entry else {
+            continue;
+        };
+        let path = entry.path();
+        if path.extension().and_then(|value| value.to_str()) != Some("json") {
+            continue;
+        }
+        match fs::read(&path)
+            .with_context(|| format!("read trade record {}", path.display()))
+            .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).context("parse trade record"))
+        {
+            Ok(record) => {
+                if let Some((won, pnl)) = pnl_from_trade_record(&record) {
+                    stats.add(won, Some(pnl));
+                }
+            }
+            Err(error) => warn!(
+                error = %error,
+                path = %path.display(),
+                "failed to load trade record for PnL stats"
+            ),
+        }
+    }
+
+    stats
+}
+
+fn pnl_from_trade_record(record: &Value) -> Option<(Option<bool>, f64)> {
+    if record.get("mode")?.as_str()? != TradeMode::Live.as_str()
+        || record.get("state")?.as_str()? != "closed"
+    {
+        return None;
+    }
+    let closeout = record.get("closeout")?;
+    let won = closeout.get("won").and_then(Value::as_bool);
+    let amount_usdc = closeout
+        .get("filled_amount_usdc")
+        .and_then(Value::as_f64)
+        .or_else(|| {
+            record
+                .get("order_response")
+                .and_then(|value| value.get("making_amount"))
+                .and_then(Value::as_str)
+                .and_then(parse_positive_f64)
+        })
+        .or_else(|| {
+            record
+                .get("entry")
+                .and_then(|value| value.get("amount_usdc"))
+                .and_then(Value::as_f64)
+        })?;
+    let estimated_profit_usdc = closeout
+        .get("estimated_profit_usdc")
+        .and_then(Value::as_f64)
+        .or_else(|| {
+            let payout = record
+                .get("order_response")
+                .and_then(|value| value.get("taking_amount"))
+                .and_then(Value::as_str)
+                .and_then(parse_positive_f64)?;
+            Some(payout - amount_usdc)
+        })
+        .or_else(|| {
+            record
+                .get("entry")
+                .and_then(|value| value.get("estimated_profit_usdc"))
+                .and_then(Value::as_f64)
+        });
+    let pnl = closeout_estimated_pnl(amount_usdc, estimated_profit_usdc, won)?;
+    Some((won, pnl))
+}
+
+fn parse_positive_f64(value: &str) -> Option<f64> {
+    value
+        .parse::<f64>()
+        .ok()
+        .filter(|value| value.is_finite() && *value > 0.0)
+}
+
 struct TokenContext<'a> {
     slug: &'a String,
     token: &'a OutcomeToken,
@@ -1798,6 +2057,16 @@ fn format_usdc(value: f64) -> String {
     format!("${value:.2}")
 }
 
+fn format_signed_usdc(value: f64) -> String {
+    if value > 0.0 {
+        format!("+{}", format_usdc(value))
+    } else if value < 0.0 {
+        format!("-{}", format_usdc(value.abs()))
+    } else {
+        format_usdc(0.0)
+    }
+}
+
 fn format_remaining(seconds: i64) -> String {
     let seconds = seconds.max(0);
     let minutes = seconds / 60;
@@ -1845,6 +2114,14 @@ fn live_response_text(request: &LiveOrderRequest, response: &LiveOrderResponse) 
             response.order_id,
             response.trade_ids.len()
         )
+    } else if is_retryable_no_fill_response(response) {
+        format!(
+            "Live order did not fill: {} {}\nBet: {}\nReason: {}\nWiggler will keep looking for another entry in this market.",
+            request.asset.to_string().to_ascii_uppercase(),
+            request.outcome_label(),
+            format_usdc(request.amount_usdc),
+            response.error_msg.as_deref().unwrap_or("no fill")
+        )
     } else if response.success {
         format!(
             "Live order accepted but no fill yet: {} {}\nBet: {}\nOrder: {}",
@@ -1864,13 +2141,37 @@ fn live_response_text(request: &LiveOrderRequest, response: &LiveOrderResponse) 
     }
 }
 
-fn live_order_error_text(request: &LiveOrderRequest, error: &str) -> String {
+fn live_order_error_text(
+    request: &LiveOrderRequest,
+    error: &str,
+    retryable_no_fill: bool,
+) -> String {
+    let suffix = if retryable_no_fill {
+        "\nNo fill landed; wiggler will keep looking for another entry in this market."
+    } else {
+        ""
+    };
     format!(
         "Live order failed: {} {}\nBet: {}\nReason: {error}",
         request.asset.to_string().to_ascii_uppercase(),
         request.outcome_label(),
         format_usdc(request.amount_usdc)
-    )
+    ) + suffix
+}
+
+fn is_retryable_no_fill_response(response: &LiveOrderResponse) -> bool {
+    !response.has_fill()
+        && (response.success
+            || response
+                .error_msg
+                .as_deref()
+                .is_some_and(is_retryable_no_fill_error))
+}
+
+fn is_retryable_no_fill_error(error: &str) -> bool {
+    let normalized = error.to_ascii_lowercase();
+    normalized.contains("no orders found to match")
+        && (normalized.contains("fak") || normalized.contains("fok"))
 }
 
 fn distance_bps(price: Decimal, line: Decimal) -> Option<Decimal> {
@@ -2108,7 +2409,8 @@ mod tests {
 
     use super::{
         MarketPricePath, MonitorState, PathState, PreparedTrade, SlotLine, asset_ids_for_markets,
-        distance_bps, pre_submit_matches_initial, required_edge_probability, summarize_asks,
+        distance_bps, is_retryable_no_fill_error, pnl_from_trade_record,
+        pre_submit_matches_initial, required_edge_probability, summarize_asks,
     };
 
     #[test]
@@ -2602,6 +2904,64 @@ mod tests {
         assert!(!pre_submit_matches_initial(&initial, &flipped));
     }
 
+    #[test]
+    fn fak_no_match_is_retryable_no_fill() {
+        assert!(is_retryable_no_fill_error(
+            "Status: error(400 Bad Request) making POST call to /order with {\"error\":\"no orders found to match with FAK order\"}"
+        ));
+        assert!(!is_retryable_no_fill_error(
+            "Status: error(401 Unauthorized) making GET call to /data/orders with {\"error\":\"Unauthorized/Invalid api key\"}"
+        ));
+    }
+
+    #[test]
+    fn pnl_from_trade_record_uses_actual_partial_fill_amount() {
+        let record = serde_json::json!({
+            "mode": "live",
+            "state": "closed",
+            "entry": {
+                "amount_usdc": 19.15,
+                "estimated_profit_usdc": 20.85
+            },
+            "order_response": {
+                "making_amount": "7.15",
+                "taking_amount": "15"
+            },
+            "closeout": {
+                "won": false,
+                "estimated_pnl_usdc": -19.15
+            }
+        });
+
+        let (won, pnl) = pnl_from_trade_record(&record).unwrap();
+        assert_eq!(won, Some(false));
+        assert!((pnl + 7.15).abs() < 0.000001);
+    }
+
+    #[test]
+    fn pnl_from_trade_record_uses_actual_partial_fill_profit() {
+        let record = serde_json::json!({
+            "mode": "live",
+            "state": "closed",
+            "entry": {
+                "amount_usdc": 19.15,
+                "estimated_profit_usdc": 20.85
+            },
+            "order_response": {
+                "making_amount": "7.15",
+                "taking_amount": "15"
+            },
+            "closeout": {
+                "won": true,
+                "estimated_pnl_usdc": 20.85
+            }
+        });
+
+        let (won, pnl) = pnl_from_trade_record(&record).unwrap();
+        assert_eq!(won, Some(true));
+        assert!((pnl - 7.85).abs() < 0.000001);
+    }
+
     fn market_with_tokens(asset_ids: Vec<&str>) -> MonitoredMarket {
         MonitoredMarket {
             asset: Asset::Btc,
@@ -2691,6 +3051,7 @@ mod tests {
             telegram_enabled: true,
             telegram_bot_token: None,
             telegram_chat_id: None,
+            telegram_pnl_interval: Duration::from_secs(900),
         }
     }
 

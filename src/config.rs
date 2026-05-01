@@ -16,6 +16,7 @@ pub const DEFAULT_MAX_ORDER_USDC: f64 = 25.0;
 pub const DEFAULT_EVALUATION_INTERVAL_MS: u64 = 1_000;
 pub const DEFAULT_LOG_EVALUATIONS: bool = false;
 pub const DEFAULT_TRADE_RECORD_DIR: &str = "trade-records";
+pub const DEFAULT_TELEGRAM_PNL_INTERVAL_SECS: u64 = 15 * 60;
 
 #[derive(Clone)]
 pub struct RuntimeConfig {
@@ -44,6 +45,7 @@ pub struct RuntimeConfig {
     pub telegram_enabled: bool,
     pub telegram_bot_token: Option<String>,
     pub telegram_chat_id: Option<String>,
+    pub telegram_pnl_interval: Duration,
 }
 
 impl RuntimeConfig {
@@ -92,6 +94,10 @@ impl RuntimeConfig {
             telegram_enabled: bool_env("WIGGLER_TELEGRAM_ENABLED", true)?,
             telegram_bot_token: non_empty_env("TELEGRAM_BOT_TOKEN"),
             telegram_chat_id: non_empty_env("TELEGRAM_CHAT_ID"),
+            telegram_pnl_interval: Duration::from_secs(u64_env(
+                "WIGGLER_TELEGRAM_PNL_INTERVAL_SECS",
+                DEFAULT_TELEGRAM_PNL_INTERVAL_SECS,
+            )?),
         };
         config.validate()?;
         Ok(config)

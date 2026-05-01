@@ -783,6 +783,14 @@ impl LiveOrderResponse {
     pub fn has_fill(&self) -> bool {
         self.success && (!self.trade_ids.is_empty() || self.taking_amount != "0")
     }
+
+    pub fn filled_amount_usdc(&self) -> Option<f64> {
+        positive_f64(&self.making_amount)
+    }
+
+    pub fn filled_payout_usdc(&self) -> Option<f64> {
+        positive_f64(&self.taking_amount)
+    }
 }
 
 impl From<PostOrderResponse> for LiveOrderResponse {
@@ -797,6 +805,13 @@ impl From<PostOrderResponse> for LiveOrderResponse {
             trade_ids: value.trade_ids,
         }
     }
+}
+
+fn positive_f64(value: &str) -> Option<f64> {
+    value
+        .parse::<f64>()
+        .ok()
+        .filter(|value| value.is_finite() && *value > 0.0)
 }
 
 fn credentials_from_config(config: &RuntimeConfig) -> Result<Option<Credentials>> {

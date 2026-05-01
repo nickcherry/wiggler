@@ -7,9 +7,12 @@ Telegram support is scaffolded in `src/telegram.rs`.
 ```bash
 TELEGRAM_BOT_TOKEN=
 TELEGRAM_CHAT_ID=
+WIGGLER_TELEGRAM_PNL_INTERVAL_SECS=900
 ```
 
 If either value is missing, the Telegram client is a no-op.
+Set `WIGGLER_TELEGRAM_PNL_INTERVAL_SECS=0` to disable periodic PnL
+summaries while keeping trade lifecycle messages enabled.
 
 ## Current Behavior
 
@@ -20,14 +23,13 @@ When configured, the monitor sends Telegram messages for:
 - live order intent
 - live order response
 - live order error
+- live closeout with running recorded live PnL
+- periodic recorded live PnL summary
 
-## Future Behavior
+FAK/FOK no-fill errors are reported as no-fill events, but they do not block
+the monitor from looking for another entry in the same market.
 
-Additional message types that are still useful future work:
-
-- fill
-- exit/settlement
-- runtime health degradation
+## Message Content
 
 Decision messages must include:
 
