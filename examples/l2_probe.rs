@@ -10,11 +10,18 @@ use polymarket_client_sdk_v2::{
         types::{
             AssetType, SignatureType,
             request::{BalanceAllowanceRequest, OrdersRequest, TradesRequest},
+            response::HeartbeatResponse,
         },
     },
+    error::{Error as PolymarketError, Status as PolymarketStatus},
     types::{Address, B256},
 };
+use serde::Deserialize;
 use wiggler::config::{PolymarketSignatureType, RuntimeConfig};
+
+type AuthenticatedClient = Client<
+    polymarket_client_sdk_v2::auth::state::Authenticated<polymarket_client_sdk_v2::auth::Normal>,
+>;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -56,6 +63,15 @@ async fn main() -> Result<()> {
         .await
         .context("authenticate CLOB client")?;
 
+    report(
+        "heartbeat",
+        post_heartbeat_resync(&client).await.map(|value| {
+            format!(
+                "ok heartbeat_id={} error={:?}",
+                value.heartbeat_id, value.error
+            )
+        }),
+    );
     report(
         "closed_only",
         client
@@ -130,17 +146,32 @@ async fn main() -> Result<()> {
                 )
             }),
     );
-    report(
-        "heartbeat",
-        client.post_heartbeat(None).await.map(|value| {
-            format!(
-                "ok heartbeat_id={} error={:?}",
-                value.heartbeat_id, value.error
-            )
-        }),
-    );
-
     Ok(())
+}
+
+#[derive(Deserialize)]
+struct HeartbeatErrorBody {
+    heartbeat_id: Option<Uuid>,
+}
+
+async fn post_heartbeat_resync(client: &AuthenticatedClient) -> Result<HeartbeatResponse> {
+    match client.post_heartbeat(None).await {
+        Ok(response) => Ok(response),
+        Err(error) => {
+            let heartbeat_id = heartbeat_id_from_error(&error)
+                .with_context(|| format!("post initial heartbeat: {error}"))?;
+            client
+                .post_heartbeat(Some(heartbeat_id))
+                .await
+                .context("post resynchronized heartbeat")
+        }
+    }
+}
+
+fn heartbeat_id_from_error(error: &PolymarketError) -> Option<Uuid> {
+    let status = error.downcast_ref::<PolymarketStatus>()?;
+    let body: HeartbeatErrorBody = serde_json::from_str(&status.message).ok()?;
+    body.heartbeat_id
 }
 
 fn market_orders_request() -> Result<OrdersRequest> {

@@ -100,8 +100,8 @@ https://clob.polymarket.com
 ```
 
 The SDK handles L1 authentication, L2 headers, EIP-712 signing, protocol
-version detection, automatic CLOB heartbeats, and order submission. Wiggler
-only submits buy-side market orders with:
+version detection, and order submission. Wiggler also posts CLOB heartbeats
+while live trading is enabled. It only submits buy-side market orders with:
 
 - explicit price limit from positive-EV ask depth
 - `FAK` by default, configurable to `FOK`

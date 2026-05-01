@@ -1,4 +1,4 @@
-use std::str::FromStr;
+use std::{str::FromStr, time::Duration};
 
 use alloy::{signers::Signer as _, signers::local::PrivateKeySigner};
 use anyhow::{Context, Result, bail};
@@ -10,12 +10,15 @@ use polymarket_client_sdk_v2::{
         types::{
             Amount, AssetType, OrderType, Side, SignatureType,
             request::{BalanceAllowanceRequest, OrdersRequest, TradesRequest},
-            response::PostOrderResponse,
+            response::{HeartbeatResponse, PostOrderResponse},
         },
     },
+    error::{Error as PolymarketError, Status as PolymarketStatus},
     types::{Address, B256, Decimal, U256},
 };
 use rust_decimal::prelude::FromPrimitive;
+use serde::Deserialize;
+use tokio::task::JoinHandle;
 use tracing::{info, warn};
 
 use crate::{
@@ -31,6 +34,7 @@ pub struct LiveTradeExecutor {
     client: AuthenticatedClient,
     signer: PrivateKeySigner,
     order_type: OrderType,
+    _heartbeat_task: JoinHandle<()>,
 }
 
 impl LiveTradeExecutor {
@@ -88,6 +92,9 @@ impl LiveTradeExecutor {
             .authenticate()
             .await
             .context("authenticate CLOB client")?;
+        let heartbeat_id = initialize_heartbeat(&client)
+            .await
+            .context("initialize CLOB heartbeat")?;
         let closed_only = client
             .closed_only_mode()
             .await
@@ -136,6 +143,7 @@ impl LiveTradeExecutor {
         );
 
         Ok(Self {
+            _heartbeat_task: spawn_heartbeat_task(client.clone(), heartbeat_id),
             client,
             signer,
             order_type: map_order_type(config.live_order_type),
@@ -144,20 +152,50 @@ impl LiveTradeExecutor {
 
     pub async fn has_market_exposure(&self, condition_id: &str) -> Result<bool> {
         let market = B256::from_str(condition_id).context("parse market condition id")?;
-        let orders = self
-            .client
-            .orders(&OrdersRequest::builder().market(market).build(), None)
-            .await
-            .context("query open orders")?;
+        let orders_request = OrdersRequest::builder().market(market).build();
+        let orders = match self.client.orders(&orders_request, None).await {
+            Ok(orders) => orders,
+            Err(error) if is_l2_auth_error(&error) => {
+                warn!(
+                    event = "live_auth_refresh",
+                    endpoint = "data/orders",
+                    error = %error,
+                    "refreshing heartbeat after L2 auth error"
+                );
+                initialize_heartbeat(&self.client)
+                    .await
+                    .context("refresh CLOB heartbeat after open-orders auth error")?;
+                self.client
+                    .orders(&OrdersRequest::builder().market(market).build(), None)
+                    .await
+                    .context("query open orders after heartbeat refresh")?
+            }
+            Err(error) => return Err(error).context("query open orders"),
+        };
         if !orders.data.is_empty() {
             return Ok(true);
         }
 
-        let trades = self
-            .client
-            .trades(&TradesRequest::builder().market(market).build(), None)
-            .await
-            .context("query trade history")?;
+        let trades_request = TradesRequest::builder().market(market).build();
+        let trades = match self.client.trades(&trades_request, None).await {
+            Ok(trades) => trades,
+            Err(error) if is_l2_auth_error(&error) => {
+                warn!(
+                    event = "live_auth_refresh",
+                    endpoint = "data/trades",
+                    error = %error,
+                    "refreshing heartbeat after L2 auth error"
+                );
+                initialize_heartbeat(&self.client)
+                    .await
+                    .context("refresh CLOB heartbeat after trades auth error")?;
+                self.client
+                    .trades(&TradesRequest::builder().market(market).build(), None)
+                    .await
+                    .context("query trade history after heartbeat refresh")?
+            }
+            Err(error) => return Err(error).context("query trade history"),
+        };
 
         Ok(!trades.data.is_empty())
     }
@@ -181,6 +219,120 @@ impl LiveTradeExecutor {
 
         Ok(LiveOrderResponse::from(response))
     }
+}
+
+#[derive(Deserialize)]
+struct HeartbeatErrorBody {
+    heartbeat_id: Option<Uuid>,
+    error_msg: Option<String>,
+    error: Option<String>,
+}
+
+async fn initialize_heartbeat(client: &AuthenticatedClient) -> Result<Option<Uuid>> {
+    match client.post_heartbeat(None).await {
+        Ok(response) => {
+            log_heartbeat_response("live_heartbeat_ok", &response);
+            Ok(Some(response.heartbeat_id))
+        }
+        Err(error) => {
+            let heartbeat_id = heartbeat_id_from_error(&error)
+                .with_context(|| format!("post initial CLOB heartbeat: {error}"))?;
+            warn!(
+                event = "live_heartbeat_resynced",
+                heartbeat_id = %heartbeat_id,
+                error = %error,
+                "live trading heartbeat id resynchronized"
+            );
+            let response = client
+                .post_heartbeat(Some(heartbeat_id))
+                .await
+                .context("post resynchronized CLOB heartbeat")?;
+            log_heartbeat_response("live_heartbeat_ok", &response);
+            Ok(Some(response.heartbeat_id))
+        }
+    }
+}
+
+fn spawn_heartbeat_task(
+    client: AuthenticatedClient,
+    mut heartbeat_id: Option<Uuid>,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(5));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        interval.tick().await;
+
+        loop {
+            interval.tick().await;
+            match client.post_heartbeat(heartbeat_id).await {
+                Ok(response) => {
+                    if heartbeat_id.as_ref() != Some(&response.heartbeat_id)
+                        || response.error.is_some()
+                    {
+                        log_heartbeat_response("live_heartbeat_ok", &response);
+                    }
+                    heartbeat_id = Some(response.heartbeat_id);
+                }
+                Err(error) => {
+                    if let Some(next_id) = heartbeat_id_from_error(&error) {
+                        warn!(
+                            event = "live_heartbeat_resynced",
+                            heartbeat_id = %next_id,
+                            error = %error,
+                            "live trading heartbeat id resynchronized"
+                        );
+                        heartbeat_id = Some(next_id);
+                    } else {
+                        warn!(
+                            event = "live_heartbeat_error",
+                            error = %error,
+                            "live trading heartbeat failed"
+                        );
+                    }
+                }
+            }
+        }
+    })
+}
+
+fn log_heartbeat_response(event: &'static str, response: &HeartbeatResponse) {
+    if let Some(error) = &response.error {
+        warn!(
+            event = event,
+            heartbeat_id = %response.heartbeat_id,
+            error = %error,
+            "live trading heartbeat returned an error"
+        );
+    } else {
+        info!(
+            event = event,
+            heartbeat_id = %response.heartbeat_id,
+            "live trading heartbeat accepted"
+        );
+    }
+}
+
+fn heartbeat_id_from_error(error: &PolymarketError) -> Option<Uuid> {
+    let status = error.downcast_ref::<PolymarketStatus>()?;
+    let body: HeartbeatErrorBody = serde_json::from_str(&status.message).ok()?;
+    if let Some(error_msg) = body.error_msg.as_deref().or(body.error.as_deref()) {
+        warn!(
+            event = "live_heartbeat_server_error",
+            error = %error_msg,
+            "live trading heartbeat server returned recoverable error"
+        );
+    }
+
+    body.heartbeat_id
+}
+
+fn is_l2_auth_error(error: &PolymarketError) -> bool {
+    let Some(status) = error.downcast_ref::<PolymarketStatus>() else {
+        return false;
+    };
+
+    status.status_code == polymarket_client_sdk_v2::error::StatusCode::UNAUTHORIZED
+        && status.message.contains("Invalid api key")
 }
 
 #[derive(Clone, Debug)]

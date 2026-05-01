@@ -2851,8 +2851,6 @@ dependencies = [
  "sha1",
  "sha2",
  "strum_macros 0.28.0",
- "tokio",
- "tokio-util",
  "tracing",
  "url",
  "uuid",
