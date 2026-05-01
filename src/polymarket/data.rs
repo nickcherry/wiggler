@@ -1,0 +1,64 @@
+use anyhow::{Context, Result};
+use polymarket_client_sdk_v2::{
+    data::{
+        Client,
+        types::{Side, request::TradesRequest, response::Trade},
+    },
+    types::Address,
+};
+
+const TRADES_PAGE_LIMIT: i32 = 10_000;
+const TRADES_MAX_OFFSET: i32 = 10_000;
+
+#[derive(Clone, Debug)]
+pub struct DataApiClient {
+    inner: Client,
+}
+
+impl DataApiClient {
+    pub fn new(base_url: &str) -> Result<Self> {
+        Ok(Self {
+            inner: Client::new(base_url).context("create Polymarket Data API client")?,
+        })
+    }
+
+    pub async fn fetch_trades(&self, user: Address, max_trades: usize) -> Result<Vec<Trade>> {
+        let mut rows = Vec::new();
+        let mut offset = 0_i32;
+
+        while rows.len() < max_trades && offset <= TRADES_MAX_OFFSET {
+            let remaining = max_trades.saturating_sub(rows.len());
+            let limit = remaining.min(TRADES_PAGE_LIMIT as usize) as i32;
+            if limit == 0 {
+                break;
+            }
+
+            let request = TradesRequest::builder()
+                .user(user)
+                .limit(limit)
+                .context("set trades page limit")?
+                .offset(offset)
+                .context("set trades page offset")?
+                .taker_only(false)
+                .build();
+            let page = self
+                .inner
+                .trades(&request)
+                .await
+                .with_context(|| format!("fetch trades at offset {offset}"))?;
+            let count = page.len();
+
+            rows.extend(page);
+            if count < limit as usize {
+                break;
+            }
+            offset = offset.saturating_add(count as i32);
+        }
+
+        Ok(rows)
+    }
+}
+
+pub fn is_buy(side: &Side) -> bool {
+    matches!(side, Side::Buy)
+}

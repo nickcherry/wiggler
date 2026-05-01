@@ -48,6 +48,7 @@ pub struct RuntimeConfig {
     pub polymarket_api_passphrase: Option<String>,
     pub polymarket_api_nonce: Option<u32>,
     pub polymarket_signature_type: PolymarketSignatureType,
+    pub polymarket_user_address: Option<String>,
     pub polymarket_funder_address: Option<String>,
     pub price_stale_after: Duration,
     pub orderbook_stale_after: Duration,
@@ -111,6 +112,7 @@ impl RuntimeConfig {
                 "POLYMARKET_SIGNATURE_TYPE",
                 PolymarketSignatureType::Eoa,
             )?,
+            polymarket_user_address: non_empty_env("POLYMARKET_USER_ADDRESS"),
             polymarket_funder_address: non_empty_env("POLYMARKET_FUNDER_ADDRESS"),
             price_stale_after: Duration::from_millis(u64_env(
                 "WIGGLER_PRICE_STALE_AFTER_MS",

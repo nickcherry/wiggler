@@ -36,6 +36,8 @@ cargo build
 cp .env.example .env
 ```
 
+The binary loads `.env` on startup when the file is present.
+
 Shadow monitoring uses public Polymarket endpoints and does not need API keys.
 Live trading requires a Polymarket private key and funded/approved wallet.
 Telegram is optional.
@@ -82,7 +84,7 @@ cargo run -- monitor --runtime-bundle-dir runtime/wiggler-prod-v1
 | `WIGGLER_MIN_ABS_D_BPS` | `0.01` | Dust threshold around the market line |
 | `WIGGLER_TELEGRAM_PNL_INTERVAL_SECS` | `900` | Telegram summary lookback control; summaries check every 30s, `0` disables summaries |
 | `POLYMARKET_GAMMA_BASE_URL` | `https://gamma-api.polymarket.com` | Market discovery |
-| `POLYMARKET_DATA_API_BASE_URL` | `https://data-api.polymarket.com` | Public profile/account PnL and win/loss snapshots for Telegram |
+| `POLYMARKET_DATA_API_BASE_URL` | `https://data-api.polymarket.com` | Public profile/account PnL, win/loss, and trade-analysis snapshots |
 | `POLYMARKET_CLOB_API_URL` | `https://clob.polymarket.com` | CLOB trading/auth API |
 | `POLYMARKET_CLOB_MARKET_WS_URL` | `wss://ws-subscriptions-clob.polymarket.com/ws/market` | Orderbook websocket |
 | `POLYMARKET_RTDS_WS_URL` | `wss://ws-live-data.polymarket.com` | Chainlink/Binance crypto price websocket |
@@ -92,6 +94,7 @@ cargo run -- monitor --runtime-bundle-dir runtime/wiggler-prod-v1
 | `POLYMARKET_PRIVATE_KEY` | unset | Required for live order signing |
 | `POLYMARKET_SIGNATURE_TYPE` | `eoa` | `eoa`, `proxy`, `gnosis-safe`, or `poly1271` |
 | `POLYMARKET_FUNDER_ADDRESS` | unset | Optional explicit funded Polymarket wallet address |
+| `POLYMARKET_USER_ADDRESS` | unset | Optional proxy wallet address for API-backed trade analysis and Telegram summaries |
 | `POLYMARKET_API_KEY` / `POLYMARKET_API_SECRET` / `POLYMARKET_API_PASSPHRASE` | unset | Optional L2 API credentials; SDK derives/creates credentials when unset |
 | `POLYMARKET_API_NONCE` | unset | Optional nonce for API key derivation/creation |
 | `WIGGLER_TELEGRAM_ENABLED` | `true` | Set `false` to silence Telegram even when token/chat env vars are present |

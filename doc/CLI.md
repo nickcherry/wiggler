@@ -8,6 +8,8 @@ During development, run commands through Cargo:
 cargo run -- <command>
 ```
 
+The binary loads a repo-root `.env` file on startup when one is present.
+
 After release/build, the binary itself is the entrypoint:
 
 ```bash
@@ -30,6 +32,41 @@ Output is pretty JSON so it can be read by a human or parsed by tooling.
 Side effects:
 
 - Makes public Gamma REST requests.
+- Does not open websockets.
+- Does not send Telegram messages.
+- Does not write files.
+
+### `analyze-trades`
+
+Analyzes closed trade performance using Polymarket API data only.
+
+```bash
+cargo run -- analyze-trades --user 0x...
+POLYMARKET_USER_ADDRESS=0x... cargo run -- analyze-trades
+cargo run -- analyze-trades --assets btc,eth,sol --max-trades 1000
+```
+
+Default behavior:
+
+- Assets: `btc,eth,sol,xrp,doge`
+- Slot width: `300` seconds
+- Trades fetched for entry-time matching and PnL calculation: up to `10000`
+- Wallet source: `--user`, then `POLYMARKET_USER_ADDRESS`, then
+  `POLYMARKET_FUNDER_ADDRESS`; EOA configs can fall back to the
+  `POLYMARKET_PRIVATE_KEY` address
+
+Output is formatted for a terminal and includes overall results plus breakdowns
+by asset, time remaining, entry-vs-line availability, and average entry odds.
+
+The report computes each buy fill's PnL from Data API trade rows plus Gamma's
+resolved outcome prices. The entry-vs-start-line section intentionally remains
+API-only: Polymarket APIs do not include the historical underlying start-line
+price or underlying price at entry, so the command will not backfill that from
+local trade records or external price archives.
+
+Side effects:
+
+- Makes public Polymarket Data API and Gamma REST requests.
 - Does not open websockets.
 - Does not send Telegram messages.
 - Does not write files.

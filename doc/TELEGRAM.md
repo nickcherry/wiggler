@@ -28,11 +28,12 @@ Live entry attempts are not messaged. Retryable FAK/FOK no-fill misses are
 sent as concise rejection messages, logged, and recorded, but they do not block
 the monitor from looking for another entry in the same market.
 
-Live settlement Telegram win/loss/PnL values use the local closed trade records
-for the just-settled five-minute window, so summaries do not wait for
-Polymarket's data API to publish closed rows. The total wins, losses, and PnL
-underneath also come from the local bot trade-record ledger, not account-wide
-Polymarket history.
+Live settlement Telegram win/loss/PnL values use Polymarket Data API trade
+rows plus Gamma's resolved outcome prices. Local trade records are not used for
+PnL or win/loss summaries. Totals are account-wide for the configured wallet
+and asset whitelist, using resolved buy fills available from Polymarket APIs.
+The wallet comes from `POLYMARKET_USER_ADDRESS` or `POLYMARKET_FUNDER_ADDRESS`
+in `.env`, with EOA configs falling back to `POLYMARKET_PRIVATE_KEY`.
 
 ## Message Content
 
