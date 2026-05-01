@@ -117,9 +117,35 @@ impl LiveTradeExecutor {
             .await
             .context("authenticate CLOB client")?;
         let heartbeat_state = Arc::new(Mutex::new(None));
-        refresh_heartbeat(&client, &heartbeat_state)
-            .await
-            .context("initialize CLOB heartbeat")?;
+        if let Err(error) = refresh_heartbeat(&client, &heartbeat_state).await {
+            if is_l2_auth_error_chain(&error) {
+                let nonce = fresh_api_nonce()?;
+                warn!(
+                    event = "live_api_key_rotate",
+                    endpoint = "startup/heartbeat",
+                    nonce,
+                    error = %format!("{error:#}"),
+                    "creating fresh Polymarket API credentials after startup heartbeat auth error"
+                );
+                client =
+                    authenticate_client(&auth_config, &signer, CredentialSource::FreshNonce(nonce))
+                        .await
+                        .context("authenticate CLOB client with fresh API credentials")?;
+                reset_heartbeat(&heartbeat_state).await;
+                refresh_heartbeat(&client, &heartbeat_state)
+                    .await
+                    .context("initialize CLOB heartbeat after API credential rotation")?;
+                info!(
+                    event = "live_api_key_rotated",
+                    endpoint = "startup/heartbeat",
+                    nonce,
+                    api_key = %redacted_uuid(client.credentials().key()),
+                    "fresh Polymarket API credentials installed"
+                );
+            } else {
+                return Err(error).context("initialize CLOB heartbeat");
+            }
+        }
         let collateral = match validate_live_account(&client, &heartbeat_state).await {
             Ok(collateral) => collateral,
             Err(error) if is_l2_auth_error_chain(&error) => {
