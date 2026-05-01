@@ -130,6 +130,15 @@ async fn main() -> Result<()> {
                 )
             }),
     );
+    report(
+        "heartbeat",
+        client.post_heartbeat(None).await.map(|value| {
+            format!(
+                "ok heartbeat_id={} error={:?}",
+                value.heartbeat_id, value.error
+            )
+        }),
+    );
 
     Ok(())
 }
