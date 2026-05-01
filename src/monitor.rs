@@ -47,7 +47,27 @@ pub async fn run(args: MonitorArgs, config: RuntimeConfig) -> Result<()> {
     })?;
     let telegram = TelegramClient::from_config(&config);
     let live_executor = if config.live_trading {
-        Some(LiveTradeExecutor::from_config(&config).await?)
+        match LiveTradeExecutor::from_config(&config).await {
+            Ok(executor) => Some(executor),
+            Err(error) => {
+                let error_chain = format!("{error:#}");
+                warn!(
+                    event = "live_trading_startup_error",
+                    error = %error_chain,
+                    "live trading startup failed"
+                );
+                if let Err(telegram_error) = telegram
+                    .send_message(&live_startup_error_text(&error_chain))
+                    .await
+                {
+                    warn!(
+                        error = %telegram_error,
+                        "failed to send live startup error Telegram message"
+                    );
+                }
+                return Err(error.context("initialize live trading executor"));
+            }
+        }
     } else {
         None
     };
@@ -950,7 +970,25 @@ impl MonitorState {
             }
             Ok(false) => {}
             Err(error) => {
-                warn!(error = %error, slug = market.slug, "failed to reconcile market exposure");
+                let error_chain = format!("{error:#}");
+                warn!(
+                    event = "live_exposure_reconcile_error",
+                    error = %error_chain,
+                    slug = market.slug,
+                    condition_id = market.condition_id,
+                    "failed to reconcile market exposure"
+                );
+                if let Err(telegram_error) = telegram
+                    .send_message(&live_pre_submit_error_text(
+                        market,
+                        initial_prepared,
+                        "could not check existing market exposure",
+                        &error_chain,
+                    ))
+                    .await
+                {
+                    warn!(error = %telegram_error, slug = market.slug, "failed to send live pre-submit error Telegram message");
+                }
                 return;
             }
         }
@@ -1078,6 +1116,27 @@ impl MonitorState {
                     decision,
                     "live order response"
                 );
+                if !response.success {
+                    warn!(
+                        event = "live_order_rejected",
+                        timestamp = %Utc::now().to_rfc3339(),
+                        mode = "live",
+                        slug = market.slug,
+                        condition_id = market.condition_id,
+                        token_id = request.token_id.as_str(),
+                        outcome = ?request.outcome,
+                        amount_usdc = request.amount_usdc,
+                        max_price = request.max_price,
+                        order_id = response.order_id.as_str(),
+                        status = response.status.as_str(),
+                        error_msg = ?response.error_msg,
+                        making_amount = response.making_amount.as_str(),
+                        taking_amount = response.taking_amount.as_str(),
+                        trade_ids = ?response.trade_ids,
+                        decision = "rejected",
+                        "live order rejected"
+                    );
+                }
                 if let Err(error) = telegram
                     .send_message(&live_response_text(&request, &response))
                     .await
@@ -1101,12 +1160,7 @@ impl MonitorState {
                     "live order failed"
                 );
                 if let Err(telegram_error) = telegram
-                    .send_message(&format!(
-                        "LIVE order failed {}/{}: {}",
-                        request.asset,
-                        request.outcome_label(),
-                        error_chain
-                    ))
+                    .send_message(&live_order_error_text(&request, &error_chain))
                     .await
                 {
                     warn!(error = %telegram_error, slug = market.slug, "failed to send live error Telegram message");
@@ -1750,6 +1804,24 @@ fn format_market_price(asset: Asset, value: f64) -> String {
     }
 }
 
+fn live_startup_error_text(error: &str) -> String {
+    format!("Live trading could not start.\nReason: {error}\nNo live orders were sent.")
+}
+
+fn live_pre_submit_error_text(
+    market: &MonitoredMarket,
+    prepared: &PreparedTrade,
+    summary: &str,
+    error: &str,
+) -> String {
+    format!(
+        "Live order blocked before submit: {} {}\nBet: {}\nReason: {summary}\nDetails: {error}\nNo order was sent.",
+        market.asset.to_string().to_ascii_uppercase(),
+        outcome_label(&prepared.outcome),
+        format_usdc(prepared.amount_usdc)
+    )
+}
+
 fn live_response_text(request: &LiveOrderRequest, response: &LiveOrderResponse) -> String {
     if response.has_fill() {
         format!(
@@ -1777,6 +1849,15 @@ fn live_response_text(request: &LiveOrderRequest, response: &LiveOrderResponse) 
             response.error_msg.as_deref().unwrap_or("unknown")
         )
     }
+}
+
+fn live_order_error_text(request: &LiveOrderRequest, error: &str) -> String {
+    format!(
+        "Live order failed: {} {}\nBet: {}\nReason: {error}",
+        request.asset.to_string().to_ascii_uppercase(),
+        request.outcome_label(),
+        format_usdc(request.amount_usdc)
+    )
 }
 
 fn distance_bps(price: Decimal, line: Decimal) -> Option<Decimal> {
