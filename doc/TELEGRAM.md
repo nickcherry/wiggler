@@ -31,9 +31,8 @@ the monitor from looking for another entry in the same market.
 Live settlement Telegram win/loss/PnL values use the local closed trade records
 for the just-settled five-minute window, so summaries do not wait for
 Polymarket's data API to publish closed rows. The total wins, losses, and PnL
-underneath use Polymarket `closed-positions` history from
-`POLYMARKET_FUNDER_ADDRESS` when available, with local closed records as a
-fallback.
+underneath also come from the local bot trade-record ledger, not account-wide
+Polymarket history.
 
 ## Message Content
 
@@ -55,10 +54,10 @@ Five-minute settlement summaries use this shape:
 BTC ↑ won +$58.35
 ETH ↓ lost -$49.99
 
-Total wins: 1 (50%)
-Total losses: 1 (50%)
+Bot total wins: 1 (50%)
+Bot total losses: 1 (50%)
 
-Total PnL: +$8.36
+Bot total PnL: +$8.36
 ```
 
 Keep messages terse enough to scan on mobile.

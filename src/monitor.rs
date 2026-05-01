@@ -37,9 +37,9 @@ mod settlement;
 #[cfg(test)]
 use settlement::slot_start_from_market_slug;
 use settlement::{
-    AccountPnlClient, ClosedPositionPnlRow, closed_position_outcome_label,
-    closed_position_slot_start, closed_position_ticker, closed_position_totals,
-    live_settlement_candidate_slots, live_settlement_lookback_slots, live_settlement_summary_text,
+    ClosedPositionPnlRow, closed_position_outcome_label, closed_position_slot_start,
+    closed_position_ticker, closed_position_totals, live_settlement_candidate_slots,
+    live_settlement_lookback_slots, live_settlement_summary_text,
 };
 
 pub async fn run(args: MonitorArgs, config: RuntimeConfig) -> Result<()> {
@@ -58,7 +58,6 @@ pub async fn run(args: MonitorArgs, config: RuntimeConfig) -> Result<()> {
     })?;
     let candle_lookback_min = max_vol_lookback_min(&runtime_bundle, &assets);
     let telegram = TelegramClient::from_config(&config);
-    let account_pnl = AccountPnlClient::from_config(&config);
     let live_executor = if config.live_trading {
         match LiveTradeExecutor::from_config(&config).await {
             Ok(executor) => Some(executor),
@@ -207,10 +206,10 @@ pub async fn run(args: MonitorArgs, config: RuntimeConfig) -> Result<()> {
             }
             _ = optional_interval_tick(&mut settlement_interval) => {
                 state.send_live_settlement_summaries(
-                    &account_pnl,
                     &telegram,
                     duration,
                     config.telegram_pnl_interval,
+                    &config.trade_record_dir,
                 ).await;
             }
             _ = evaluation_interval.tick() => {
@@ -395,6 +394,70 @@ fn closed_rows_for_slot(
         .collect()
 }
 
+#[derive(Default)]
+struct LocalClosedPositionRows {
+    rows: Vec<ClosedPositionPnlRow>,
+    closed_record_paths: HashSet<PathBuf>,
+}
+
+fn local_closed_position_rows_from_dir(dir: &Path) -> Result<LocalClosedPositionRows> {
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(LocalClosedPositionRows::default());
+        }
+        Err(error) => {
+            return Err(error).with_context(|| format!("read trade record dir {}", dir.display()));
+        }
+    };
+
+    let mut local_rows = LocalClosedPositionRows::default();
+    for entry in entries {
+        let entry = entry.with_context(|| format!("read entry in {}", dir.display()))?;
+        let path = entry.path();
+        if path.extension().and_then(|extension| extension.to_str()) != Some("json") {
+            continue;
+        }
+        let bytes =
+            fs::read(&path).with_context(|| format!("read trade record {}", path.display()))?;
+        let record = serde_json::from_slice::<Value>(&bytes)
+            .with_context(|| format!("parse trade record {}", path.display()))?;
+        if let Some(row) = closed_position_row_from_trade_record(&record) {
+            local_rows.closed_record_paths.insert(path);
+            local_rows.rows.push(row);
+        }
+    }
+
+    Ok(local_rows)
+}
+
+fn closed_position_row_from_trade_record(record: &Value) -> Option<ClosedPositionPnlRow> {
+    if record.get("mode").and_then(Value::as_str) != Some("live")
+        || record.get("state").and_then(Value::as_str) != Some("closed")
+    {
+        return None;
+    }
+
+    Some(ClosedPositionPnlRow {
+        realized_pnl: record
+            .pointer("/closeout/estimated_pnl_usdc")
+            .and_then(Value::as_f64),
+        slug: record
+            .pointer("/market/slug")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        event_slug: None,
+        title: record
+            .pointer("/market/title")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        outcome: record
+            .pointer("/entry/outcome")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+    })
+}
+
 async fn optional_interval_tick(interval: &mut Option<time::Interval>) {
     if let Some(interval) = interval {
         interval.tick().await;
@@ -441,10 +504,10 @@ impl MonitorState {
 
     async fn send_live_settlement_summaries(
         &mut self,
-        account_pnl: &AccountPnlClient,
         telegram: &TelegramClient,
         duration: TimeDelta,
         pnl_interval: Duration,
+        trade_record_dir: &Path,
     ) {
         if !telegram.is_configured() {
             return;
@@ -468,20 +531,32 @@ impl MonitorState {
             "checking closed live trades for Telegram summaries"
         );
 
-        let recent_rows = account_pnl.fetch_recent_closed_positions().await;
+        let local_rows = match local_closed_position_rows_from_dir(trade_record_dir) {
+            Ok(mut local_rows) => {
+                for (record_path, row) in self.local_closed_position_rows_with_paths() {
+                    if record_path
+                        .as_ref()
+                        .is_some_and(|path| local_rows.closed_record_paths.contains(path))
+                    {
+                        continue;
+                    }
+                    local_rows.rows.push(row);
+                }
+                local_rows.rows
+            }
+            Err(error) => {
+                warn!(
+                    error = %error,
+                    path = %trade_record_dir.display(),
+                    "failed to load local trade records for Telegram summary"
+                );
+                self.local_closed_position_rows()
+            }
+        };
 
         let mut summaries = Vec::new();
         for slot_start in unsent_slots {
-            let mut slot_rows = self.local_closed_position_rows_for_slot(slot_start);
-            let source = if slot_rows.is_empty() {
-                slot_rows = recent_rows
-                    .as_ref()
-                    .map(|rows| closed_rows_for_slot(rows, slot_start))
-                    .unwrap_or_default();
-                "polymarket"
-            } else {
-                "local_trade_record"
-            };
+            let mut slot_rows = closed_rows_for_slot(&local_rows, slot_start);
             if slot_rows.is_empty() {
                 info!(
                     event = "live_settlement_summary_empty",
@@ -503,19 +578,16 @@ impl MonitorState {
                             .total_cmp(&right.realized_pnl.unwrap_or(0.0))
                     })
             });
-            summaries.push((slot_start, slot_rows, source));
+            summaries.push((slot_start, slot_rows));
         }
 
         if summaries.is_empty() {
             return;
         }
 
-        let all_time_totals = match account_pnl.fetch_all_closed_positions().await {
-            Some(all_rows) => closed_position_totals(&all_rows),
-            None => closed_position_totals(&self.local_closed_position_rows()),
-        };
+        let all_time_totals = closed_position_totals(&local_rows);
 
-        for (slot_start, slot_rows, source) in summaries {
+        for (slot_start, slot_rows) in summaries {
             let message = live_settlement_summary_text(&slot_rows, all_time_totals);
             match telegram.send_message(&message).await {
                 Ok(()) => {
@@ -524,7 +596,7 @@ impl MonitorState {
                         event = "live_settlement_summary_sent",
                         slot_start = %slot_start,
                         row_count = slot_rows.len(),
-                        source,
+                        source = "local_trade_record",
                         "sent live settlement Telegram summary"
                     );
                 }
@@ -539,20 +611,23 @@ impl MonitorState {
         }
     }
 
-    fn local_closed_position_rows_for_slot(
-        &self,
-        slot_start: DateTime<Utc>,
-    ) -> Vec<ClosedPositionPnlRow> {
-        self.local_closed_position_rows()
+    fn local_closed_position_rows(&self) -> Vec<ClosedPositionPnlRow> {
+        self.local_closed_position_rows_with_paths()
             .into_iter()
-            .filter(|row| closed_position_slot_start(row) == Some(slot_start))
+            .map(|(_, row)| row)
             .collect()
     }
 
-    fn local_closed_position_rows(&self) -> Vec<ClosedPositionPnlRow> {
+    fn local_closed_position_rows_with_paths(
+        &self,
+    ) -> Vec<(Option<PathBuf>, ClosedPositionPnlRow)> {
         self.tracked_entries
             .values()
-            .filter_map(TrackedEntry::closed_position_row)
+            .filter_map(|entry| {
+                entry
+                    .closed_position_row()
+                    .map(|row| (entry.record_path.clone(), row))
+            })
             .collect()
     }
 
@@ -2511,7 +2586,7 @@ mod tests {
         ClosedPositionPnlRow, LIVE_SETTLEMENT_CHECK_INTERVAL_SECONDS, MarketPricePath,
         MonitorState, PathState, PreparedTrade, SlotLine, TrackedEntry,
         adjusted_required_edge_probability, asset_ids_for_markets, clean_failure_reason,
-        closed_position_totals, distance_bps, effective_max_order_usdc,
+        closed_position_totals, closed_rows_for_slot, distance_bps, effective_max_order_usdc,
         experimental_final_window_applies, format_market_price, format_signed_usdc, format_usdc,
         is_retryable_no_fill_error, live_entry_filled_text, live_entry_rejected_text,
         live_settlement_candidate_slots, live_settlement_lookback_slots,
@@ -3138,7 +3213,7 @@ mod tests {
     }
 
     #[test]
-    fn settlement_summary_uses_polymarket_closed_rows() {
+    fn settlement_summary_uses_local_closed_rows() {
         let window_rows = vec![
             ClosedPositionPnlRow {
                 realized_pnl: Some(58.352126999999996),
@@ -3166,7 +3241,7 @@ mod tests {
 
         assert_eq!(
             live_settlement_summary_text(&window_rows, closed_position_totals(&all_time_rows)),
-            "BTC ↑ won +$58.35\nETH ↓ lost -$50.00\n\nTotal wins: 2 (66.7%)\nTotal losses: 1 (33.3%)\n\nTotal PnL: +$108.35"
+            "BTC ↑ won +$58.35\nETH ↓ lost -$50.00\n\nBot total wins: 2 (66.7%)\nBot total losses: 1 (33.3%)\n\nBot total PnL: +$108.35"
         );
     }
 
@@ -3195,7 +3270,7 @@ mod tests {
             },
         );
 
-        let rows = state.local_closed_position_rows_for_slot(slot_start);
+        let rows = closed_rows_for_slot(&state.local_closed_position_rows(), slot_start);
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].slug.as_deref(), Some("btc-updown-5m-1777648800"));
         assert_eq!(rows[0].outcome.as_deref(), Some("Up"));

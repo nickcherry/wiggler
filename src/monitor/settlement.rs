@@ -2,121 +2,12 @@ use std::time::Duration;
 
 use chrono::{DateTime, TimeDelta, Utc};
 use serde::Deserialize;
-use tracing::warn;
 
-use crate::{config::RuntimeConfig, domain::time::MarketSlot};
+use crate::domain::time::MarketSlot;
 
 use super::{format_percent, format_signed_usdc, format_whole_number};
 
 const LIVE_SETTLEMENT_DELAY_SECONDS: u64 = 20;
-const MAX_RECENT_CLOSED_POSITION_ROWS: usize = 500;
-const MAX_CLOSED_POSITION_ROWS: usize = 50_000;
-
-#[derive(Clone)]
-pub(super) struct AccountPnlClient {
-    http: reqwest::Client,
-    data_api_base_url: String,
-    user: Option<String>,
-}
-
-impl AccountPnlClient {
-    pub(super) fn from_config(config: &RuntimeConfig) -> Self {
-        Self {
-            http: reqwest::Client::builder()
-                .user_agent("wiggler/1.0 account-pnl")
-                .build()
-                .unwrap_or_else(|_| reqwest::Client::new()),
-            data_api_base_url: config.data_api_base_url.trim_end_matches('/').to_string(),
-            user: config
-                .polymarket_funder_address
-                .as_ref()
-                .map(|address| address.to_ascii_lowercase()),
-        }
-    }
-
-    pub(super) async fn fetch_recent_closed_positions(&self) -> Option<Vec<ClosedPositionPnlRow>> {
-        self.fetch_closed_positions(MAX_RECENT_CLOSED_POSITION_ROWS)
-            .await
-    }
-
-    pub(super) async fn fetch_all_closed_positions(&self) -> Option<Vec<ClosedPositionPnlRow>> {
-        self.fetch_closed_positions(MAX_CLOSED_POSITION_ROWS).await
-    }
-
-    async fn fetch_closed_positions(&self, max_rows: usize) -> Option<Vec<ClosedPositionPnlRow>> {
-        let user = self.user.as_deref()?;
-        match self.fetch_closed_position_rows(user, max_rows).await {
-            Some(rows) => Some(rows),
-            None => {
-                warn!(
-                    user,
-                    "failed to fetch Polymarket closed positions for Telegram summary"
-                );
-                None
-            }
-        }
-    }
-
-    async fn fetch_closed_position_rows(
-        &self,
-        user: &str,
-        max_rows: usize,
-    ) -> Option<Vec<ClosedPositionPnlRow>> {
-        let closed_url = format!("{}/closed-positions", self.data_api_base_url);
-        let limit = 50usize;
-        let mut all_rows = Vec::new();
-        let mut offset = 0usize;
-
-        while all_rows.len() < max_rows {
-            let response = match self
-                .http
-                .get(&closed_url)
-                .query(&[
-                    ("user", user),
-                    ("limit", &limit.to_string()),
-                    ("offset", &offset.to_string()),
-                    ("sortBy", "TIMESTAMP"),
-                    ("sortDirection", "DESC"),
-                ])
-                .send()
-                .await
-                .and_then(reqwest::Response::error_for_status)
-            {
-                Ok(response) => response,
-                Err(error) => {
-                    warn!(
-                        error = %error,
-                        "failed to fetch Polymarket closed position counts"
-                    );
-                    return None;
-                }
-            };
-            let rows = match response.json::<Vec<ClosedPositionPnlRow>>().await {
-                Ok(rows) => rows,
-                Err(error) => {
-                    warn!(
-                        error = %error,
-                        "failed to parse Polymarket closed position counts"
-                    );
-                    return None;
-                }
-            };
-
-            let done = rows.len() < limit;
-            all_rows.extend(rows);
-            if done {
-                return Some(all_rows);
-            }
-            offset += limit;
-        }
-
-        warn!(
-            max_rows,
-            "Polymarket closed position fetch hit row cap; Telegram all-time totals may be partial"
-        );
-        Some(all_rows)
-    }
-}
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -186,18 +77,18 @@ pub(super) fn live_settlement_summary_text(
 
     lines.push(String::new());
     lines.push(format!(
-        "Total wins: {} ({})",
+        "Bot total wins: {} ({})",
         format_whole_number(all_time_totals.wins),
         format_percent(win_pct)
     ));
     lines.push(format!(
-        "Total losses: {} ({})",
+        "Bot total losses: {} ({})",
         format_whole_number(all_time_totals.losses),
         format_percent(loss_pct)
     ));
     lines.push(String::new());
     lines.push(format!(
-        "Total PnL: {}",
+        "Bot total PnL: {}",
         format_signed_usdc(all_time_totals.total_pnl)
     ));
     lines.join("\n")
