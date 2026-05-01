@@ -134,6 +134,18 @@ When the account is a Polymarket proxy wallet, verify the signature type before
 live trading. `proxy`, `gnosis-safe`, and `eoa` can all authenticate, but only
 the correct type reports the funded collateral balance. On the current prod
 account, `gnosis-safe` is the type that returns collateral and allowances.
+For proxy and Gnosis Safe accounts, `POLYMARKET_FUNDER_ADDRESS` must be the
+Polymarket profile/proxy wallet, not the EOA address for
+`POLYMARKET_PRIVATE_KEY`; leave it empty to let the SDK derive the wallet.
+To inspect the signer and derived proxy/safe addresses without printing
+secrets, run:
+
+```bash
+set -a
+. ./.env
+set +a
+cargo run --example address_probe
+```
 
 ## Underlying Price Feed
 

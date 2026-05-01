@@ -68,8 +68,14 @@ impl LiveTradeExecutor {
             .signature_type(map_signature_type(config.polymarket_signature_type));
 
         if let Some(funder) = &config.polymarket_funder_address {
-            auth =
-                auth.funder(Address::from_str(funder).context("parse POLYMARKET_FUNDER_ADDRESS")?);
+            let funder_address =
+                Address::from_str(funder).context("parse POLYMARKET_FUNDER_ADDRESS")?;
+            validate_funder_address(
+                config.polymarket_signature_type,
+                signer.address(),
+                funder_address,
+            )?;
+            auth = auth.funder(funder_address);
         }
 
         if let Some(credentials) = credentials_from_config(config)? {
@@ -263,6 +269,25 @@ fn map_signature_type(value: PolymarketSignatureType) -> SignatureType {
     }
 }
 
+fn validate_funder_address(
+    signature_type: PolymarketSignatureType,
+    signer_address: Address,
+    funder_address: Address,
+) -> Result<()> {
+    if matches!(
+        signature_type,
+        PolymarketSignatureType::Proxy | PolymarketSignatureType::GnosisSafe
+    ) && funder_address == signer_address
+    {
+        bail!(
+            "POLYMARKET_FUNDER_ADDRESS must be the Polymarket proxy/safe wallet for {:?}, not the signing EOA; unset it to let the SDK derive the wallet or set the profile wallet address",
+            signature_type
+        );
+    }
+
+    Ok(())
+}
+
 fn positive_decimal_truncated(name: &str, value: f64, scale: u32) -> Result<Decimal> {
     let decimal = Decimal::from_f64(value)
         .with_context(|| format!("convert {name} to decimal"))?
@@ -285,7 +310,12 @@ fn probability_decimal_truncated(name: &str, value: f64, scale: u32) -> Result<D
 
 #[cfg(test)]
 mod tests {
-    use super::{positive_decimal_truncated, probability_decimal_truncated};
+    use polymarket_client_sdk_v2::types::address;
+
+    use super::{
+        positive_decimal_truncated, probability_decimal_truncated, validate_funder_address,
+    };
+    use crate::config::PolymarketSignatureType;
 
     #[test]
     fn truncates_live_order_amount_without_rounding_up() {
@@ -297,5 +327,22 @@ mod tests {
     fn truncates_max_price_without_crossing_above_limit() {
         let price = probability_decimal_truncated("max_price", 0.849, 2).unwrap();
         assert_eq!(price.to_string(), "0.84");
+    }
+
+    #[test]
+    fn rejects_proxy_funder_that_matches_signer() {
+        let signer = address!("0x1111111111111111111111111111111111111111");
+        let result = validate_funder_address(PolymarketSignatureType::GnosisSafe, signer, signer);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn allows_proxy_funder_distinct_from_signer() {
+        let signer = address!("0x1111111111111111111111111111111111111111");
+        let funder = address!("0x2222222222222222222222222222222222222222");
+        let result = validate_funder_address(PolymarketSignatureType::GnosisSafe, signer, funder);
+
+        assert!(result.is_ok());
     }
 }
