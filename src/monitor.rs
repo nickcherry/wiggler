@@ -34,13 +34,13 @@ use crate::{
 
 mod settlement;
 
-use settlement::{
-    AccountPnlClient, closed_position_outcome_label, closed_position_slot_start,
-    closed_position_ticker, closed_position_totals, live_settlement_candidate_slots,
-    live_settlement_lookback_slots, live_settlement_summary_text,
-};
 #[cfg(test)]
-use settlement::{ClosedPositionPnlRow, slot_start_from_market_slug};
+use settlement::slot_start_from_market_slug;
+use settlement::{
+    AccountPnlClient, ClosedPositionPnlRow, closed_position_outcome_label,
+    closed_position_slot_start, closed_position_ticker, closed_position_totals,
+    live_settlement_candidate_slots, live_settlement_lookback_slots, live_settlement_summary_text,
+};
 
 pub async fn run(args: MonitorArgs, config: RuntimeConfig) -> Result<()> {
     let duration = duration_from_seconds(args.slot_seconds)?;
@@ -382,7 +382,17 @@ fn telegram_settlement_interval_duration(
         return None;
     }
 
-    Some(pnl_interval)
+    Some(Duration::from_secs(LIVE_SETTLEMENT_CHECK_INTERVAL_SECONDS))
+}
+
+fn closed_rows_for_slot(
+    rows: &[ClosedPositionPnlRow],
+    slot_start: DateTime<Utc>,
+) -> Vec<ClosedPositionPnlRow> {
+    rows.iter()
+        .filter(|row| closed_position_slot_start(row) == Some(slot_start))
+        .cloned()
+        .collect()
 }
 
 async fn optional_interval_tick(interval: &mut Option<time::Interval>) {
@@ -452,19 +462,32 @@ impl MonitorState {
         if unsent_slots.is_empty() {
             return;
         }
+        info!(
+            event = "live_settlement_summary_check",
+            unsent_slot_count = unsent_slots.len(),
+            "checking closed live trades for Telegram summaries"
+        );
 
-        let Some(recent_rows) = account_pnl.fetch_recent_closed_positions().await else {
-            return;
-        };
+        let recent_rows = account_pnl.fetch_recent_closed_positions().await;
 
         let mut summaries = Vec::new();
         for slot_start in unsent_slots {
-            let mut slot_rows = recent_rows
-                .iter()
-                .filter(|row| closed_position_slot_start(row) == Some(slot_start))
-                .cloned()
-                .collect::<Vec<_>>();
+            let mut slot_rows = self.local_closed_position_rows_for_slot(slot_start);
+            let source = if slot_rows.is_empty() {
+                slot_rows = recent_rows
+                    .as_ref()
+                    .map(|rows| closed_rows_for_slot(rows, slot_start))
+                    .unwrap_or_default();
+                "polymarket"
+            } else {
+                "local_trade_record"
+            };
             if slot_rows.is_empty() {
+                info!(
+                    event = "live_settlement_summary_empty",
+                    slot_start = %slot_start,
+                    "no closed live trades available for Telegram summary"
+                );
                 continue;
             }
             slot_rows.sort_by(|left, right| {
@@ -480,23 +503,30 @@ impl MonitorState {
                             .total_cmp(&right.realized_pnl.unwrap_or(0.0))
                     })
             });
-            summaries.push((slot_start, slot_rows));
+            summaries.push((slot_start, slot_rows, source));
         }
 
         if summaries.is_empty() {
             return;
         }
 
-        let Some(all_rows) = account_pnl.fetch_all_closed_positions().await else {
-            return;
+        let all_time_totals = match account_pnl.fetch_all_closed_positions().await {
+            Some(all_rows) => closed_position_totals(&all_rows),
+            None => closed_position_totals(&self.local_closed_position_rows()),
         };
-        let all_time_totals = closed_position_totals(&all_rows);
 
-        for (slot_start, slot_rows) in summaries {
+        for (slot_start, slot_rows, source) in summaries {
             let message = live_settlement_summary_text(&slot_rows, all_time_totals);
             match telegram.send_message(&message).await {
                 Ok(()) => {
                     self.sent_live_settlement_slots.insert(slot_start);
+                    info!(
+                        event = "live_settlement_summary_sent",
+                        slot_start = %slot_start,
+                        row_count = slot_rows.len(),
+                        source,
+                        "sent live settlement Telegram summary"
+                    );
                 }
                 Err(error) => {
                     warn!(
@@ -507,6 +537,23 @@ impl MonitorState {
                 }
             }
         }
+    }
+
+    fn local_closed_position_rows_for_slot(
+        &self,
+        slot_start: DateTime<Utc>,
+    ) -> Vec<ClosedPositionPnlRow> {
+        self.local_closed_position_rows()
+            .into_iter()
+            .filter(|row| closed_position_slot_start(row) == Some(slot_start))
+            .collect()
+    }
+
+    fn local_closed_position_rows(&self) -> Vec<ClosedPositionPnlRow> {
+        self.tracked_entries
+            .values()
+            .filter_map(TrackedEntry::closed_position_row)
+            .collect()
     }
 
     fn replace_markets(&mut self, markets: Vec<MonitoredMarket>) {
@@ -538,13 +585,13 @@ impl MonitorState {
             .retain(|slug, _| active_slugs.contains(slug));
         self.price_paths
             .retain(|slug, _| active_slugs.contains(slug));
+        self.initial_books_seen
+            .retain(|asset_id| active_asset_ids.contains(asset_id));
         self.resolved_markets.retain(|condition_id| {
             markets
                 .iter()
                 .any(|market| market.condition_id == *condition_id)
         });
-        self.initial_books_seen
-            .retain(|asset_id| active_asset_ids.contains(asset_id));
         self.books.retain_only(&active_asset_ids);
     }
 
@@ -1734,6 +1781,25 @@ impl TrackedEntry {
         }
     }
 
+    fn closed_position_row(&self) -> Option<ClosedPositionPnlRow> {
+        if !self.closeout_sent || !self.track_closeout {
+            return None;
+        }
+        let realized_pnl = self
+            .record
+            .get("closeout")
+            .and_then(|closeout| closeout.get("estimated_pnl_usdc"))
+            .and_then(Value::as_f64);
+
+        Some(ClosedPositionPnlRow {
+            realized_pnl,
+            slug: Some(self.prepared.slug.clone()),
+            event_slug: None,
+            title: None,
+            outcome: Some(outcome_label(&self.prepared.outcome).to_string()),
+        })
+    }
+
     fn write_record(&self) {
         let Some(record_path) = &self.record_path else {
             return;
@@ -2198,6 +2264,7 @@ const MAX_PATH_LOOKBACK_DRIFT_SECONDS: i64 = 30;
 const LEAD_DECAY_PENALTY_THRESHOLD: f64 = 0.75;
 const LEAD_DECAY_EDGE_PENALTY: f64 = 0.005;
 const RETRYABLE_NO_FILL_COOLDOWN_SECONDS: i64 = 10;
+const LIVE_SETTLEMENT_CHECK_INTERVAL_SECONDS: u64 = 30;
 // Monitor-only final-window experiment; the runtime bundle still has no <60s cells.
 const EXPERIMENTAL_MIN_REMAINING_SEC_TO_TRADE: i64 = 30;
 const EXPERIMENTAL_FINAL_WINDOW_MIN_ABS_D_BPS: f64 = 10.0;
@@ -2424,6 +2491,7 @@ mod tests {
 
     use chrono::{TimeDelta, TimeZone, Utc};
     use rust_decimal::Decimal;
+    use serde_json::json;
 
     use crate::{
         config::{LiveOrderType, PolymarketSignatureType, RuntimeConfig},
@@ -2440,7 +2508,8 @@ mod tests {
     };
 
     use super::{
-        ClosedPositionPnlRow, MarketPricePath, MonitorState, PathState, PreparedTrade, SlotLine,
+        ClosedPositionPnlRow, LIVE_SETTLEMENT_CHECK_INTERVAL_SECONDS, MarketPricePath,
+        MonitorState, PathState, PreparedTrade, SlotLine, TrackedEntry,
         adjusted_required_edge_probability, asset_ids_for_markets, clean_failure_reason,
         closed_position_totals, distance_bps, effective_max_order_usdc,
         experimental_final_window_applies, format_market_price, format_signed_usdc, format_usdc,
@@ -3102,6 +3171,38 @@ mod tests {
     }
 
     #[test]
+    fn local_settlement_rows_use_closed_trade_records() {
+        let slot_start = Utc.with_ymd_and_hms(2026, 5, 1, 15, 20, 0).unwrap();
+        let mut prepared = prepared_trade(Outcome::Up, "token");
+        prepared.slug = "btc-updown-5m-1777648800".to_string();
+        let mut state = MonitorState::default();
+        state.tracked_entries.insert(
+            "condition".to_string(),
+            TrackedEntry {
+                prepared,
+                slot_start,
+                slot_end: slot_start + TimeDelta::minutes(5),
+                record_path: None,
+                record: json!({
+                    "closeout": {
+                        "estimated_pnl_usdc": 12.34,
+                    }
+                }),
+                track_closeout: true,
+                closeout_sent: true,
+                filled_amount_usdc: Some(10.0),
+                filled_payout_usdc: Some(22.34),
+            },
+        );
+
+        let rows = state.local_closed_position_rows_for_slot(slot_start);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].slug.as_deref(), Some("btc-updown-5m-1777648800"));
+        assert_eq!(rows[0].outcome.as_deref(), Some("Up"));
+        assert_eq!(rows[0].realized_pnl, Some(12.34));
+    }
+
+    #[test]
     fn closed_position_totals_are_all_time() {
         let rows = vec![
             ClosedPositionPnlRow {
@@ -3167,7 +3268,7 @@ mod tests {
     }
 
     #[test]
-    fn telegram_settlement_interval_uses_configured_interval_and_zero_disables() {
+    fn telegram_settlement_interval_polls_frequently_and_zero_disables() {
         let mut config = test_config(false);
         config.telegram_bot_token = Some("token".to_string());
         config.telegram_chat_id = Some("chat".to_string());
@@ -3176,7 +3277,7 @@ mod tests {
 
         assert_eq!(
             telegram_settlement_interval_duration(&telegram, config.telegram_pnl_interval),
-            Some(Duration::from_secs(123))
+            Some(Duration::from_secs(LIVE_SETTLEMENT_CHECK_INTERVAL_SECONDS))
         );
         assert_eq!(
             telegram_settlement_interval_duration(&telegram, Duration::ZERO),

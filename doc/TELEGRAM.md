@@ -12,7 +12,9 @@ WIGGLER_TELEGRAM_PNL_INTERVAL_SECS=900
 
 If either value is missing, the Telegram client is a no-op.
 Set `WIGGLER_TELEGRAM_PNL_INTERVAL_SECS=0` to disable periodic PnL
-summaries while keeping trade lifecycle messages enabled.
+summaries while keeping trade lifecycle messages enabled. When enabled, the
+monitor checks for newly closed five-minute windows every 30 seconds and
+dedupes summaries by slot.
 
 ## Current Behavior
 
@@ -26,13 +28,12 @@ Live entry attempts are not messaged. Retryable FAK/FOK no-fill misses are
 sent as concise rejection messages, logged, and recorded, but they do not block
 the monitor from looking for another entry in the same market.
 
-Live settlement Telegram win/loss/PnL values are fetched from Polymarket
-`closed-positions` data using `POLYMARKET_FUNDER_ADDRESS`. The listed positions
-are scoped to the most recent settled five-minute window; the total wins,
-losses, and PnL underneath are all-time account totals from the fetched
-Polymarket closed-position history. The local trade-record ledger remains
-available for debugging exact bot attempts and closeout timing, but it is not
-used as the Telegram settlement source of truth.
+Live settlement Telegram win/loss/PnL values use the local closed trade records
+for the just-settled five-minute window, so summaries do not wait for
+Polymarket's data API to publish closed rows. The total wins, losses, and PnL
+underneath use Polymarket `closed-positions` history from
+`POLYMARKET_FUNDER_ADDRESS` when available, with local closed records as a
+fallback.
 
 ## Message Content
 
