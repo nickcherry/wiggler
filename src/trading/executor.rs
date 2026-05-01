@@ -33,6 +33,7 @@ use crate::{
 type AuthenticatedClient = Client<
     polymarket_client_sdk_v2::auth::state::Authenticated<polymarket_client_sdk_v2::auth::Normal>,
 >;
+type UnauthenticatedClient = Client<polymarket_client_sdk_v2::auth::state::Unauthenticated>;
 type ClientState = Arc<Mutex<AuthenticatedClient>>;
 type HeartbeatState = Arc<Mutex<Option<Uuid>>>;
 const INITIAL_CURSOR: &str = "MA==";
@@ -375,6 +376,14 @@ async fn authenticate_client(
         Config::builder().use_server_time(true).build(),
     )
     .with_context(|| format!("create CLOB client for {}", config.clob_api_url))?;
+    let fresh_credentials = match credential_source {
+        CredentialSource::FreshNonce(nonce) => Some(
+            create_fresh_api_key(&client, signer, nonce)
+                .await
+                .context("create fresh CLOB API key")?,
+        ),
+        CredentialSource::Configured => None,
+    };
     let mut auth = client
         .authentication_builder(signer)
         .signature_type(map_signature_type(config.signature_type));
@@ -392,13 +401,26 @@ async fn authenticate_client(
             }
         }
         CredentialSource::FreshNonce(nonce) => {
-            auth = auth.nonce(nonce);
+            let credentials = fresh_credentials
+                .with_context(|| format!("missing fresh API key nonce {nonce}"))?;
+            auth = auth.credentials(credentials);
         }
     }
 
     auth.authenticate()
         .await
         .context("authenticate CLOB client")
+}
+
+async fn create_fresh_api_key(
+    client: &UnauthenticatedClient,
+    signer: &PrivateKeySigner,
+    nonce: u32,
+) -> Result<Credentials> {
+    client
+        .create_api_key(signer, Some(nonce))
+        .await
+        .with_context(|| format!("create CLOB API key with nonce {nonce}"))
 }
 
 async fn validate_live_account(
