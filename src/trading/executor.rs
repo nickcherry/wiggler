@@ -4,7 +4,13 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use alloy::{signers::Signer as _, signers::local::PrivateKeySigner};
+use alloy::{
+    core::sol,
+    dyn_abi::Eip712Domain,
+    hex::ToHexExt as _,
+    signers::{Signer as _, local::PrivateKeySigner},
+    sol_types::SolStruct as _,
+};
 use anyhow::{Context, Result, bail};
 use polymarket_client_sdk_v2::{
     POLYGON,
@@ -20,6 +26,7 @@ use polymarket_client_sdk_v2::{
     error::{Error as PolymarketError, Status as PolymarketStatus},
     types::{Address, B256, Decimal, U256},
 };
+use reqwest::header::{HeaderMap, HeaderValue};
 use rust_decimal::prelude::FromPrimitive;
 use serde::Deserialize;
 use tokio::{sync::Mutex, task::JoinHandle};
@@ -33,10 +40,18 @@ use crate::{
 type AuthenticatedClient = Client<
     polymarket_client_sdk_v2::auth::state::Authenticated<polymarket_client_sdk_v2::auth::Normal>,
 >;
-type UnauthenticatedClient = Client<polymarket_client_sdk_v2::auth::state::Unauthenticated>;
 type ClientState = Arc<Mutex<AuthenticatedClient>>;
 type HeartbeatState = Arc<Mutex<Option<Uuid>>>;
 const INITIAL_CURSOR: &str = "MA==";
+
+sol! {
+    struct ClobAuth {
+        address address;
+        string timestamp;
+        uint256 nonce;
+        string message;
+    }
+}
 
 pub struct LiveTradeExecutor {
     client: ClientState,
@@ -378,7 +393,7 @@ async fn authenticate_client(
     .with_context(|| format!("create CLOB client for {}", config.clob_api_url))?;
     let fresh_credentials = match credential_source {
         CredentialSource::FreshNonce(nonce) => Some(
-            create_fresh_api_key(&client, signer, nonce)
+            create_fresh_api_key(config, signer, nonce)
                 .await
                 .context("create fresh CLOB API key")?,
         ),
@@ -413,14 +428,97 @@ async fn authenticate_client(
 }
 
 async fn create_fresh_api_key(
-    client: &UnauthenticatedClient,
+    config: &LiveAuthConfig,
     signer: &PrivateKeySigner,
     nonce: u32,
 ) -> Result<Credentials> {
-    client
-        .create_api_key(signer, Some(nonce))
+    let http = reqwest::Client::builder()
+        .user_agent("Mozilla/5.0 (compatible; wiggler-auth/1.0)")
+        .build()
+        .context("build Polymarket auth HTTP client")?;
+    let timestamp = http
+        .get(format!(
+            "{}/time",
+            config.clob_api_url.trim_end_matches('/')
+        ))
+        .send()
         .await
-        .with_context(|| format!("create CLOB API key with nonce {nonce}"))
+        .context("request CLOB time")?
+        .error_for_status()
+        .context("CLOB time returned error")?
+        .text()
+        .await
+        .context("read CLOB time")?
+        .trim()
+        .to_string();
+
+    let auth = ClobAuth {
+        address: signer.address(),
+        timestamp: timestamp.clone(),
+        nonce: U256::from(nonce),
+        message: "This message attests that I control the given wallet".to_string(),
+    };
+    let domain = Eip712Domain {
+        name: Some("ClobAuthDomain".into()),
+        version: Some("1".into()),
+        chain_id: Some(U256::from(POLYGON)),
+        ..Eip712Domain::default()
+    };
+    let signature = signer
+        .sign_hash(&auth.eip712_signing_hash(&domain))
+        .await
+        .context("sign CLOB auth hash")?;
+
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        "POLY_ADDRESS",
+        HeaderValue::from_str(&signer.address().encode_hex_with_prefix())
+            .context("build POLY_ADDRESS header")?,
+    );
+    headers.insert(
+        "POLY_NONCE",
+        HeaderValue::from_str(&nonce.to_string()).context("build POLY_NONCE header")?,
+    );
+    headers.insert(
+        "POLY_SIGNATURE",
+        HeaderValue::from_str(&signature.to_string()).context("build POLY_SIGNATURE header")?,
+    );
+    headers.insert(
+        "POLY_TIMESTAMP",
+        HeaderValue::from_str(&timestamp).context("build POLY_TIMESTAMP header")?,
+    );
+    headers.insert("ACCEPT", HeaderValue::from_static("application/json"));
+    headers.insert("CONTENT-TYPE", HeaderValue::from_static("application/json"));
+
+    let response = http
+        .post(format!(
+            "{}/auth/api-key",
+            config.clob_api_url.trim_end_matches('/')
+        ))
+        .headers(headers)
+        .body("{}")
+        .send()
+        .await
+        .with_context(|| format!("create CLOB API key with nonce {nonce}"))?;
+    let status = response.status();
+    let text = response
+        .text()
+        .await
+        .context("read CLOB API key response")?;
+    if !status.is_success() {
+        bail!(
+            "create CLOB API key failed status={} body_prefix={}",
+            status,
+            &text[..text.len().min(300)]
+        );
+    }
+    let credentials: ApiCredentialsBody =
+        serde_json::from_str(&text).context("parse CLOB API key response")?;
+    Ok(Credentials::new(
+        Uuid::parse_str(&credentials.api_key).context("parse CLOB API key")?,
+        credentials.secret,
+        credentials.passphrase,
+    ))
 }
 
 async fn validate_live_account(
@@ -511,6 +609,14 @@ struct HeartbeatErrorBody {
     heartbeat_id: Option<Uuid>,
     error_msg: Option<String>,
     error: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct ApiCredentialsBody {
+    #[serde(alias = "apiKey")]
+    api_key: String,
+    secret: String,
+    passphrase: String,
 }
 
 async fn refresh_heartbeat(
