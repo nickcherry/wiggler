@@ -47,10 +47,13 @@ Every `WIGGLER_EVALUATION_INTERVAL_MS`, for each active 5-minute market, the mon
 - executable ask-level edge using `p_win_lower`
 
 The evaluator skips when data is missing or stale, the market is outside the
-60-240 second trading window, the price is too close to the line, no runtime
-cell matches, the last-60-second price path is retracing against the leading
-side, max path lead is unavailable, or there is no positive-EV executable ask
-depth.
+regular 60-240 second trading window, the price is too close to the line, no
+runtime cell matches, the last-60-second price path is retracing against the
+leading side, max path lead is unavailable, or there is no positive-EV
+executable ask depth. As an explicit live experiment, 30-59 seconds remaining
+maps to the runtime's 60-second bucket only when stricter final-window gates
+pass: at least 10 bps from the line, an additional 0.01 required probability
+edge, and a 10 USDC effective order cap.
 
 The base executable-edge gate is `risk_defaults.min_edge_probability`. If the
 current absolute lead has decayed below 75% of the max absolute lead observed
@@ -71,6 +74,9 @@ Live order sizing is the minimum of:
 - positive-EV executable depth in USDC
 - the runtime config's `max_position_usdc`
 - `WIGGLER_MAX_ORDER_USDC`
+
+For the experimental 30-59 second final window, the `WIGGLER_MAX_ORDER_USDC`
+leg is capped at 10 USDC before applying the normal minimum-order check.
 
 The monitor skips if that amount is below `WIGGLER_MIN_ORDER_USDC`.
 

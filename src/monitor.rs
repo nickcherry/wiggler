@@ -892,7 +892,10 @@ impl MonitorState {
         let price_age_ms = latest_tick.map(|tick| age_ms(now, tick.received_at));
         let price_exchange_age_ms = latest_tick.map(|tick| age_ms(now, tick.exchange_timestamp));
         let book_age_ms = book.and_then(|book| book.last_timestamp.map(|ts| age_ms(now, ts)));
-        let remaining_bucket = runtime.and_then(|runtime| runtime.remaining_bucket(remaining_sec));
+        let remaining_bucket =
+            runtime.and_then(|runtime| monitor_remaining_bucket(runtime, remaining_sec));
+        let final_window_experimental = runtime
+            .is_some_and(|runtime| experimental_final_window_applies(runtime, remaining_sec));
         let exchange_vol = runtime.map(|runtime| {
             self.candle_store
                 .vol_bps_per_sqrt_min(market.asset, now, runtime.vol_lookback_min())
@@ -934,7 +937,10 @@ impl MonitorState {
         let edge_penalty_applied = path_state.as_ref().is_some_and(edge_penalty_applies);
         let required_edge = runtime
             .zip(path_state.as_ref())
-            .and_then(|(runtime, state)| required_edge_probability(runtime, state));
+            .and_then(|(runtime, state)| {
+                adjusted_required_edge_probability(runtime, state, final_window_experimental)
+            });
+        let order_cap_usdc = effective_max_order_usdc(config, final_window_experimental);
         let edge_summary = runtime.zip(cell).zip(book).zip(required_edge).map(
             |(((runtime, cell), book), required_edge)| {
                 summarize_asks(runtime, cell, &book.asks(), required_edge)
@@ -1003,6 +1009,8 @@ impl MonitorState {
                 orderbook_age_ms = ?book_age_ms,
                 remaining_sec,
                 remaining_sec_bucket = ?remaining_bucket,
+                final_window_experimental,
+                final_window_min_abs_d_bps = ?final_window_experimental.then_some(EXPERIMENTAL_FINAL_WINDOW_MIN_ABS_D_BPS),
                 d_bps = ?d_bps.map(|value| value.round_dp(6).to_string()),
                 abs_d_bps = ?abs_d_bps.map(|value| value.round_dp(6).to_string()),
                 side_leading = ?side_leading.map(SideLeading::as_str),
@@ -1039,9 +1047,11 @@ impl MonitorState {
                 fee_rate = ?runtime.map(AssetRuntime::fee_rate),
                 min_edge_probability = ?runtime.map(AssetRuntime::min_edge_probability),
                 required_edge = ?required_edge,
+                final_window_extra_edge_probability = ?final_window_experimental.then_some(EXPERIMENTAL_FINAL_WINDOW_EXTRA_EDGE_PROBABILITY),
                 min_order_usdc = config.min_order_usdc,
                 max_position_usdc = ?runtime.map(AssetRuntime::max_position_usdc),
                 max_order_usdc = config.max_order_usdc,
+                effective_max_order_usdc = order_cap_usdc,
                 already_positioned,
                 market_resolved,
                 decision,
@@ -1068,7 +1078,7 @@ impl MonitorState {
         let amount_usdc = edge_summary
             .positive_ev_depth_usdc
             .min(runtime.max_position_usdc())
-            .min(config.max_order_usdc);
+            .min(order_cap_usdc);
         if amount_usdc < config.min_order_usdc {
             return None;
         }
@@ -1094,6 +1104,8 @@ impl MonitorState {
             current_exchange_timestamp: latest_tick.exchange_timestamp,
             current_received_at: latest_tick.received_at,
             remaining_sec,
+            final_window_experimental,
+            order_cap_usdc,
             d_bps: d_bps.map(|value| value.round_dp(6).to_string()),
             p_win: cell.map(|cell| cell.p_win),
             p_win_lower: cell.map(|cell| cell.p_win_lower),
@@ -1416,12 +1428,13 @@ impl MonitorState {
         let Some(runtime) = runtime else {
             return Some("asset_not_in_runtime_bundle");
         };
-        if remaining_sec < runtime.min_remaining_sec_to_trade() {
+        if remaining_sec < monitor_min_remaining_sec_to_trade(runtime) {
             return Some("remaining_sec_below_min");
         }
         if remaining_sec > runtime.max_remaining_sec_to_trade() {
             return Some("remaining_sec_above_max");
         }
+        let final_window_experimental = experimental_final_window_applies(runtime, remaining_sec);
         if line.is_none() {
             return Some("missing_line_price");
         }
@@ -1441,6 +1454,11 @@ impl MonitorState {
             || abs_d_bps.is_some_and(|abs_d_bps| abs_d_bps < config.min_abs_d_bps)
         {
             return Some("too_close_to_line");
+        }
+        if final_window_experimental
+            && abs_d_bps.is_none_or(|abs_d_bps| abs_d_bps < EXPERIMENTAL_FINAL_WINDOW_MIN_ABS_D_BPS)
+        {
+            return Some("final_window_distance_below_min");
         }
         if market_resolved {
             return Some("market_closed_or_resolved");
@@ -1491,7 +1509,7 @@ impl MonitorState {
             summary
                 .positive_ev_depth_usdc
                 .min(runtime.max_position_usdc())
-                .min(config.max_order_usdc)
+                .min(effective_max_order_usdc(config, final_window_experimental))
                 < config.min_order_usdc
         }) {
             return Some("order_size_below_min");
@@ -1794,6 +1812,7 @@ fn trade_entry_record_json(
             "outcome": outcome_label(&prepared.outcome),
             "token_id": prepared.token_id.as_str(),
             "amount_usdc": prepared.amount_usdc,
+            "order_cap_usdc": prepared.order_cap_usdc,
             "max_order_price": prepared.max_price,
             "expected_fill_price": prepared.expected_fill_price,
             "estimated_payout_usdc": prepared.estimated_payout_usdc,
@@ -1808,6 +1827,7 @@ fn trade_entry_record_json(
             "d_bps": prepared.d_bps.as_deref(),
             "remaining_sec": prepared.remaining_sec,
             "remaining_sec_bucket": prepared.remaining_sec_bucket,
+            "final_window_experimental": prepared.final_window_experimental,
         },
         "edge": {
             "p_win": prepared.p_win,
@@ -1886,6 +1906,8 @@ struct PreparedTrade {
     current_exchange_timestamp: DateTime<Utc>,
     current_received_at: DateTime<Utc>,
     remaining_sec: i64,
+    final_window_experimental: bool,
+    order_cap_usdc: f64,
     d_bps: Option<String>,
     p_win: Option<f64>,
     p_win_lower: Option<f64>,
@@ -2176,6 +2198,54 @@ const MAX_PATH_LOOKBACK_DRIFT_SECONDS: i64 = 30;
 const LEAD_DECAY_PENALTY_THRESHOLD: f64 = 0.75;
 const LEAD_DECAY_EDGE_PENALTY: f64 = 0.005;
 const RETRYABLE_NO_FILL_COOLDOWN_SECONDS: i64 = 10;
+// Monitor-only final-window experiment; the runtime bundle still has no <60s cells.
+const EXPERIMENTAL_MIN_REMAINING_SEC_TO_TRADE: i64 = 30;
+const EXPERIMENTAL_FINAL_WINDOW_MIN_ABS_D_BPS: f64 = 10.0;
+const EXPERIMENTAL_FINAL_WINDOW_EXTRA_EDGE_PROBABILITY: f64 = 0.01;
+const EXPERIMENTAL_FINAL_WINDOW_MAX_ORDER_USDC: f64 = 10.0;
+
+fn monitor_min_remaining_sec_to_trade(runtime: &AssetRuntime) -> i64 {
+    runtime
+        .min_remaining_sec_to_trade()
+        .min(EXPERIMENTAL_MIN_REMAINING_SEC_TO_TRADE)
+}
+
+fn experimental_final_window_applies(runtime: &AssetRuntime, remaining_sec: i64) -> bool {
+    remaining_sec >= EXPERIMENTAL_MIN_REMAINING_SEC_TO_TRADE
+        && remaining_sec < runtime.min_remaining_sec_to_trade()
+}
+
+fn monitor_remaining_bucket(runtime: &AssetRuntime, remaining_sec: i64) -> Option<u32> {
+    if experimental_final_window_applies(runtime, remaining_sec) {
+        return runtime.remaining_bucket(runtime.min_remaining_sec_to_trade());
+    }
+
+    runtime.remaining_bucket(remaining_sec)
+}
+
+fn adjusted_required_edge_probability(
+    runtime: &AssetRuntime,
+    path_state: &PathState,
+    final_window_experimental: bool,
+) -> Option<f64> {
+    required_edge_probability(runtime, path_state).map(|edge| {
+        edge + if final_window_experimental {
+            EXPERIMENTAL_FINAL_WINDOW_EXTRA_EDGE_PROBABILITY
+        } else {
+            0.0
+        }
+    })
+}
+
+fn effective_max_order_usdc(config: &RuntimeConfig, final_window_experimental: bool) -> f64 {
+    if final_window_experimental {
+        config
+            .max_order_usdc
+            .min(EXPERIMENTAL_FINAL_WINDOW_MAX_ORDER_USDC)
+    } else {
+        config.max_order_usdc
+    }
+}
 
 #[derive(Clone, Debug, Default)]
 struct MarketPricePath {
@@ -2371,10 +2441,12 @@ mod tests {
 
     use super::{
         ClosedPositionPnlRow, MarketPricePath, MonitorState, PathState, PreparedTrade, SlotLine,
-        asset_ids_for_markets, clean_failure_reason, closed_position_totals, distance_bps,
-        format_market_price, format_signed_usdc, format_usdc, is_retryable_no_fill_error,
-        live_entry_filled_text, live_entry_rejected_text, live_settlement_candidate_slots,
-        live_settlement_lookback_slots, live_settlement_summary_text, pre_submit_matches_initial,
+        adjusted_required_edge_probability, asset_ids_for_markets, clean_failure_reason,
+        closed_position_totals, distance_bps, effective_max_order_usdc,
+        experimental_final_window_applies, format_market_price, format_signed_usdc, format_usdc,
+        is_retryable_no_fill_error, live_entry_filled_text, live_entry_rejected_text,
+        live_settlement_candidate_slots, live_settlement_lookback_slots,
+        live_settlement_summary_text, monitor_remaining_bucket, pre_submit_matches_initial,
         required_edge_probability, slot_start_from_market_slug, summarize_asks,
         telegram_settlement_interval_duration,
     };
@@ -2663,7 +2735,42 @@ mod tests {
     }
 
     #[test]
-    fn skip_reason_rejects_remaining_seconds_below_minimum() {
+    fn monitor_remaining_bucket_maps_final_window_to_runtime_minimum() {
+        let (runtime, _) = btc_runtime_and_cell();
+
+        assert_eq!(monitor_remaining_bucket(runtime, 29), None);
+        assert_eq!(monitor_remaining_bucket(runtime, 30), Some(60));
+        assert_eq!(monitor_remaining_bucket(runtime, 45), Some(60));
+        assert_eq!(monitor_remaining_bucket(runtime, 59), Some(60));
+        assert_eq!(monitor_remaining_bucket(runtime, 60), Some(60));
+        assert_eq!(monitor_remaining_bucket(runtime, 61), Some(120));
+    }
+
+    #[test]
+    fn final_window_tightens_edge_and_order_cap() {
+        let (runtime, _) = btc_runtime_and_cell();
+        let path = PathState {
+            return_last_60s_bps: 1.0,
+            retracing_60s: false,
+            max_abs_d_bps_so_far: 10.0,
+            lead_decay_ratio: 1.0,
+        };
+        let config = test_config(false);
+
+        assert!(experimental_final_window_applies(runtime, 45));
+        assert_eq!(
+            adjusted_required_edge_probability(runtime, &path, true),
+            Some(runtime.min_edge_probability() + 0.01)
+        );
+        assert_eq!(effective_max_order_usdc(&config, true), 10.0);
+        assert_eq!(
+            effective_max_order_usdc(&config, false),
+            config.max_order_usdc
+        );
+    }
+
+    #[test]
+    fn skip_reason_rejects_remaining_seconds_below_experimental_minimum() {
         let state = MonitorState::default();
         let config = test_config(false);
         let (runtime, _) = btc_runtime_and_cell();
@@ -2672,7 +2779,7 @@ mod tests {
             state.trade_skip_reason(
                 Asset::Btc,
                 Some(runtime),
-                59,
+                29,
                 None,
                 None,
                 None,
@@ -2694,6 +2801,45 @@ mod tests {
                 &config,
             ),
             Some("remaining_sec_below_min")
+        );
+    }
+
+    #[test]
+    fn skip_reason_rejects_final_window_when_distance_is_too_small() {
+        let state = MonitorState::default();
+        let config = test_config(false);
+        let (runtime, _) = btc_runtime_and_cell();
+        let now = Utc::now();
+
+        assert_eq!(
+            state.trade_skip_reason(
+                Asset::Btc,
+                Some(runtime),
+                45,
+                Some(&SlotLine {
+                    price: Decimal::new(100, 0),
+                    observed_at: now,
+                }),
+                Some(&price_tick(Asset::Btc, now, "100.05")),
+                Some(0),
+                Some(0),
+                Some(Decimal::new(5, 0)),
+                Some(5.0),
+                Some(SideLeading::UpLeading),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                false,
+                false,
+                &config,
+            ),
+            Some("final_window_distance_below_min")
         );
     }
 
@@ -3176,6 +3322,8 @@ mod tests {
             current_exchange_timestamp: now,
             current_received_at: now,
             remaining_sec: 120,
+            final_window_experimental: false,
+            order_cap_usdc: 25.0,
             d_bps: Some("1".to_string()),
             p_win: Some(0.91),
             p_win_lower: Some(0.9),

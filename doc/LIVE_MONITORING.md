@@ -66,7 +66,10 @@ Defaults:
 
 - current price stale after 20 seconds
 - orderbook stale after 10 seconds
-- no trading before 240 seconds or after 60 seconds remaining
+- no regular trading before 240 seconds or after 60 seconds remaining
+- experimental 30-59 second final-window trades map to the 60-second runtime
+  bucket, require at least 10 bps from the line, add 0.01 required probability
+  edge, and cap order size at 10 USDC
 - no trading within 0.01 bps of the line
 
 ## Logging
@@ -84,7 +87,9 @@ computed per exchange and averaged when both sources are available; if one
 source is unavailable, the monitor uses the available source. The monitor can
 still log `insufficient_price_history` if both exchange candle feeds are
 unavailable or gapped; current-market path gaps can also produce
-`insufficient_path_history`.
+`insufficient_path_history`. Experimental final-window evaluations include
+`final_window_experimental`, `final_window_min_abs_d_bps`,
+`final_window_extra_edge_probability`, and `effective_max_order_usdc` fields.
 
 Live trading uses the same evaluator twice: once for the logged decision and
 again immediately before order submission. If the second evaluation fails, if
