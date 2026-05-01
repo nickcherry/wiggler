@@ -368,6 +368,8 @@ struct AccountPnlSnapshot {
     volume_usdc: Option<f64>,
     positions_value_usdc: Option<f64>,
     positions_cash_pnl_usdc: Option<f64>,
+    wins: Option<u64>,
+    losses: Option<u64>,
 }
 
 impl AccountPnlClient {
@@ -429,13 +431,31 @@ impl AccountPnlClient {
             .context("Polymarket leaderboard returned no user row")?;
 
         let positions_value_usdc = self.fetch_positions_value(user).await;
-        let positions_cash_pnl_usdc = self.fetch_positions_cash_pnl(user).await;
+        let positions = self.fetch_positions(user).await;
+        let positions_cash_pnl_usdc = positions
+            .as_ref()
+            .map(|rows| rows.iter().filter_map(|row| row.cash_pnl).sum());
+        let resolved_position_counts = positions
+            .as_ref()
+            .map(|rows| account_position_win_loss_counts(rows));
+        let closed_position_counts = self.fetch_closed_position_counts(user).await;
+        let (wins, losses) = match (closed_position_counts, resolved_position_counts) {
+            (Some(closed), Some(resolved)) => (
+                Some(closed.wins + resolved.wins),
+                Some(closed.losses + resolved.losses),
+            ),
+            (Some(closed), None) => (Some(closed.wins), Some(closed.losses)),
+            (None, Some(resolved)) => (Some(resolved.wins), Some(resolved.losses)),
+            (None, None) => (None, None),
+        };
 
         Ok(AccountPnlSnapshot {
             profile_pnl_usdc: row.pnl.unwrap_or(0.0),
             volume_usdc: row.vol,
             positions_value_usdc,
             positions_cash_pnl_usdc,
+            wins,
+            losses,
         })
     }
 
@@ -463,7 +483,7 @@ impl AccountPnlClient {
         }
     }
 
-    async fn fetch_positions_cash_pnl(&self, user: &str) -> Option<f64> {
+    async fn fetch_positions(&self, user: &str) -> Option<Vec<PositionPnlRow>> {
         let positions_url = format!("{}/positions", self.data_api_base_url);
         match self
             .http
@@ -474,7 +494,7 @@ impl AccountPnlClient {
             .and_then(reqwest::Response::error_for_status)
         {
             Ok(response) => match response.json::<Vec<PositionPnlRow>>().await {
-                Ok(rows) => Some(rows.iter().filter_map(|row| row.cash_pnl).sum()),
+                Ok(rows) => Some(rows),
                 Err(error) => {
                     warn!(error = %error, "failed to parse Polymarket position PnL");
                     None
@@ -485,6 +505,57 @@ impl AccountPnlClient {
                 None
             }
         }
+    }
+
+    async fn fetch_closed_position_counts(&self, user: &str) -> Option<AccountWinLossCounts> {
+        let closed_url = format!("{}/closed-positions", self.data_api_base_url);
+        let mut counts = AccountWinLossCounts::default();
+        let limit = 50usize;
+
+        for offset in (0..=1_000usize).step_by(limit) {
+            let response = match self
+                .http
+                .get(&closed_url)
+                .query(&[
+                    ("user", user),
+                    ("limit", &limit.to_string()),
+                    ("offset", &offset.to_string()),
+                    ("sortBy", "TIMESTAMP"),
+                    ("sortDirection", "DESC"),
+                ])
+                .send()
+                .await
+                .and_then(reqwest::Response::error_for_status)
+            {
+                Ok(response) => response,
+                Err(error) => {
+                    warn!(
+                        error = %error,
+                        "failed to fetch Polymarket closed position counts"
+                    );
+                    return None;
+                }
+            };
+            let rows = match response.json::<Vec<ClosedPositionPnlRow>>().await {
+                Ok(rows) => rows,
+                Err(error) => {
+                    warn!(
+                        error = %error,
+                        "failed to parse Polymarket closed position counts"
+                    );
+                    return None;
+                }
+            };
+
+            for row in &rows {
+                counts.add_pnl(row.realized_pnl.unwrap_or(0.0));
+            }
+            if rows.len() < limit {
+                return Some(counts);
+            }
+        }
+
+        Some(counts)
     }
 }
 
@@ -503,6 +574,40 @@ struct PositionValueRow {
 #[serde(rename_all = "camelCase")]
 struct PositionPnlRow {
     cash_pnl: Option<f64>,
+    redeemable: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ClosedPositionPnlRow {
+    realized_pnl: Option<f64>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct AccountWinLossCounts {
+    wins: u64,
+    losses: u64,
+}
+
+impl AccountWinLossCounts {
+    fn add_pnl(&mut self, pnl: f64) {
+        if pnl > 0.0 {
+            self.wins += 1;
+        } else if pnl < 0.0 {
+            self.losses += 1;
+        }
+    }
+}
+
+fn account_position_win_loss_counts(rows: &[PositionPnlRow]) -> AccountWinLossCounts {
+    let mut counts = AccountWinLossCounts::default();
+    for row in rows {
+        if row.redeemable != Some(true) {
+            continue;
+        }
+        counts.add_pnl(row.cash_pnl.unwrap_or(0.0));
+    }
+    counts
 }
 
 fn account_pnl_line(snapshot: Option<&AccountPnlSnapshot>) -> String {
@@ -513,6 +618,18 @@ fn account_pnl_line(snapshot: Option<&AccountPnlSnapshot>) -> String {
         "Polymarket account P/L: {} all-time",
         format_signed_usdc(snapshot.profile_pnl_usdc)
     );
+    match (snapshot.wins, snapshot.losses) {
+        (Some(wins), Some(losses)) => {
+            line.push_str(&format!(" ({} wins / {} losses)", wins, losses));
+        }
+        (Some(wins), None) => {
+            line.push_str(&format!(" ({} wins)", wins));
+        }
+        (None, Some(losses)) => {
+            line.push_str(&format!(" ({} losses)", losses));
+        }
+        (None, None) => {}
+    }
     if let Some(value) = snapshot.positions_value_usdc {
         line.push_str(&format!("; positions value {}", format_usdc(value)));
     }
@@ -572,17 +689,13 @@ impl MonitorState {
         let (open_count, open_amount) = self.open_live_position_summary();
         let account_line = account_pnl_line(account_snapshot);
         format!(
-            "Wiggler PnL update\n{}\nLocal trade-record P/L: {} ({} closed, {} wins / {} losses{})\nSince last update: {} ({} closed, {} wins / {} losses{})\nOpen positions: {}{}",
+            "Wiggler PnL update\n{}\nLocal trade-record debug P/L: {} ({} closed records{})\nLocal since last update: {} ({} closed records{})\nOpen positions: {}{}",
             account_line,
             format_signed_usdc(total.estimated_pnl_usdc),
             total.closed,
-            total.wins,
-            total.losses,
             total.tie_suffix(),
             format_signed_usdc(delta.estimated_pnl_usdc),
             delta.closed,
-            delta.wins,
-            delta.losses,
             delta.tie_suffix(),
             open_count,
             if open_count > 0 {
@@ -1895,7 +2008,7 @@ impl TradeCloseout {
             _ => "Estimated P/L: flat/unknown".to_string(),
         };
         format!(
-            "{} closeout: {} {} {}\nTarget: {}\nClose: {}\nBet: {}\n{}\n{}\nLocal trade-record P/L: {} ({} closed, {} wins / {} losses{})",
+            "{} closeout: {} {} {}\nTarget: {}\nClose: {}\nBet: {}\n{}\n{}\nLocal trade-record debug P/L: {} ({} closed records{})",
             match self.mode {
                 TradeMode::Live => "Live",
                 TradeMode::Shadow => "Shadow",
@@ -1910,8 +2023,6 @@ impl TradeCloseout {
             account_pnl_line(account_snapshot),
             format_signed_usdc(pnl_stats.estimated_pnl_usdc),
             pnl_stats.closed,
-            pnl_stats.wins,
-            pnl_stats.losses,
             pnl_stats.tie_suffix()
         )
     }
@@ -2617,10 +2728,11 @@ mod tests {
     };
 
     use super::{
-        AccountPnlSnapshot, MarketPricePath, MonitorState, PathState, PreparedTrade, SlotLine,
-        account_pnl_line, asset_ids_for_markets, distance_bps, is_retryable_no_fill_error,
-        pnl_from_trade_record, pre_submit_matches_initial, required_edge_probability,
-        summarize_asks,
+        AccountPnlSnapshot, AccountWinLossCounts, MarketPricePath, MonitorState, PathState,
+        PositionPnlRow, PreparedTrade, SlotLine, account_pnl_line,
+        account_position_win_loss_counts, asset_ids_for_markets, distance_bps,
+        is_retryable_no_fill_error, pnl_from_trade_record, pre_submit_matches_initial,
+        required_edge_probability, summarize_asks,
     };
 
     #[test]
@@ -3179,11 +3291,14 @@ mod tests {
             volume_usdc: Some(100.0),
             positions_value_usdc: Some(5.67),
             positions_cash_pnl_usdc: Some(-8.9),
+            wins: Some(3),
+            losses: Some(2),
         };
 
         let line = account_pnl_line(Some(&snapshot));
 
         assert!(line.contains("Polymarket account P/L: +$12.34 all-time"));
+        assert!(line.contains("(3 wins / 2 losses)"));
         assert!(line.contains("positions value $5.67"));
         assert!(line.contains("current positions P/L -$8.90"));
         assert!(line.contains("volume $100.00"));
@@ -3194,6 +3309,29 @@ mod tests {
         assert_eq!(
             account_pnl_line(None),
             "Polymarket account P/L: unavailable; local trade-record P/L below"
+        );
+    }
+
+    #[test]
+    fn account_position_counts_only_use_redeemable_rows() {
+        let rows = vec![
+            PositionPnlRow {
+                cash_pnl: Some(10.0),
+                redeemable: Some(true),
+            },
+            PositionPnlRow {
+                cash_pnl: Some(-5.0),
+                redeemable: Some(true),
+            },
+            PositionPnlRow {
+                cash_pnl: Some(20.0),
+                redeemable: Some(false),
+            },
+        ];
+
+        assert_eq!(
+            account_position_win_loss_counts(&rows),
+            AccountWinLossCounts { wins: 1, losses: 1 }
         );
     }
 
