@@ -2,6 +2,7 @@ pub mod cli;
 pub mod config;
 pub mod doctor;
 pub mod domain;
+pub mod exchange_candles;
 pub mod logging;
 pub mod monitor;
 pub mod polymarket;

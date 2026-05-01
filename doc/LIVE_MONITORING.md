@@ -8,7 +8,7 @@
 4. Subscribe to every discovered `Up` and `Down` CLOB token.
 5. Stream each whitelisted asset's Chainlink price from RTDS.
 6. Maintain in-memory orderbooks per token.
-7. Maintain a bounded in-memory price history for runtime vol buckets.
+7. Maintain bounded in-memory Coinbase/Binance OHLCV candle stores for runtime vol buckets.
 8. Maintain a per-market in-memory price path from the same RTDS price source.
 9. Load the production runtime probability-table bundle.
 10. Refresh the watchset every 10 seconds.
@@ -77,9 +77,14 @@ full per-tick evaluations stay off unless explicitly enabled. Production should
 run with `RUST_LOG=wiggler=info,info`.
 
 When `WIGGLER_LOG_EVALUATIONS=true`, evaluation logs include `mode`,
-`decision`, and `skip_reason`. A fresh process will usually skip with
-`insufficient_price_history` until the 30-minute runtime vol lookback is warm;
-current-market path gaps can also produce `insufficient_path_history`.
+`decision`, and `skip_reason`. Startup backfills separate in-memory 1-minute
+Coinbase and Binance OHLCV candle stores for the runtime vol lookback, then keeps
+them fresh with Binance kline websocket updates plus REST reconciliation. Vol is
+computed per exchange and averaged when both sources are available; if one
+source is unavailable, the monitor uses the available source. The monitor can
+still log `insufficient_price_history` if both exchange candle feeds are
+unavailable or gapped; current-market path gaps can also produce
+`insufficient_path_history`.
 
 Live trading uses the same evaluator twice: once for the logged decision and
 again immediately before order submission. If the second evaluation fails, if

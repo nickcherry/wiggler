@@ -71,6 +71,7 @@ Side effects:
 - Makes public Gamma REST requests every 10 seconds.
 - Opens one RTDS websocket per whitelisted asset for the configured price source.
 - Opens one CLOB market websocket for the full token watchset.
+- Backfills bounded in-memory 1-minute Coinbase/Binance OHLCV candle stores and keeps them fresh with Binance kline websocket updates plus REST reconciliation.
 - Emits JSON logs to stdout/stderr through tracing.
 - Sends Telegram notifications for shadow decisions and live order lifecycle events when configured.
 - Logs full per-tick trade evaluations only when `WIGGLER_LOG_EVALUATIONS=true`.

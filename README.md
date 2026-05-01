@@ -74,6 +74,7 @@ cargo run -- monitor --runtime-bundle-dir runtime/wiggler-prod-v1
 | `WIGGLER_MIN_ORDER_USDC` | `1` | Minimum live/shadow decision notional |
 | `WIGGLER_MAX_ORDER_USDC` | `25` | Production cap applied below bundle position caps |
 | `WIGGLER_EVALUATION_INTERVAL_MS` | `1000` | Decision/evaluation cadence |
+| `WIGGLER_CANDLE_REST_SYNC_INTERVAL_MS` | `60000` | Coinbase/Binance candle reconciliation cadence |
 | `WIGGLER_LOG_EVALUATIONS` | `false` | Emit full per-tick `trade_evaluation` logs when debugging |
 | `WIGGLER_TRADE_RECORD_DIR` | `trade-records` | Ignored JSON record directory for shadow/live entry attempts |
 | `WIGGLER_PRICE_STALE_AFTER_MS` | `20000` | Max current-price age for an eligible evaluation |
@@ -85,6 +86,9 @@ cargo run -- monitor --runtime-bundle-dir runtime/wiggler-prod-v1
 | `POLYMARKET_CLOB_API_URL` | `https://clob.polymarket.com` | CLOB trading/auth API |
 | `POLYMARKET_CLOB_MARKET_WS_URL` | `wss://ws-subscriptions-clob.polymarket.com/ws/market` | Orderbook websocket |
 | `POLYMARKET_RTDS_WS_URL` | `wss://ws-live-data.polymarket.com` | Chainlink/Binance crypto price websocket |
+| `COINBASE_API_BASE_URL` | `https://api.coinbase.com` | Public 1-minute candle backfill |
+| `BINANCE_API_BASE_URL` | `https://data-api.binance.vision` | Public 1-minute candle backfill |
+| `BINANCE_MARKET_WS_URL` | `wss://stream.binance.com:9443` | 1-minute kline websocket |
 | `POLYMARKET_PRIVATE_KEY` | unset | Required for live order signing |
 | `POLYMARKET_SIGNATURE_TYPE` | `eoa` | `eoa`, `proxy`, `gnosis-safe`, or `poly1271` |
 | `POLYMARKET_FUNDER_ADDRESS` | unset | Optional explicit funded Polymarket wallet address |

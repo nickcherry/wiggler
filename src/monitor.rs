@@ -8,7 +8,6 @@ use std::{
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, TimeDelta, Utc};
 use rust_decimal::{Decimal, prelude::ToPrimitive};
-use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::{sync::mpsc, task::JoinHandle, time};
 use tracing::{debug, info, warn};
@@ -22,15 +21,26 @@ use crate::{
         orderbook::{OrderBookSet, PriceLevel, TokenBook},
         time::{MarketSlot, duration_from_seconds},
     },
+    exchange_candles::{Candle, CandleStore, LiveCandleFeedConfig, run_live_candle_feed},
     polymarket::{
         gamma::GammaClient,
         market_ws::{MarketWsEvent, run_market_feed},
         rtds::{PriceTick, run_price_feed},
     },
-    runtime::{AssetRuntime, PriceHistory, RuntimeBundle, RuntimeCell, SideLeading},
+    runtime::{AssetRuntime, RuntimeBundle, RuntimeCell, SideLeading},
     telegram::TelegramClient,
-    trading::executor::{LiveOrderRequest, LiveOrderResponse, LiveTradeExecutor},
+    trading::{LiveOrderRequest, LiveOrderResponse, LiveTradeExecutor},
 };
+
+mod settlement;
+
+use settlement::{
+    AccountPnlClient, closed_position_outcome_label, closed_position_slot_start,
+    closed_position_ticker, closed_position_totals, live_settlement_candidate_slots,
+    live_settlement_lookback_slots, live_settlement_summary_text,
+};
+#[cfg(test)]
+use settlement::{ClosedPositionPnlRow, slot_start_from_market_slug};
 
 pub async fn run(args: MonitorArgs, config: RuntimeConfig) -> Result<()> {
     let duration = duration_from_seconds(args.slot_seconds)?;
@@ -46,6 +56,7 @@ pub async fn run(args: MonitorArgs, config: RuntimeConfig) -> Result<()> {
             args.runtime_bundle_dir.display()
         )
     })?;
+    let candle_lookback_min = max_vol_lookback_min(&runtime_bundle, &assets);
     let telegram = TelegramClient::from_config(&config);
     let account_pnl = AccountPnlClient::from_config(&config);
     let live_executor = if config.live_trading {
@@ -80,8 +91,9 @@ pub async fn run(args: MonitorArgs, config: RuntimeConfig) -> Result<()> {
         duration,
         lookahead_slots: args.lookahead_slots,
     };
-    let mut state = MonitorState::from_trade_records(&config.trade_record_dir);
+    let mut state = MonitorState::new(i64::from(candle_lookback_min) + 5);
     let (price_tx, mut price_rx) = mpsc::channel::<PriceTick>(1024);
+    let (candle_tx, mut candle_rx) = mpsc::channel::<Candle>(1024);
     let (market_tx, mut market_rx) = mpsc::channel::<MarketWsEvent>(4096);
 
     let price_handles = assets
@@ -95,13 +107,30 @@ pub async fn run(args: MonitorArgs, config: RuntimeConfig) -> Result<()> {
             ))
         })
         .collect::<Vec<_>>();
+    let candle_handle = if candle_lookback_min > 0 {
+        Some(tokio::spawn(run_live_candle_feed(
+            LiveCandleFeedConfig {
+                coinbase_api_base_url: config.coinbase_api_base_url.clone(),
+                binance_api_base_url: config.binance_api_base_url.clone(),
+                binance_market_ws_url: config.binance_market_ws_url.clone(),
+                rest_sync_interval: config.candle_rest_sync_interval,
+            },
+            assets.clone(),
+            candle_lookback_min,
+            candle_tx.clone(),
+        )))
+    } else {
+        None
+    };
+    drop(candle_tx);
 
     let mut market_handle: Option<JoinHandle<()>> = None;
     let mut subscribed_asset_ids = Vec::<String>::new();
     let mut refresh_interval = time::interval(Duration::from_secs(10));
     let mut status_interval = time::interval(Duration::from_secs(15));
     let mut evaluation_interval = time::interval(config.evaluation_interval);
-    let mut settlement_interval = telegram_settlement_interval(&telegram);
+    let mut settlement_interval =
+        telegram_settlement_interval(&telegram, config.telegram_pnl_interval);
     refresh_interval.tick().await;
     status_interval.tick().await;
     evaluation_interval.tick().await;
@@ -133,6 +162,8 @@ pub async fn run(args: MonitorArgs, config: RuntimeConfig) -> Result<()> {
         slot_seconds = args.slot_seconds,
         price_feed = %args.price_feed,
         evaluation_interval_ms = duration_ms(config.evaluation_interval),
+        candle_lookback_min,
+        candle_rest_sync_interval_ms = duration_ms(config.candle_rest_sync_interval),
         log_evaluations = config.log_evaluations,
         "monitor started"
     );
@@ -179,6 +210,7 @@ pub async fn run(args: MonitorArgs, config: RuntimeConfig) -> Result<()> {
                     &account_pnl,
                     &telegram,
                     duration,
+                    config.telegram_pnl_interval,
                 ).await;
             }
             _ = evaluation_interval.tick() => {
@@ -192,6 +224,9 @@ pub async fn run(args: MonitorArgs, config: RuntimeConfig) -> Result<()> {
             Some(tick) = price_rx.recv() => {
                 state.apply_price_tick(tick);
             }
+            Some(candle) = candle_rx.recv() => {
+                state.apply_candle(candle);
+            }
             Some(event) = market_rx.recv() => {
                 state.apply_market_event(event);
             }
@@ -199,6 +234,9 @@ pub async fn run(args: MonitorArgs, config: RuntimeConfig) -> Result<()> {
     }
 
     for handle in price_handles {
+        handle.abort();
+    }
+    if let Some(handle) = candle_handle {
         handle.abort();
     }
     if let Some(handle) = market_handle {
@@ -312,6 +350,15 @@ fn asset_ids_for_markets(markets: &[MonitoredMarket]) -> Vec<String> {
     asset_ids
 }
 
+fn max_vol_lookback_min(runtime_bundle: &RuntimeBundle, assets: &[Asset]) -> u32 {
+    assets
+        .iter()
+        .filter_map(|asset| runtime_bundle.config_for(*asset))
+        .map(AssetRuntime::vol_lookback_min)
+        .max()
+        .unwrap_or_default()
+}
+
 async fn sleep_until(deadline: Option<time::Instant>) {
     if let Some(deadline) = deadline {
         time::sleep_until(deadline).await;
@@ -320,14 +367,22 @@ async fn sleep_until(deadline: Option<time::Instant>) {
     }
 }
 
-fn telegram_settlement_interval(telegram: &TelegramClient) -> Option<time::Interval> {
-    if !telegram.is_configured() {
+fn telegram_settlement_interval(
+    telegram: &TelegramClient,
+    pnl_interval: Duration,
+) -> Option<time::Interval> {
+    telegram_settlement_interval_duration(telegram, pnl_interval).map(time::interval)
+}
+
+fn telegram_settlement_interval_duration(
+    telegram: &TelegramClient,
+    pnl_interval: Duration,
+) -> Option<Duration> {
+    if !telegram.is_configured() || pnl_interval.is_zero() {
         return None;
     }
 
-    Some(time::interval(Duration::from_secs(
-        LIVE_SETTLEMENT_POLL_SECONDS,
-    )))
+    Some(pnl_interval)
 }
 
 async fn optional_interval_tick(interval: &mut Option<time::Interval>) {
@@ -344,276 +399,13 @@ struct SlotLine {
     observed_at: DateTime<Utc>,
 }
 
-#[derive(Clone)]
-struct AccountPnlClient {
-    http: reqwest::Client,
-    data_api_base_url: String,
-    user: Option<String>,
-}
-
-impl AccountPnlClient {
-    fn from_config(config: &RuntimeConfig) -> Self {
-        Self {
-            http: reqwest::Client::builder()
-                .user_agent("wiggler/1.0 account-pnl")
-                .build()
-                .unwrap_or_else(|_| reqwest::Client::new()),
-            data_api_base_url: config.data_api_base_url.trim_end_matches('/').to_string(),
-            user: config
-                .polymarket_funder_address
-                .as_ref()
-                .map(|address| address.to_ascii_lowercase()),
-        }
-    }
-
-    async fn fetch_recent_closed_positions(&self) -> Option<Vec<ClosedPositionPnlRow>> {
-        self.fetch_closed_positions(MAX_RECENT_CLOSED_POSITION_ROWS)
-            .await
-    }
-
-    async fn fetch_all_closed_positions(&self) -> Option<Vec<ClosedPositionPnlRow>> {
-        self.fetch_closed_positions(MAX_CLOSED_POSITION_ROWS).await
-    }
-
-    async fn fetch_closed_positions(&self, max_rows: usize) -> Option<Vec<ClosedPositionPnlRow>> {
-        let Some(user) = self.user.as_deref() else {
-            return None;
-        };
-        match self.fetch_closed_position_rows(user, max_rows).await {
-            Some(rows) => Some(rows),
-            None => {
-                warn!(
-                    user,
-                    "failed to fetch Polymarket closed positions for Telegram summary"
-                );
-                None
-            }
-        }
-    }
-
-    async fn fetch_closed_position_rows(
-        &self,
-        user: &str,
-        max_rows: usize,
-    ) -> Option<Vec<ClosedPositionPnlRow>> {
-        let closed_url = format!("{}/closed-positions", self.data_api_base_url);
-        let limit = 50usize;
-        let mut all_rows = Vec::new();
-        let mut offset = 0usize;
-
-        while all_rows.len() < max_rows {
-            let response = match self
-                .http
-                .get(&closed_url)
-                .query(&[
-                    ("user", user),
-                    ("limit", &limit.to_string()),
-                    ("offset", &offset.to_string()),
-                    ("sortBy", "TIMESTAMP"),
-                    ("sortDirection", "DESC"),
-                ])
-                .send()
-                .await
-                .and_then(reqwest::Response::error_for_status)
-            {
-                Ok(response) => response,
-                Err(error) => {
-                    warn!(
-                        error = %error,
-                        "failed to fetch Polymarket closed position counts"
-                    );
-                    return None;
-                }
-            };
-            let rows = match response.json::<Vec<ClosedPositionPnlRow>>().await {
-                Ok(rows) => rows,
-                Err(error) => {
-                    warn!(
-                        error = %error,
-                        "failed to parse Polymarket closed position counts"
-                    );
-                    return None;
-                }
-            };
-
-            let done = rows.len() < limit;
-            all_rows.extend(rows);
-            if done {
-                return Some(all_rows);
-            }
-            offset += limit;
-        }
-
-        warn!(
-            max_rows,
-            "Polymarket closed position fetch hit row cap; Telegram all-time totals may be partial"
-        );
-        Some(all_rows)
-    }
-}
-
-#[derive(Clone, Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ClosedPositionPnlRow {
-    realized_pnl: Option<f64>,
-    slug: Option<String>,
-    event_slug: Option<String>,
-    title: Option<String>,
-    outcome: Option<String>,
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-struct ClosedPositionTotals {
-    wins: u64,
-    losses: u64,
-    total_pnl: f64,
-}
-
-fn live_settlement_candidate_slots(now: DateTime<Utc>, duration: TimeDelta) -> Vec<DateTime<Utc>> {
-    let Ok(current_slot) = MarketSlot::current(now, duration) else {
-        return Vec::new();
-    };
-
-    (1..=LIVE_SETTLEMENT_LOOKBACK_SLOTS)
-        .filter_map(|offset| {
-            let slot = current_slot.offset(-(offset as i64)).ok()?;
-            let delay = TimeDelta::try_seconds(LIVE_SETTLEMENT_DELAY_SECONDS as i64)?;
-            let ready_at = slot.end() + delay;
-            (now >= ready_at).then_some(slot.start())
-        })
-        .rev()
-        .collect()
-}
-
-fn live_settlement_summary_text(
-    window_rows: &[ClosedPositionPnlRow],
-    all_time_totals: ClosedPositionTotals,
-) -> String {
-    let mut lines = Vec::new();
-
-    for row in window_rows {
-        let pnl = row.realized_pnl.unwrap_or(0.0);
-        lines.push(format!(
-            "{} {} {} {}",
-            closed_position_ticker(row),
-            closed_position_outcome_arrow(row),
-            if pnl > 0.0 { "won" } else { "lost" },
-            format_signed_usdc(pnl)
-        ));
-    }
-
-    let total = all_time_totals.wins + all_time_totals.losses;
-    let win_pct = if total > 0 {
-        (all_time_totals.wins as f64 / total as f64) * 100.0
-    } else {
-        0.0
-    };
-    let loss_pct = if total > 0 {
-        (all_time_totals.losses as f64 / total as f64) * 100.0
-    } else {
-        0.0
-    };
-
-    lines.push(String::new());
-    lines.push(format!(
-        "Total wins: {} ({})",
-        format_whole_number(all_time_totals.wins),
-        format_percent(win_pct)
-    ));
-    lines.push(format!(
-        "Total losses: {} ({})",
-        format_whole_number(all_time_totals.losses),
-        format_percent(loss_pct)
-    ));
-    lines.push(String::new());
-    lines.push(format!(
-        "Total PnL: {}",
-        format_signed_usdc(all_time_totals.total_pnl)
-    ));
-    lines.join("\n")
-}
-
-fn closed_position_totals(rows: &[ClosedPositionPnlRow]) -> ClosedPositionTotals {
-    let mut totals = ClosedPositionTotals::default();
-    for row in rows {
-        let pnl = row.realized_pnl.unwrap_or(0.0);
-        totals.total_pnl += pnl;
-        if pnl > 0.0 {
-            totals.wins += 1;
-        } else {
-            totals.losses += 1;
-        }
-    }
-    totals
-}
-
-fn closed_position_slot_start(row: &ClosedPositionPnlRow) -> Option<DateTime<Utc>> {
-    row.slug
-        .as_deref()
-        .or(row.event_slug.as_deref())
-        .and_then(slot_start_from_market_slug)
-}
-
-fn slot_start_from_market_slug(slug: &str) -> Option<DateTime<Utc>> {
-    let timestamp = slug.rsplit('-').next()?.parse::<i64>().ok()?;
-    DateTime::from_timestamp(timestamp, 0)
-}
-
-fn closed_position_ticker(row: &ClosedPositionPnlRow) -> String {
-    row.slug
-        .as_deref()
-        .or(row.event_slug.as_deref())
-        .and_then(|slug| slug.split('-').next())
-        .map(|ticker| ticker.to_ascii_uppercase())
-        .or_else(|| ticker_from_title(row.title.as_deref()?))
-        .unwrap_or_else(|| "UNKNOWN".to_string())
-}
-
-fn ticker_from_title(title: &str) -> Option<String> {
-    let lower = title.to_ascii_lowercase();
-    if lower.starts_with("bitcoin ") {
-        Some("BTC".to_string())
-    } else if lower.starts_with("ethereum ") {
-        Some("ETH".to_string())
-    } else if lower.starts_with("solana ") {
-        Some("SOL".to_string())
-    } else if lower.starts_with("xrp ") {
-        Some("XRP".to_string())
-    } else if lower.starts_with("dogecoin ") {
-        Some("DOGE".to_string())
-    } else {
-        None
-    }
-}
-
-fn closed_position_outcome_label(row: &ClosedPositionPnlRow) -> &'static str {
-    match row
-        .outcome
-        .as_deref()
-        .map(str::to_ascii_lowercase)
-        .as_deref()
-    {
-        Some("up") => "up",
-        Some("down") => "down",
-        _ => "other",
-    }
-}
-
-fn closed_position_outcome_arrow(row: &ClosedPositionPnlRow) -> &'static str {
-    match closed_position_outcome_label(row) {
-        "up" => "↑",
-        "down" => "↓",
-        _ => "?",
-    }
-}
-
 #[derive(Default)]
 struct MonitorState {
     markets_by_slug: HashMap<String, MonitoredMarket>,
     markets_by_asset_id: HashMap<String, (String, OutcomeToken)>,
     books: OrderBookSet,
     latest_prices: HashMap<Asset, PriceTick>,
-    price_history: HashMap<Asset, PriceHistory>,
+    candle_store: CandleStore,
     price_paths: HashMap<String, MarketPricePath>,
     slot_lines: HashMap<String, SlotLine>,
     positioned_markets: HashSet<String>,
@@ -630,8 +422,11 @@ struct MonitorState {
 }
 
 impl MonitorState {
-    fn from_trade_records(_trade_record_dir: &Path) -> Self {
-        Self::default()
+    fn new(candle_retention_min: i64) -> Self {
+        Self {
+            candle_store: CandleStore::new(candle_retention_min),
+            ..Self::default()
+        }
     }
 
     async fn send_live_settlement_summaries(
@@ -639,12 +434,17 @@ impl MonitorState {
         account_pnl: &AccountPnlClient,
         telegram: &TelegramClient,
         duration: TimeDelta,
+        pnl_interval: Duration,
     ) {
         if !telegram.is_configured() {
             return;
         }
 
-        let candidate_slots = live_settlement_candidate_slots(Utc::now(), duration);
+        let candidate_slots = live_settlement_candidate_slots(
+            Utc::now(),
+            duration,
+            live_settlement_lookback_slots(duration, pnl_interval),
+        );
         let unsent_slots = candidate_slots
             .into_iter()
             .filter(|slot_start| !self.sent_live_settlement_slots.contains(slot_start))
@@ -749,11 +549,6 @@ impl MonitorState {
     }
 
     fn apply_price_tick(&mut self, tick: PriceTick) {
-        self.price_history
-            .entry(tick.asset)
-            .or_default()
-            .push(tick.exchange_timestamp, tick.value);
-
         if let Some(previous) = self.latest_prices.get(&tick.asset).cloned() {
             for (slug, market) in &self.markets_by_slug {
                 if market.asset != tick.asset {
@@ -788,6 +583,22 @@ impl MonitorState {
         self.record_market_price_paths(&tick);
         self.latest_prices.insert(tick.asset, tick);
         self.close_tracked_entries();
+    }
+
+    fn apply_candle(&mut self, candle: Candle) {
+        self.candle_store.upsert(candle.clone());
+        debug!(
+            source = %candle.source,
+            asset = %candle.asset,
+            start = %candle.start,
+            open = %candle.open,
+            high = %candle.high,
+            low = %candle.low,
+            close = %candle.close,
+            volume = %candle.volume,
+            received_at = %candle.received_at,
+            "applied exchange candle"
+        );
     }
 
     fn record_market_price_paths(&mut self, tick: &PriceTick) {
@@ -1082,11 +893,13 @@ impl MonitorState {
         let price_exchange_age_ms = latest_tick.map(|tick| age_ms(now, tick.exchange_timestamp));
         let book_age_ms = book.and_then(|book| book.last_timestamp.map(|ts| age_ms(now, ts)));
         let remaining_bucket = runtime.and_then(|runtime| runtime.remaining_bucket(remaining_sec));
-        let vol_bps_per_sqrt_min = runtime.and_then(|runtime| {
-            self.price_history
-                .get(&market.asset)
-                .and_then(|history| history.vol_bps_per_sqrt_min(now, runtime.vol_lookback_min()))
+        let exchange_vol = runtime.map(|runtime| {
+            self.candle_store
+                .vol_bps_per_sqrt_min(market.asset, now, runtime.vol_lookback_min())
         });
+        let binance_vol_bps_per_sqrt_min = exchange_vol.and_then(|vol| vol.binance);
+        let coinbase_vol_bps_per_sqrt_min = exchange_vol.and_then(|vol| vol.coinbase);
+        let vol_bps_per_sqrt_min = exchange_vol.and_then(|vol| vol.average());
         let vol_bin = runtime
             .zip(vol_bps_per_sqrt_min)
             .map(|(runtime, vol)| runtime.vol_bin(vol));
@@ -1194,6 +1007,9 @@ impl MonitorState {
                 abs_d_bps = ?abs_d_bps.map(|value| value.round_dp(6).to_string()),
                 side_leading = ?side_leading.map(SideLeading::as_str),
                 vol_bps_per_sqrt_min = ?vol_bps_per_sqrt_min,
+                binance_vol_bps_per_sqrt_min = ?binance_vol_bps_per_sqrt_min,
+                coinbase_vol_bps_per_sqrt_min = ?coinbase_vol_bps_per_sqrt_min,
+                vol_source_count = exchange_vol.map(|vol| vol.source_count()).unwrap_or_default(),
                 vol_bin = ?vol_bin.map(|bin| bin.as_str()),
                 matched_remaining_sec_bucket = ?cell.map(|cell| cell.remaining_sec),
                 matched_vol_bin = ?cell.map(|cell| cell.vol_bin.as_str()),
@@ -1523,14 +1339,14 @@ impl MonitorState {
                 } else {
                     None
                 };
-                if let Some(message) = message {
-                    if let Err(error) = telegram.send_message(&message).await {
-                        warn!(
-                            error = %error,
-                            slug = market.slug,
-                            "failed to send live execution Telegram message"
-                        );
-                    }
+                if let Some(message) = message
+                    && let Err(error) = telegram.send_message(&message).await
+                {
+                    warn!(
+                        error = %error,
+                        slug = market.slug,
+                        "failed to send live execution Telegram message"
+                    );
                 }
             }
             Err(error) => {
@@ -2282,33 +2098,20 @@ fn clean_failure_reason(reason: &str) -> String {
 }
 
 fn extract_error_json_value(reason: &str) -> Option<String> {
-    let marker = "\"error\":\"";
-    let start = reason.find(marker)? + marker.len();
-    let mut value = String::new();
-    let mut escaped = false;
-    for ch in reason[start..].chars() {
-        if escaped {
-            value.push(match ch {
-                'n' => '\n',
-                'r' => '\r',
-                't' => '\t',
-                '"' => '"',
-                '\\' => '\\',
-                other => other,
-            });
-            escaped = false;
-            continue;
-        }
-        if ch == '\\' {
-            escaped = true;
-            continue;
-        }
-        if ch == '"' {
-            break;
-        }
-        value.push(ch);
+    let start = reason.find('{')?;
+    let end = reason.rfind('}')?;
+    if end < start {
+        return None;
     }
-    (!value.is_empty()).then_some(value)
+
+    let payload: Value = serde_json::from_str(&reason[start..=end]).ok()?;
+    payload
+        .get("error")
+        .or_else(|| payload.get("error_msg"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
 }
 
 fn is_retryable_no_fill_response(response: &LiveOrderResponse) -> bool {
@@ -2373,11 +2176,6 @@ const MAX_PATH_LOOKBACK_DRIFT_SECONDS: i64 = 30;
 const LEAD_DECAY_PENALTY_THRESHOLD: f64 = 0.75;
 const LEAD_DECAY_EDGE_PENALTY: f64 = 0.005;
 const RETRYABLE_NO_FILL_COOLDOWN_SECONDS: i64 = 10;
-const LIVE_SETTLEMENT_POLL_SECONDS: u64 = 15;
-const LIVE_SETTLEMENT_DELAY_SECONDS: u64 = 20;
-const LIVE_SETTLEMENT_LOOKBACK_SLOTS: u32 = 3;
-const MAX_RECENT_CLOSED_POSITION_ROWS: usize = 500;
-const MAX_CLOSED_POSITION_ROWS: usize = 50_000;
 
 #[derive(Clone, Debug, Default)]
 struct MarketPricePath {
@@ -2567,15 +2365,18 @@ mod tests {
         },
         polymarket::rtds::{PriceFeedSource, PriceTick},
         runtime::{RuntimeBundle, SideLeading, VolBin},
-        trading::executor::LiveOrderResponse,
+        telegram::TelegramClient,
+        trading::LiveOrderResponse,
     };
 
     use super::{
         ClosedPositionPnlRow, MarketPricePath, MonitorState, PathState, PreparedTrade, SlotLine,
-        asset_ids_for_markets, closed_position_totals, distance_bps, format_market_price,
-        format_signed_usdc, format_usdc, is_retryable_no_fill_error, live_entry_filled_text,
-        live_entry_rejected_text, live_settlement_summary_text, pre_submit_matches_initial,
+        asset_ids_for_markets, clean_failure_reason, closed_position_totals, distance_bps,
+        format_market_price, format_signed_usdc, format_usdc, is_retryable_no_fill_error,
+        live_entry_filled_text, live_entry_rejected_text, live_settlement_candidate_slots,
+        live_settlement_lookback_slots, live_settlement_summary_text, pre_submit_matches_initial,
         required_edge_probability, slot_start_from_market_slug, summarize_asks,
+        telegram_settlement_interval_duration,
     };
 
     #[test]
@@ -3187,10 +2988,77 @@ mod tests {
     }
 
     #[test]
+    fn closed_position_totals_ignore_flat_and_missing_pnl_rows() {
+        let rows = vec![
+            ClosedPositionPnlRow {
+                realized_pnl: Some(0.0),
+                slug: None,
+                event_slug: None,
+                title: None,
+                outcome: None,
+            },
+            ClosedPositionPnlRow {
+                realized_pnl: None,
+                slug: None,
+                event_slug: None,
+                title: None,
+                outcome: None,
+            },
+        ];
+
+        let totals = closed_position_totals(&rows);
+        assert_eq!(totals.wins, 0);
+        assert_eq!(totals.losses, 0);
+        assert_eq!(totals.total_pnl, 0.0);
+    }
+
+    #[test]
     fn parses_slot_start_from_market_slug() {
         assert_eq!(
             slot_start_from_market_slug("btc-updown-5m-1777648800"),
             Some(Utc.with_ymd_and_hms(2026, 5, 1, 15, 20, 0).unwrap())
+        );
+    }
+
+    #[test]
+    fn telegram_settlement_interval_uses_configured_interval_and_zero_disables() {
+        let mut config = test_config(false);
+        config.telegram_bot_token = Some("token".to_string());
+        config.telegram_chat_id = Some("chat".to_string());
+        config.telegram_pnl_interval = Duration::from_secs(123);
+        let telegram = TelegramClient::from_config(&config);
+
+        assert_eq!(
+            telegram_settlement_interval_duration(&telegram, config.telegram_pnl_interval),
+            Some(Duration::from_secs(123))
+        );
+        assert_eq!(
+            telegram_settlement_interval_duration(&telegram, Duration::ZERO),
+            None
+        );
+    }
+
+    #[test]
+    fn settlement_lookback_covers_configured_summary_interval() {
+        let duration = TimeDelta::minutes(5);
+        let lookback = live_settlement_lookback_slots(duration, Duration::from_secs(15 * 60));
+        let slots = live_settlement_candidate_slots(
+            Utc.with_ymd_and_hms(2026, 5, 1, 15, 30, 0).unwrap(),
+            duration,
+            lookback,
+        );
+
+        assert!(lookback >= 5);
+        assert!(slots.contains(&Utc.with_ymd_and_hms(2026, 5, 1, 15, 10, 0).unwrap()));
+    }
+
+    #[test]
+    fn clean_failure_reason_parses_error_json_with_spacing() {
+        assert_eq!(
+            clean_failure_reason(
+                "Status: error(400 Bad Request) making POST call to /order with {\"error\": \"invalid signature\"}"
+            ),
+            "invalid signature"
         );
     }
 
@@ -3263,12 +3131,16 @@ mod tests {
             clob_api_url: "https://clob.polymarket.com".to_string(),
             clob_market_ws_url: "wss://ws-subscriptions-clob.polymarket.com/ws/market".to_string(),
             rtds_ws_url: "wss://ws-live-data.polymarket.com".to_string(),
+            coinbase_api_base_url: "https://api.coinbase.com".to_string(),
+            binance_api_base_url: "https://data-api.binance.vision".to_string(),
+            binance_market_ws_url: "wss://stream.binance.com:9443".to_string(),
             live_trading,
             tradable_assets: vec![Asset::Btc, Asset::Eth, Asset::Sol, Asset::Xrp, Asset::Doge],
             min_order_usdc: 1.0,
             max_order_usdc: 25.0,
             live_order_type: LiveOrderType::Fak,
             evaluation_interval: Duration::from_millis(1_000),
+            candle_rest_sync_interval: Duration::from_millis(60_000),
             log_evaluations: false,
             polymarket_private_key: None,
             polymarket_api_key: None,

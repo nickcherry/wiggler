@@ -41,7 +41,7 @@ Every `WIGGLER_EVALUATION_INTERVAL_MS`, for each active 5-minute market, the mon
 - current Chainlink price from Polymarket RTDS
 - remaining seconds and the next configured remaining-time bucket
 - distance from line in bps
-- 30-minute realized vol from in-memory one-minute price samples
+- 30-minute realized vol from in-memory one-minute Coinbase/Binance OHLCV candles
 - leading side and corresponding Up/Down token
 - current 5-minute price path from the same live price source
 - executable ask-level edge using `p_win_lower`
@@ -83,8 +83,12 @@ r_i_bps = 10_000 * (price_i / price_{i-1} - 1)
 vol = sqrt(mean(r_i_bps^2))
 ```
 
-The monitor requires a full lookback window of minute samples, so fresh
-processes will log `skip_reason="insufficient_price_history"` until warmup is
-complete. Path-state also needs a recent price sample from approximately 60
-seconds ago in the current market, so early or gapped path data can log
-`skip_reason="insufficient_path_history"`.
+The monitor requires a full lookback window of minute samples. It backfills
+separate in-memory Coinbase and Binance 1-minute OHLCV candle stores and keeps
+those candles fresh with Binance websocket updates plus REST reconciliation. Vol
+is computed per exchange and averaged when both sources are available; if one
+source is unavailable, the monitor uses the available source. Fresh processes can
+still log `skip_reason="insufficient_price_history"` if both exchange candle
+feeds are unavailable or gapped. Path-state also needs a recent price sample from
+approximately 60 seconds ago in the current market, so early or gapped path data
+can log `skip_reason="insufficient_path_history"`.

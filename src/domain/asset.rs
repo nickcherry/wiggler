@@ -72,6 +72,17 @@ impl Asset {
             Self::Bnb => "bnbusdt",
         }
     }
+
+    pub fn coinbase_product_id(self) -> Option<&'static str> {
+        match self {
+            Self::Btc => Some("BTC-USD"),
+            Self::Eth => Some("ETH-USD"),
+            Self::Sol => Some("SOL-USD"),
+            Self::Xrp => Some("XRP-USD"),
+            Self::Doge => Some("DOGE-USD"),
+            Self::Hype | Self::Bnb => None,
+        }
+    }
 }
 
 impl fmt::Display for Asset {
