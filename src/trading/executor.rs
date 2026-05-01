@@ -661,8 +661,12 @@ async fn refresh_heartbeat(
             Ok(Some(response.heartbeat_id))
         }
         Err(error) => {
-            let resynced_heartbeat_id = heartbeat_id_from_error(&error)
-                .with_context(|| format!("post initial CLOB heartbeat: {error}"))?;
+            if is_l2_auth_error(&error) {
+                return Err(error).context("post CLOB heartbeat");
+            }
+            let Some(resynced_heartbeat_id) = heartbeat_id_from_error(&error) else {
+                return Err(error).context("post initial CLOB heartbeat");
+            };
             warn!(
                 event = "live_heartbeat_resynced",
                 heartbeat_id = %resynced_heartbeat_id,
