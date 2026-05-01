@@ -1469,7 +1469,7 @@ impl MonitorState {
                 }
                 let message = if response.has_fill() {
                     Some(live_entry_filled_text(&prepared, &response))
-                } else if !retryable_no_fill && !response.success {
+                } else if !response.success {
                     Some(live_entry_rejected_text(
                         request.asset,
                         &request.outcome,
@@ -1511,15 +1511,13 @@ impl MonitorState {
                     error = %error_chain,
                     "live order failed"
                 );
-                if !retryable_no_fill {
-                    let message = live_entry_rejected_text(
-                        request.asset,
-                        &request.outcome,
-                        &clean_failure_reason(&error_chain),
-                    );
-                    if let Err(telegram_error) = telegram.send_message(&message).await {
-                        warn!(error = %telegram_error, slug = market.slug, "failed to send live error Telegram message");
-                    }
+                let message = live_entry_rejected_text(
+                    request.asset,
+                    &request.outcome,
+                    &clean_failure_reason(&error_chain),
+                );
+                if let Err(telegram_error) = telegram.send_message(&message).await {
+                    warn!(error = %telegram_error, slug = market.slug, "failed to send live error Telegram message");
                 }
             }
         }

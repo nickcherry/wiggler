@@ -23,8 +23,8 @@ When configured, the monitor sends Telegram messages for:
 - one live settlement summary for each five-minute window with closed positions
 
 Live entry attempts are not messaged. Retryable FAK/FOK no-fill misses are
-logged and recorded, but they do not send Telegram messages and do not block the
-monitor from looking for another entry in the same market.
+sent as concise rejection messages, logged, and recorded, but they do not block
+the monitor from looking for another entry in the same market.
 
 Live settlement Telegram win/loss/PnL values are fetched from Polymarket
 `closed-positions` data using `POLYMARKET_FUNDER_ADDRESS`. The local
