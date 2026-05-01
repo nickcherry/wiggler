@@ -18,38 +18,43 @@ summaries while keeping trade lifecycle messages enabled.
 
 When configured, the monitor sends Telegram messages for:
 
-- process startup
-- first shadow decision per market
-- live order intent
-- live order response
-- live order error
-- live closeout with Polymarket account PnL/win-loss counts plus local trade-record debug PnL
-- periodic Polymarket account PnL/win-loss counts plus local trade-record debug PnL summary
+- live entry fills
+- live entry rejections and hard execution errors
+- one live settlement summary for each five-minute window with closed positions
 
-FAK/FOK no-fill errors are reported as no-fill events, but they do not block
-the monitor from looking for another entry in the same market.
+Live entry attempts are not messaged. Retryable FAK/FOK no-fill misses are
+logged and recorded, but they do not send Telegram messages and do not block the
+monitor from looking for another entry in the same market.
 
-Polymarket account PnL and total win/loss counts are fetched from the public
-profile/leaderboard, positions, and closed-positions data APIs using
-`POLYMARKET_FUNDER_ADDRESS`. Open-position value and unrealized PnL only use
-non-resolved position rows; resolved redeemable rows are counted for win/loss
-but are not shown as "current" PnL. The local trade-record ledger is still
-shown because it is useful for debugging exact bot closeouts, but it is not the
-source of truth for account/profile PnL or total win/loss counts.
+Live settlement Telegram win/loss/PnL values are fetched from Polymarket
+`closed-positions` data using `POLYMARKET_FUNDER_ADDRESS`. The local
+trade-record ledger remains available for debugging exact bot attempts and
+closeout timing, but it is not used as the Telegram settlement source of truth.
 
 ## Message Content
 
-Decision messages must include:
+Live entry fill messages use this shape:
 
-- timestamp
-- market slug
-- asset
-- slot start/end
-- side/outcome
-- market price and book depth
-- Chainlink price
-- slot line
-- distance from line in bps
-- dry-run or live execution mode
+```text
+Entered BTC ↑ for $49.99, price line @ $77,972.55
+```
+
+Live entry rejection messages use this shape:
+
+```text
+Rejected entry of BTC ↑: invalid signature
+```
+
+Five-minute settlement summaries use this shape:
+
+```text
+BTC ↑ won +$58.35
+ETH ↓ lost -$49.99
+
+Total wins: 1 (50%)
+Total losses: 1 (50%)
+
+Total PnL: +$8.36
+```
 
 Keep messages terse enough to scan on mobile.

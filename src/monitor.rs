@@ -101,11 +101,11 @@ pub async fn run(args: MonitorArgs, config: RuntimeConfig) -> Result<()> {
     let mut refresh_interval = time::interval(Duration::from_secs(10));
     let mut status_interval = time::interval(Duration::from_secs(15));
     let mut evaluation_interval = time::interval(config.evaluation_interval);
-    let mut pnl_interval = telegram_pnl_interval(&config, &telegram);
+    let mut settlement_interval = telegram_settlement_interval(&telegram);
     refresh_interval.tick().await;
     status_interval.tick().await;
     evaluation_interval.tick().await;
-    if let Some(interval) = pnl_interval.as_mut() {
+    if let Some(interval) = settlement_interval.as_mut() {
         interval.tick().await;
     }
     let deadline = args
@@ -136,7 +136,7 @@ pub async fn run(args: MonitorArgs, config: RuntimeConfig) -> Result<()> {
         log_evaluations = config.log_evaluations,
         "monitor started"
     );
-    if telegram.is_configured() {
+    if telegram.is_configured() && !config.live_trading {
         telegram
             .send_message(&format!(
                 "wiggler started: live_trading={} assets={} tradable={}",
@@ -174,12 +174,12 @@ pub async fn run(args: MonitorArgs, config: RuntimeConfig) -> Result<()> {
             _ = status_interval.tick() => {
                 state.log_status();
             }
-            _ = optional_interval_tick(&mut pnl_interval) => {
-                let account_snapshot = account_pnl.fetch().await;
-                let message = state.pnl_summary_text(account_snapshot.as_ref());
-                if let Err(error) = telegram.send_message(&message).await {
-                    warn!(error = %error, "failed to send Telegram PnL summary");
-                }
+            _ = optional_interval_tick(&mut settlement_interval) => {
+                state.send_live_settlement_summaries(
+                    &account_pnl,
+                    &telegram,
+                    duration,
+                ).await;
             }
             _ = evaluation_interval.tick() => {
                 state.evaluate_and_maybe_execute(
@@ -190,17 +190,7 @@ pub async fn run(args: MonitorArgs, config: RuntimeConfig) -> Result<()> {
                 ).await;
             }
             Some(tick) = price_rx.recv() => {
-                let closeouts = state.apply_price_tick(tick);
-                let account_snapshot = if closeouts.iter().any(|closeout| closeout.mode == TradeMode::Live) {
-                    account_pnl.fetch().await
-                } else {
-                    None
-                };
-                for closeout in closeouts {
-                    if let Err(error) = telegram.send_message(&closeout.telegram_text(state.pnl_stats(), account_snapshot.as_ref())).await {
-                        warn!(error = %error, slug = closeout.slug, "failed to send trade closeout Telegram message");
-                    }
-                }
+                state.apply_price_tick(tick);
             }
             Some(event) = market_rx.recv() => {
                 state.apply_market_event(event);
@@ -330,15 +320,14 @@ async fn sleep_until(deadline: Option<time::Instant>) {
     }
 }
 
-fn telegram_pnl_interval(
-    config: &RuntimeConfig,
-    telegram: &TelegramClient,
-) -> Option<time::Interval> {
-    if !telegram.is_configured() || config.telegram_pnl_interval.is_zero() {
+fn telegram_settlement_interval(telegram: &TelegramClient) -> Option<time::Interval> {
+    if !telegram.is_configured() {
         return None;
     }
 
-    Some(time::interval(config.telegram_pnl_interval))
+    Some(time::interval(Duration::from_secs(
+        LIVE_SETTLEMENT_POLL_SECONDS,
+    )))
 }
 
 async fn optional_interval_tick(interval: &mut Option<time::Interval>) {
@@ -362,17 +351,6 @@ struct AccountPnlClient {
     user: Option<String>,
 }
 
-#[derive(Clone, Debug)]
-struct AccountPnlSnapshot {
-    profile_pnl_usdc: f64,
-    volume_usdc: Option<f64>,
-    positions_value_usdc: Option<f64>,
-    open_positions_count: Option<u64>,
-    open_positions_cash_pnl_usdc: Option<f64>,
-    wins: Option<u64>,
-    losses: Option<u64>,
-}
-
 impl AccountPnlClient {
     fn from_config(config: &RuntimeConfig) -> Self {
         Self {
@@ -388,133 +366,32 @@ impl AccountPnlClient {
         }
     }
 
-    async fn fetch(&self) -> Option<AccountPnlSnapshot> {
+    async fn fetch_recent_closed_positions(&self) -> Option<Vec<ClosedPositionPnlRow>> {
         let Some(user) = self.user.as_deref() else {
             return None;
         };
-        match self.fetch_user(user).await {
-            Ok(snapshot) => Some(snapshot),
-            Err(error) => {
+        match self.fetch_closed_position_rows(user, 500).await {
+            Some(rows) => Some(rows),
+            None => {
                 warn!(
-                    error = %error,
                     user,
-                    "failed to fetch Polymarket account PnL snapshot"
+                    "failed to fetch Polymarket recent closed positions for Telegram summary"
                 );
                 None
             }
         }
     }
 
-    async fn fetch_user(&self, user: &str) -> Result<AccountPnlSnapshot> {
-        let leaderboard_url = format!("{}/v1/leaderboard", self.data_api_base_url);
-        let leaderboard = self
-            .http
-            .get(&leaderboard_url)
-            .query(&[
-                ("timePeriod", "all"),
-                ("orderBy", "VOL"),
-                ("limit", "1"),
-                ("offset", "0"),
-                ("category", "overall"),
-                ("user", user),
-            ])
-            .send()
-            .await
-            .context("request Polymarket leaderboard PnL")?
-            .error_for_status()
-            .context("Polymarket leaderboard PnL status")?
-            .json::<Vec<LeaderboardPnlRow>>()
-            .await
-            .context("parse Polymarket leaderboard PnL")?;
-        let row = leaderboard
-            .into_iter()
-            .next()
-            .context("Polymarket leaderboard returned no user row")?;
-
-        let positions_value_usdc = self.fetch_positions_value(user).await;
-        let positions = self.fetch_positions(user).await;
-        let open_position_summary = positions
-            .as_ref()
-            .map(|rows| account_open_position_summary(rows));
-        let resolved_position_counts = positions
-            .as_ref()
-            .map(|rows| account_position_win_loss_counts(rows));
-        let closed_position_counts = self.fetch_closed_position_counts(user).await;
-        let (wins, losses) = match (closed_position_counts, resolved_position_counts) {
-            (Some(closed), Some(resolved)) => (
-                Some(closed.wins + resolved.wins),
-                Some(closed.losses + resolved.losses),
-            ),
-            (Some(closed), None) => (Some(closed.wins), Some(closed.losses)),
-            (None, Some(resolved)) => (Some(resolved.wins), Some(resolved.losses)),
-            (None, None) => (None, None),
-        };
-
-        Ok(AccountPnlSnapshot {
-            profile_pnl_usdc: row.pnl.unwrap_or(0.0),
-            volume_usdc: row.vol,
-            positions_value_usdc,
-            open_positions_count: open_position_summary.map(|summary| summary.count),
-            open_positions_cash_pnl_usdc: open_position_summary.map(|summary| summary.cash_pnl),
-            wins,
-            losses,
-        })
-    }
-
-    async fn fetch_positions_value(&self, user: &str) -> Option<f64> {
-        let value_url = format!("{}/value", self.data_api_base_url);
-        match self
-            .http
-            .get(value_url)
-            .query(&[("user", user)])
-            .send()
-            .await
-            .and_then(reqwest::Response::error_for_status)
-        {
-            Ok(response) => match response.json::<Vec<PositionValueRow>>().await {
-                Ok(rows) => rows.first().and_then(|row| row.value),
-                Err(error) => {
-                    warn!(error = %error, "failed to parse Polymarket position value");
-                    None
-                }
-            },
-            Err(error) => {
-                warn!(error = %error, "failed to fetch Polymarket position value");
-                None
-            }
-        }
-    }
-
-    async fn fetch_positions(&self, user: &str) -> Option<Vec<PositionPnlRow>> {
-        let positions_url = format!("{}/positions", self.data_api_base_url);
-        match self
-            .http
-            .get(positions_url)
-            .query(&[("user", user), ("limit", "500"), ("sizeThreshold", "0")])
-            .send()
-            .await
-            .and_then(reqwest::Response::error_for_status)
-        {
-            Ok(response) => match response.json::<Vec<PositionPnlRow>>().await {
-                Ok(rows) => Some(rows),
-                Err(error) => {
-                    warn!(error = %error, "failed to parse Polymarket position PnL");
-                    None
-                }
-            },
-            Err(error) => {
-                warn!(error = %error, "failed to fetch Polymarket position PnL");
-                None
-            }
-        }
-    }
-
-    async fn fetch_closed_position_counts(&self, user: &str) -> Option<AccountWinLossCounts> {
+    async fn fetch_closed_position_rows(
+        &self,
+        user: &str,
+        max_rows: usize,
+    ) -> Option<Vec<ClosedPositionPnlRow>> {
         let closed_url = format!("{}/closed-positions", self.data_api_base_url);
-        let mut counts = AccountWinLossCounts::default();
         let limit = 50usize;
+        let mut all_rows = Vec::new();
 
-        for offset in (0..=1_000usize).step_by(limit) {
+        for offset in (0..=max_rows).step_by(limit) {
             let response = match self
                 .http
                 .get(&closed_url)
@@ -549,142 +426,153 @@ impl AccountPnlClient {
                 }
             };
 
-            for row in &rows {
-                counts.add_pnl(row.realized_pnl.unwrap_or(0.0));
-            }
-            if rows.len() < limit {
-                return Some(counts);
+            let done = rows.len() < limit;
+            all_rows.extend(rows);
+            if done {
+                return Some(all_rows);
             }
         }
 
-        Some(counts)
+        Some(all_rows)
     }
 }
 
-#[derive(Debug, Deserialize)]
-struct LeaderboardPnlRow {
-    pnl: Option<f64>,
-    vol: Option<f64>,
-}
-
-#[derive(Debug, Deserialize)]
-struct PositionValueRow {
-    value: Option<f64>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct PositionPnlRow {
-    cash_pnl: Option<f64>,
-    redeemable: Option<bool>,
-    mergeable: Option<bool>,
-}
-
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ClosedPositionPnlRow {
     realized_pnl: Option<f64>,
+    slug: Option<String>,
+    event_slug: Option<String>,
+    title: Option<String>,
+    outcome: Option<String>,
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-struct AccountWinLossCounts {
-    wins: u64,
-    losses: u64,
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-struct AccountOpenPositionSummary {
-    count: u64,
-    cash_pnl: f64,
-}
-
-impl AccountWinLossCounts {
-    fn add_pnl(&mut self, pnl: f64) {
-        if pnl > 0.0 {
-            self.wins += 1;
-        } else if pnl < 0.0 {
-            self.losses += 1;
-        }
-    }
-}
-
-fn account_open_position_summary(rows: &[PositionPnlRow]) -> AccountOpenPositionSummary {
-    let mut summary = AccountOpenPositionSummary::default();
-    for row in rows {
-        if account_position_is_resolved(row) {
-            continue;
-        }
-        summary.count += 1;
-        summary.cash_pnl += row.cash_pnl.unwrap_or(0.0);
-    }
-    summary
-}
-
-fn account_position_win_loss_counts(rows: &[PositionPnlRow]) -> AccountWinLossCounts {
-    let mut counts = AccountWinLossCounts::default();
-    for row in rows {
-        if !account_position_is_resolved(row) {
-            continue;
-        }
-        counts.add_pnl(row.cash_pnl.unwrap_or(0.0));
-    }
-    counts
-}
-
-fn account_position_is_resolved(row: &PositionPnlRow) -> bool {
-    row.redeemable == Some(true) || row.mergeable == Some(true)
-}
-
-fn account_pnl_line(snapshot: Option<&AccountPnlSnapshot>) -> String {
-    let Some(snapshot) = snapshot else {
-        return "Polymarket account P/L: unavailable; local trade-record P/L below".to_string();
+fn live_settlement_candidate_slots(now: DateTime<Utc>, duration: TimeDelta) -> Vec<DateTime<Utc>> {
+    let Ok(current_slot) = MarketSlot::current(now, duration) else {
+        return Vec::new();
     };
-    let mut line = format!(
-        "Polymarket account P/L: {} all-time",
-        format_signed_usdc(snapshot.profile_pnl_usdc)
-    );
-    match (snapshot.wins, snapshot.losses) {
-        (Some(wins), Some(losses)) => {
-            line.push_str(&format!(
-                " ({} wins / {} losses)",
-                format_whole_number(wins),
-                format_whole_number(losses)
-            ));
+
+    (1..=LIVE_SETTLEMENT_LOOKBACK_SLOTS)
+        .filter_map(|offset| {
+            let slot = current_slot.offset(-(offset as i64)).ok()?;
+            let delay = TimeDelta::try_seconds(LIVE_SETTLEMENT_DELAY_SECONDS as i64)?;
+            let ready_at = slot.end() + delay;
+            (now >= ready_at).then_some(slot.start())
+        })
+        .rev()
+        .collect()
+}
+
+fn live_settlement_summary_text(rows: &[ClosedPositionPnlRow]) -> String {
+    let mut wins = 0u64;
+    let mut losses = 0u64;
+    let mut total_pnl = 0.0;
+    let mut lines = Vec::new();
+
+    for row in rows {
+        let pnl = row.realized_pnl.unwrap_or(0.0);
+        total_pnl += pnl;
+        let won = pnl > 0.0;
+        if won {
+            wins += 1;
+        } else {
+            losses += 1;
         }
-        (Some(wins), None) => {
-            line.push_str(&format!(" ({} wins)", format_whole_number(wins)));
-        }
-        (None, Some(losses)) => {
-            line.push_str(&format!(" ({} losses)", format_whole_number(losses)));
-        }
-        (None, None) => {}
+        lines.push(format!(
+            "{} {} {} {}",
+            closed_position_ticker(row),
+            closed_position_outcome_arrow(row),
+            if won { "won" } else { "lost" },
+            format_signed_usdc(pnl)
+        ));
     }
-    if let Some(value) = snapshot.positions_value_usdc {
-        match snapshot.open_positions_count {
-            Some(count) => {
-                line.push_str(&format!(
-                    "; open positions: {} worth {}",
-                    format_whole_number(count),
-                    format_usdc(value)
-                ));
-                if count > 0 {
-                    if let Some(cash_pnl) = snapshot.open_positions_cash_pnl_usdc {
-                        line.push_str(&format!(
-                            ", unrealized P/L {}",
-                            format_signed_usdc(cash_pnl)
-                        ));
-                    }
-                }
-            }
-            None => {
-                line.push_str(&format!("; open positions value {}", format_usdc(value)));
-            }
-        }
+
+    let total = wins + losses;
+    let win_pct = if total > 0 {
+        (wins as f64 / total as f64) * 100.0
+    } else {
+        0.0
+    };
+    let loss_pct = if total > 0 {
+        (losses as f64 / total as f64) * 100.0
+    } else {
+        0.0
+    };
+
+    lines.push(String::new());
+    lines.push(format!(
+        "Total wins: {} ({})",
+        format_whole_number(wins),
+        format_percent(win_pct)
+    ));
+    lines.push(format!(
+        "Total losses: {} ({})",
+        format_whole_number(losses),
+        format_percent(loss_pct)
+    ));
+    lines.push(String::new());
+    lines.push(format!("Total PnL: {}", format_signed_usdc(total_pnl)));
+    lines.join("\n")
+}
+
+fn closed_position_slot_start(row: &ClosedPositionPnlRow) -> Option<DateTime<Utc>> {
+    row.slug
+        .as_deref()
+        .or(row.event_slug.as_deref())
+        .and_then(slot_start_from_market_slug)
+}
+
+fn slot_start_from_market_slug(slug: &str) -> Option<DateTime<Utc>> {
+    let timestamp = slug.rsplit('-').next()?.parse::<i64>().ok()?;
+    DateTime::from_timestamp(timestamp, 0)
+}
+
+fn closed_position_ticker(row: &ClosedPositionPnlRow) -> String {
+    row.slug
+        .as_deref()
+        .or(row.event_slug.as_deref())
+        .and_then(|slug| slug.split('-').next())
+        .map(|ticker| ticker.to_ascii_uppercase())
+        .or_else(|| ticker_from_title(row.title.as_deref()?))
+        .unwrap_or_else(|| "UNKNOWN".to_string())
+}
+
+fn ticker_from_title(title: &str) -> Option<String> {
+    let lower = title.to_ascii_lowercase();
+    if lower.starts_with("bitcoin ") {
+        Some("BTC".to_string())
+    } else if lower.starts_with("ethereum ") {
+        Some("ETH".to_string())
+    } else if lower.starts_with("solana ") {
+        Some("SOL".to_string())
+    } else if lower.starts_with("xrp ") {
+        Some("XRP".to_string())
+    } else if lower.starts_with("dogecoin ") {
+        Some("DOGE".to_string())
+    } else {
+        None
     }
-    if let Some(volume) = snapshot.volume_usdc {
-        line.push_str(&format!("; volume {}", format_usdc(volume)));
+}
+
+fn closed_position_outcome_label(row: &ClosedPositionPnlRow) -> &'static str {
+    match row
+        .outcome
+        .as_deref()
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        Some("up") => "up",
+        Some("down") => "down",
+        _ => "other",
     }
-    line
+}
+
+fn closed_position_outcome_arrow(row: &ClosedPositionPnlRow) -> &'static str {
+    match closed_position_outcome_label(row) {
+        "up" => "↑",
+        "down" => "↓",
+        _ => "?",
+    }
 }
 
 #[derive(Default)]
@@ -706,57 +594,74 @@ struct MonitorState {
     initial_books_seen: HashSet<String>,
     live_pre_submit_error_cooldown_until: Option<DateTime<Utc>>,
     event_counts: EventCounts,
-    pnl_stats: PnlStats,
-    last_pnl_summary: PnlStats,
+    sent_live_settlement_slots: HashSet<DateTime<Utc>>,
 }
 
 impl MonitorState {
-    fn from_trade_records(trade_record_dir: &Path) -> Self {
-        let pnl_stats = load_pnl_stats(trade_record_dir);
-        Self {
-            pnl_stats,
-            last_pnl_summary: pnl_stats,
-            ..Self::default()
+    fn from_trade_records(_trade_record_dir: &Path) -> Self {
+        Self::default()
+    }
+
+    async fn send_live_settlement_summaries(
+        &mut self,
+        account_pnl: &AccountPnlClient,
+        telegram: &TelegramClient,
+        duration: TimeDelta,
+    ) {
+        if !telegram.is_configured() {
+            return;
         }
-    }
 
-    fn pnl_stats(&self) -> &PnlStats {
-        &self.pnl_stats
-    }
+        let candidate_slots = live_settlement_candidate_slots(Utc::now(), duration);
+        let unsent_slots = candidate_slots
+            .into_iter()
+            .filter(|slot_start| !self.sent_live_settlement_slots.contains(slot_start))
+            .collect::<Vec<_>>();
+        if unsent_slots.is_empty() {
+            return;
+        }
 
-    fn pnl_summary_text(&mut self, account_snapshot: Option<&AccountPnlSnapshot>) -> String {
-        let total = self.pnl_stats;
-        let delta = total.diff(self.last_pnl_summary);
-        self.last_pnl_summary = total;
-        let (open_count, open_amount) = self.open_live_position_summary();
-        let account_line = account_pnl_line(account_snapshot);
-        format!(
-            "Wiggler PnL update\n{}\nLocal trade-record debug P/L: {} ({} closed records{})\nLocal since last update: {} ({} closed records{})\nOpen positions: {}{}",
-            account_line,
-            format_signed_usdc(total.estimated_pnl_usdc),
-            format_whole_number(total.closed),
-            total.tie_suffix(),
-            format_signed_usdc(delta.estimated_pnl_usdc),
-            format_whole_number(delta.closed),
-            delta.tie_suffix(),
-            format_whole_number(open_count),
-            if open_count > 0 {
-                format!(" totaling {}", format_usdc(open_amount))
-            } else {
-                String::new()
+        let Some(rows) = account_pnl.fetch_recent_closed_positions().await else {
+            return;
+        };
+
+        for slot_start in unsent_slots {
+            let mut slot_rows = rows
+                .iter()
+                .filter(|row| closed_position_slot_start(row) == Some(slot_start))
+                .cloned()
+                .collect::<Vec<_>>();
+            if slot_rows.is_empty() {
+                continue;
             }
-        )
-    }
+            slot_rows.sort_by(|left, right| {
+                closed_position_ticker(left)
+                    .cmp(&closed_position_ticker(right))
+                    .then_with(|| {
+                        closed_position_outcome_label(left)
+                            .cmp(closed_position_outcome_label(right))
+                    })
+                    .then_with(|| {
+                        left.realized_pnl
+                            .unwrap_or(0.0)
+                            .total_cmp(&right.realized_pnl.unwrap_or(0.0))
+                    })
+            });
 
-    fn open_live_position_summary(&self) -> (u64, f64) {
-        self.tracked_entries
-            .values()
-            .filter(|entry| {
-                entry.mode == TradeMode::Live && entry.track_closeout && !entry.closeout_sent
-            })
-            .fold((0, 0.0), |(count, amount), entry| {
-                (count + 1, amount + entry.filled_amount_usdc())
-            })
+            let message = live_settlement_summary_text(&slot_rows);
+            match telegram.send_message(&message).await {
+                Ok(()) => {
+                    self.sent_live_settlement_slots.insert(slot_start);
+                }
+                Err(error) => {
+                    warn!(
+                        error = %error,
+                        slot_start = %slot_start,
+                        "failed to send live settlement Telegram summary"
+                    );
+                }
+            }
+        }
     }
 
     fn replace_markets(&mut self, markets: Vec<MonitoredMarket>) {
@@ -798,7 +703,7 @@ impl MonitorState {
         self.books.retain_only(&active_asset_ids);
     }
 
-    fn apply_price_tick(&mut self, tick: PriceTick) -> Vec<TradeCloseout> {
+    fn apply_price_tick(&mut self, tick: PriceTick) {
         self.price_history
             .entry(tick.asset)
             .or_default()
@@ -837,7 +742,7 @@ impl MonitorState {
 
         self.record_market_price_paths(&tick);
         self.latest_prices.insert(tick.asset, tick);
-        self.close_tracked_entries()
+        self.close_tracked_entries();
     }
 
     fn record_market_price_paths(&mut self, tick: &PriceTick) {
@@ -1093,7 +998,7 @@ impl MonitorState {
                 .shadow_decision_markets
                 .insert(market.condition_id.clone())
             {
-                self.record_trade_entry(config, market, &prepared, TradeMode::Shadow, true, false);
+                self.record_trade_entry(config, market, &prepared, TradeMode::Shadow, true);
                 if let Err(error) = telegram
                     .send_message(&prepared.telegram_text(TradeMode::Shadow))
                     .await
@@ -1452,15 +1357,6 @@ impl MonitorState {
                 skip_reason = "pre_submit_recompute_failed",
                 "live execution skipped"
             );
-            if let Err(error) = telegram
-                .send_message(&format!(
-                    "LIVE pre-submit canceled {}: recompute failed {}",
-                    market.asset, market.slug
-                ))
-                .await
-            {
-                warn!(error = %error, slug = market.slug, "failed to send live cancel Telegram message");
-            }
             return;
         };
         if !pre_submit_matches_initial(initial_prepared, &prepared) {
@@ -1475,29 +1371,11 @@ impl MonitorState {
                 skip_reason = "pre_submit_side_flip",
                 "live execution skipped"
             );
-            if let Err(error) = telegram
-                .send_message(&format!(
-                    "LIVE pre-submit canceled {}: side flipped {} -> {} {}",
-                    market.asset,
-                    outcome_label(&initial_prepared.outcome),
-                    outcome_label(&prepared.outcome),
-                    market.slug
-                ))
-                .await
-            {
-                warn!(error = %error, slug = market.slug, "failed to send live cancel Telegram message");
-            }
             return;
         }
 
         self.pending_markets.insert(market.condition_id.clone());
-        self.record_trade_entry(config, market, &prepared, TradeMode::Live, false, false);
-        if let Err(error) = telegram
-            .send_message(&prepared.telegram_text(TradeMode::Live))
-            .await
-        {
-            warn!(error = %error, slug = market.slug, "failed to send live intent Telegram message");
-        }
+        self.record_trade_entry(config, market, &prepared, TradeMode::Live, false);
 
         let request = LiveOrderRequest {
             asset: prepared.asset,
@@ -1589,12 +1467,24 @@ impl MonitorState {
                         "live order rejected"
                     );
                 }
-                if !retryable_no_fill {
-                    if let Err(error) = telegram
-                        .send_message(&live_response_text(&request, &response))
-                        .await
-                    {
-                        warn!(error = %error, slug = market.slug, "failed to send live response Telegram message");
+                let message = if response.has_fill() {
+                    Some(live_entry_filled_text(&prepared, &response))
+                } else if !retryable_no_fill && !response.success {
+                    Some(live_entry_rejected_text(
+                        request.asset,
+                        &request.outcome,
+                        response.error_msg.as_deref().unwrap_or("unknown"),
+                    ))
+                } else {
+                    None
+                };
+                if let Some(message) = message {
+                    if let Err(error) = telegram.send_message(&message).await {
+                        warn!(
+                            error = %error,
+                            slug = market.slug,
+                            "failed to send live execution Telegram message"
+                        );
                     }
                 }
             }
@@ -1622,10 +1512,12 @@ impl MonitorState {
                     "live order failed"
                 );
                 if !retryable_no_fill {
-                    if let Err(telegram_error) = telegram
-                        .send_message(&live_order_error_text(&request, &error_chain))
-                        .await
-                    {
+                    let message = live_entry_rejected_text(
+                        request.asset,
+                        &request.outcome,
+                        &clean_failure_reason(&error_chain),
+                    );
+                    if let Err(telegram_error) = telegram.send_message(&message).await {
                         warn!(error = %telegram_error, slug = market.slug, "failed to send live error Telegram message");
                     }
                 }
@@ -1781,7 +1673,6 @@ impl MonitorState {
         prepared: &PreparedTrade,
         mode: TradeMode,
         track_closeout: bool,
-        notify_closeout: bool,
     ) {
         let attempted_at = Utc::now();
         let record_path = trade_record_path(&config.trade_record_dir, attempted_at, mode, prepared);
@@ -1798,14 +1689,12 @@ impl MonitorState {
         self.tracked_entries.insert(
             market.condition_id.clone(),
             TrackedEntry {
-                mode,
                 prepared: prepared.clone(),
                 slot_start: market.slot.start(),
                 slot_end: market.slot.end(),
                 record_path: Some(record_path),
                 record,
                 track_closeout,
-                notify_closeout,
                 closeout_sent: false,
                 filled_amount_usdc: None,
                 filled_payout_usdc: None,
@@ -1818,7 +1707,6 @@ impl MonitorState {
             return;
         };
         entry.track_closeout = response.has_fill();
-        entry.notify_closeout = response.has_fill();
         if response.has_fill() {
             entry.filled_amount_usdc = response
                 .filled_amount_usdc()
@@ -1855,7 +1743,6 @@ impl MonitorState {
             return;
         };
         entry.track_closeout = false;
-        entry.notify_closeout = false;
         entry.record["order_error"] = json!({
             "received_at": Utc::now().to_rfc3339(),
             "error": error,
@@ -1864,8 +1751,7 @@ impl MonitorState {
         entry.write_record();
     }
 
-    fn close_tracked_entries(&mut self) -> Vec<TradeCloseout> {
-        let mut closeouts = Vec::new();
+    fn close_tracked_entries(&mut self) {
         for entry in self.tracked_entries.values_mut() {
             if entry.closeout_sent || !entry.track_closeout {
                 continue;
@@ -1905,24 +1791,7 @@ impl MonitorState {
             });
             entry.record["state"] = json!("closed");
             entry.write_record();
-            if entry.mode == TradeMode::Live {
-                self.pnl_stats.add(won, estimated_pnl);
-            }
-            if entry.notify_closeout {
-                closeouts.push(TradeCloseout {
-                    mode: entry.mode,
-                    asset: entry.prepared.asset,
-                    slug: entry.prepared.slug.clone(),
-                    outcome: entry.prepared.outcome.clone(),
-                    line_price: entry.prepared.line_price,
-                    close_price,
-                    amount_usdc,
-                    estimated_profit_usdc,
-                    won,
-                });
-            }
         }
-        closeouts
     }
 
     fn is_watched_condition(&self, condition_id: &str) -> bool {
@@ -1965,109 +1834,15 @@ impl TradeMode {
 
 #[derive(Clone, Debug)]
 struct TrackedEntry {
-    mode: TradeMode,
     prepared: PreparedTrade,
     slot_start: DateTime<Utc>,
     slot_end: DateTime<Utc>,
     record_path: Option<PathBuf>,
     record: Value,
     track_closeout: bool,
-    notify_closeout: bool,
     closeout_sent: bool,
     filled_amount_usdc: Option<f64>,
     filled_payout_usdc: Option<f64>,
-}
-
-#[derive(Clone, Debug)]
-struct TradeCloseout {
-    mode: TradeMode,
-    asset: Asset,
-    slug: String,
-    outcome: Outcome,
-    line_price: f64,
-    close_price: f64,
-    amount_usdc: f64,
-    estimated_profit_usdc: Option<f64>,
-    won: Option<bool>,
-}
-
-#[derive(Clone, Copy, Debug, Default)]
-struct PnlStats {
-    closed: u64,
-    wins: u64,
-    losses: u64,
-    ties: u64,
-    estimated_pnl_usdc: f64,
-}
-
-impl PnlStats {
-    fn add(&mut self, won: Option<bool>, estimated_pnl_usdc: Option<f64>) {
-        let Some(estimated_pnl_usdc) = estimated_pnl_usdc else {
-            return;
-        };
-        self.closed += 1;
-        match won {
-            Some(true) => self.wins += 1,
-            Some(false) => self.losses += 1,
-            None => self.ties += 1,
-        }
-        self.estimated_pnl_usdc += estimated_pnl_usdc;
-    }
-
-    fn diff(self, previous: Self) -> Self {
-        Self {
-            closed: self.closed.saturating_sub(previous.closed),
-            wins: self.wins.saturating_sub(previous.wins),
-            losses: self.losses.saturating_sub(previous.losses),
-            ties: self.ties.saturating_sub(previous.ties),
-            estimated_pnl_usdc: self.estimated_pnl_usdc - previous.estimated_pnl_usdc,
-        }
-    }
-
-    fn tie_suffix(&self) -> String {
-        if self.ties > 0 {
-            format!(" / {} ties", self.ties)
-        } else {
-            String::new()
-        }
-    }
-}
-
-impl TradeCloseout {
-    fn telegram_text(
-        &self,
-        pnl_stats: &PnlStats,
-        account_snapshot: Option<&AccountPnlSnapshot>,
-    ) -> String {
-        let status = match self.won {
-            Some(true) => "won",
-            Some(false) => "lost",
-            None => "tied",
-        };
-        let pnl = match (self.won, self.estimated_profit_usdc) {
-            (Some(true), Some(profit)) => format!("Estimated P/L: +{}", format_usdc(profit)),
-            (Some(false), _) => format!("Estimated P/L: -{}", format_usdc(self.amount_usdc)),
-            _ => "Estimated P/L: flat/unknown".to_string(),
-        };
-        format!(
-            "{} closeout: {} {} {}\nTarget: {}\nClose: {}\nBet: {}\n{}\n{}\nLocal trade-record debug P/L: {} ({} closed records{})",
-            match self.mode {
-                TradeMode::Live => "Live",
-                TradeMode::Shadow => "Shadow",
-            },
-            self.asset.to_string().to_ascii_uppercase(),
-            outcome_label(&self.outcome),
-            status,
-            format_market_price(self.asset, self.line_price),
-            format_market_price(self.asset, self.close_price),
-            format_usdc(self.amount_usdc),
-            pnl,
-            account_pnl_line(account_snapshot),
-            format_signed_usdc(pnl_stats.estimated_pnl_usdc),
-            format_whole_number(pnl_stats.closed),
-            pnl_stats.tie_suffix()
-        )
-    }
 }
 
 impl TrackedEntry {
@@ -2232,101 +2007,6 @@ fn closeout_estimated_pnl(
     }
 }
 
-fn load_pnl_stats(trade_record_dir: &Path) -> PnlStats {
-    let mut stats = PnlStats::default();
-    let entries = match fs::read_dir(trade_record_dir) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return stats,
-        Err(error) => {
-            warn!(
-                error = %error,
-                path = %trade_record_dir.display(),
-                "failed to read trade record dir for PnL stats"
-            );
-            return stats;
-        }
-    };
-
-    for entry in entries {
-        let Ok(entry) = entry else {
-            continue;
-        };
-        let path = entry.path();
-        if path.extension().and_then(|value| value.to_str()) != Some("json") {
-            continue;
-        }
-        match fs::read(&path)
-            .with_context(|| format!("read trade record {}", path.display()))
-            .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).context("parse trade record"))
-        {
-            Ok(record) => {
-                if let Some((won, pnl)) = pnl_from_trade_record(&record) {
-                    stats.add(won, Some(pnl));
-                }
-            }
-            Err(error) => warn!(
-                error = %error,
-                path = %path.display(),
-                "failed to load trade record for PnL stats"
-            ),
-        }
-    }
-
-    stats
-}
-
-fn pnl_from_trade_record(record: &Value) -> Option<(Option<bool>, f64)> {
-    if record.get("mode")?.as_str()? != TradeMode::Live.as_str()
-        || record.get("state")?.as_str()? != "closed"
-    {
-        return None;
-    }
-    let closeout = record.get("closeout")?;
-    let won = closeout.get("won").and_then(Value::as_bool);
-    let amount_usdc = closeout
-        .get("filled_amount_usdc")
-        .and_then(Value::as_f64)
-        .or_else(|| {
-            record
-                .get("order_response")
-                .and_then(|value| value.get("making_amount"))
-                .and_then(Value::as_str)
-                .and_then(parse_positive_f64)
-        })
-        .or_else(|| {
-            record
-                .get("entry")
-                .and_then(|value| value.get("amount_usdc"))
-                .and_then(Value::as_f64)
-        })?;
-    let estimated_profit_usdc = closeout
-        .get("estimated_profit_usdc")
-        .and_then(Value::as_f64)
-        .or_else(|| {
-            let payout = record
-                .get("order_response")
-                .and_then(|value| value.get("taking_amount"))
-                .and_then(Value::as_str)
-                .and_then(parse_positive_f64)?;
-            Some(payout - amount_usdc)
-        })
-        .or_else(|| {
-            record
-                .get("entry")
-                .and_then(|value| value.get("estimated_profit_usdc"))
-                .and_then(Value::as_f64)
-        });
-    let pnl = closeout_estimated_pnl(amount_usdc, estimated_profit_usdc, won)?;
-    Some((won, pnl))
-}
-
-fn parse_positive_f64(value: &str) -> Option<f64> {
-    value
-        .parse::<f64>()
-        .ok()
-        .filter(|value| value.is_finite() && *value > 0.0)
-}
-
 struct TokenContext<'a> {
     slug: &'a String,
     token: &'a OutcomeToken,
@@ -2473,6 +2153,15 @@ fn format_whole_number(value: u64) -> String {
     add_digit_grouping(&value.to_string())
 }
 
+fn format_percent(value: f64) -> String {
+    let rounded = (value * 10.0).round() / 10.0;
+    if (rounded.fract()).abs() < 0.000001 {
+        format!("{rounded:.0}%")
+    } else {
+        format!("{rounded:.1}%")
+    }
+}
+
 fn add_digit_grouping(digits: &str) -> String {
     let mut grouped = String::with_capacity(digits.len() + digits.len() / 3);
     for (index, ch) in digits.chars().rev().enumerate() {
@@ -2502,50 +2191,81 @@ fn live_pre_submit_error_text(
     )
 }
 
-fn live_response_text(request: &LiveOrderRequest, response: &LiveOrderResponse) -> String {
-    if response.has_fill() {
-        format!(
-            "Live order filled: {} {}\nBet: {}\nOrder: {}\nFills: {}",
-            request.asset.to_string().to_ascii_uppercase(),
-            request.outcome_label(),
-            format_usdc(request.amount_usdc),
-            response.order_id,
-            format_whole_number(response.trade_ids.len() as u64)
-        )
-    } else if is_retryable_no_fill_response(response) {
-        format!(
-            "Live order did not fill: {} {}\nBet: {}\nReason: {}\nWiggler will keep looking for another entry in this market.",
-            request.asset.to_string().to_ascii_uppercase(),
-            request.outcome_label(),
-            format_usdc(request.amount_usdc),
-            response.error_msg.as_deref().unwrap_or("no fill")
-        )
-    } else if response.success {
-        format!(
-            "Live order accepted but no fill yet: {} {}\nBet: {}\nOrder: {}",
-            request.asset.to_string().to_ascii_uppercase(),
-            request.outcome_label(),
-            format_usdc(request.amount_usdc),
-            response.order_id
-        )
-    } else {
-        format!(
-            "Live order rejected: {} {}\nBet: {}\nReason: {}",
-            request.asset.to_string().to_ascii_uppercase(),
-            request.outcome_label(),
-            format_usdc(request.amount_usdc),
-            response.error_msg.as_deref().unwrap_or("unknown")
-        )
+fn live_entry_filled_text(prepared: &PreparedTrade, response: &LiveOrderResponse) -> String {
+    let filled_amount = response
+        .filled_amount_usdc()
+        .unwrap_or(prepared.amount_usdc);
+    format!(
+        "Entered {} {} for {}, price line @ {}",
+        asset_ticker(prepared.asset),
+        outcome_arrow(&prepared.outcome),
+        format_usdc(filled_amount),
+        format_market_price(prepared.asset, prepared.line_price)
+    )
+}
+
+fn live_entry_rejected_text(asset: Asset, outcome: &Outcome, reason: &str) -> String {
+    format!(
+        "Rejected entry of {} {}: {}",
+        asset_ticker(asset),
+        outcome_arrow(outcome),
+        clean_failure_reason(reason)
+    )
+}
+
+fn asset_ticker(asset: Asset) -> &'static str {
+    match asset {
+        Asset::Btc => "BTC",
+        Asset::Eth => "ETH",
+        Asset::Sol => "SOL",
+        Asset::Xrp => "XRP",
+        Asset::Doge => "DOGE",
+        Asset::Hype => "HYPE",
+        Asset::Bnb => "BNB",
     }
 }
 
-fn live_order_error_text(request: &LiveOrderRequest, error: &str) -> String {
-    format!(
-        "Live order failed: {} {}\nBet: {}\nReason: {error}",
-        request.asset.to_string().to_ascii_uppercase(),
-        request.outcome_label(),
-        format_usdc(request.amount_usdc)
-    )
+fn outcome_arrow(outcome: &Outcome) -> &'static str {
+    match outcome {
+        Outcome::Up => "↑",
+        Outcome::Down => "↓",
+        Outcome::Other(_) => "?",
+    }
+}
+
+fn clean_failure_reason(reason: &str) -> String {
+    let trimmed = reason.trim();
+    extract_error_json_value(trimmed).unwrap_or_else(|| trimmed.to_string())
+}
+
+fn extract_error_json_value(reason: &str) -> Option<String> {
+    let marker = "\"error\":\"";
+    let start = reason.find(marker)? + marker.len();
+    let mut value = String::new();
+    let mut escaped = false;
+    for ch in reason[start..].chars() {
+        if escaped {
+            value.push(match ch {
+                'n' => '\n',
+                'r' => '\r',
+                't' => '\t',
+                '"' => '"',
+                '\\' => '\\',
+                other => other,
+            });
+            escaped = false;
+            continue;
+        }
+        if ch == '\\' {
+            escaped = true;
+            continue;
+        }
+        if ch == '"' {
+            break;
+        }
+        value.push(ch);
+    }
+    (!value.is_empty()).then_some(value)
 }
 
 fn is_retryable_no_fill_response(response: &LiveOrderResponse) -> bool {
@@ -2610,6 +2330,9 @@ const MAX_PATH_LOOKBACK_DRIFT_SECONDS: i64 = 30;
 const LEAD_DECAY_PENALTY_THRESHOLD: f64 = 0.75;
 const LEAD_DECAY_EDGE_PENALTY: f64 = 0.005;
 const RETRYABLE_NO_FILL_COOLDOWN_SECONDS: i64 = 10;
+const LIVE_SETTLEMENT_POLL_SECONDS: u64 = 15;
+const LIVE_SETTLEMENT_DELAY_SECONDS: u64 = 20;
+const LIVE_SETTLEMENT_LOOKBACK_SLOTS: u32 = 3;
 
 #[derive(Clone, Debug, Default)]
 struct MarketPricePath {
@@ -2799,15 +2522,15 @@ mod tests {
         },
         polymarket::rtds::{PriceFeedSource, PriceTick},
         runtime::{RuntimeBundle, SideLeading, VolBin},
+        trading::executor::LiveOrderResponse,
     };
 
     use super::{
-        AccountOpenPositionSummary, AccountPnlSnapshot, AccountWinLossCounts, MarketPricePath,
-        MonitorState, PathState, PositionPnlRow, PreparedTrade, SlotLine,
-        account_open_position_summary, account_pnl_line, account_position_win_loss_counts,
+        ClosedPositionPnlRow, MarketPricePath, MonitorState, PathState, PreparedTrade, SlotLine,
         asset_ids_for_markets, distance_bps, format_market_price, format_signed_usdc, format_usdc,
-        is_retryable_no_fill_error, pnl_from_trade_record, pre_submit_matches_initial,
-        required_edge_probability, summarize_asks,
+        is_retryable_no_fill_error, live_entry_filled_text, live_entry_rejected_text,
+        live_settlement_summary_text, pre_submit_matches_initial, required_edge_probability,
+        slot_start_from_market_slug, summarize_asks,
     };
 
     #[test]
@@ -3312,143 +3035,78 @@ mod tests {
     }
 
     #[test]
-    fn pnl_from_trade_record_uses_actual_partial_fill_amount() {
-        let record = serde_json::json!({
-            "mode": "live",
-            "state": "closed",
-            "entry": {
-                "amount_usdc": 19.15,
-                "estimated_profit_usdc": 20.85
-            },
-            "order_response": {
-                "making_amount": "7.15",
-                "taking_amount": "15"
-            },
-            "closeout": {
-                "won": false,
-                "estimated_pnl_usdc": -19.15
-            }
-        });
-
-        let (won, pnl) = pnl_from_trade_record(&record).unwrap();
-        assert_eq!(won, Some(false));
-        assert!((pnl + 7.15).abs() < 0.000001);
-    }
-
-    #[test]
-    fn pnl_from_trade_record_uses_actual_partial_fill_profit() {
-        let record = serde_json::json!({
-            "mode": "live",
-            "state": "closed",
-            "entry": {
-                "amount_usdc": 19.15,
-                "estimated_profit_usdc": 20.85
-            },
-            "order_response": {
-                "making_amount": "7.15",
-                "taking_amount": "15"
-            },
-            "closeout": {
-                "won": true,
-                "estimated_pnl_usdc": 20.85
-            }
-        });
-
-        let (won, pnl) = pnl_from_trade_record(&record).unwrap();
-        assert_eq!(won, Some(true));
-        assert!((pnl - 7.85).abs() < 0.000001);
-    }
-
-    #[test]
-    fn account_pnl_line_prefers_profile_snapshot() {
-        let snapshot = AccountPnlSnapshot {
-            profile_pnl_usdc: 1234.56,
-            volume_usdc: Some(9876.54),
-            positions_value_usdc: Some(5678.9),
-            open_positions_count: Some(5),
-            open_positions_cash_pnl_usdc: Some(-89.01),
-            wins: Some(1234),
-            losses: Some(56),
-        };
-
-        let line = account_pnl_line(Some(&snapshot));
-
-        assert!(line.contains("Polymarket account P/L: +$1,234.56 all-time"));
-        assert!(line.contains("(1,234 wins / 56 losses)"));
-        assert!(line.contains("open positions: 5 worth $5,678.90"));
-        assert!(line.contains("unrealized P/L -$89.01"));
-        assert!(line.contains("volume $9,876.54"));
-    }
-
-    #[test]
-    fn account_pnl_line_falls_back_when_unavailable() {
-        assert_eq!(
-            account_pnl_line(None),
-            "Polymarket account P/L: unavailable; local trade-record P/L below"
-        );
-    }
-
-    #[test]
-    fn account_position_counts_only_use_redeemable_rows() {
-        let rows = vec![
-            PositionPnlRow {
-                cash_pnl: Some(10.0),
-                redeemable: Some(true),
-                mergeable: Some(false),
-            },
-            PositionPnlRow {
-                cash_pnl: Some(-5.0),
-                redeemable: Some(false),
-                mergeable: Some(true),
-            },
-            PositionPnlRow {
-                cash_pnl: Some(20.0),
-                redeemable: Some(false),
-                mergeable: Some(false),
-            },
-        ];
-
-        assert_eq!(
-            account_position_win_loss_counts(&rows),
-            AccountWinLossCounts { wins: 1, losses: 1 }
-        );
-    }
-
-    #[test]
-    fn account_open_position_summary_excludes_resolved_rows() {
-        let rows = vec![
-            PositionPnlRow {
-                cash_pnl: Some(10.0),
-                redeemable: Some(false),
-                mergeable: Some(false),
-            },
-            PositionPnlRow {
-                cash_pnl: Some(-5.0),
-                redeemable: Some(true),
-                mergeable: Some(false),
-            },
-            PositionPnlRow {
-                cash_pnl: Some(-7.5),
-                redeemable: Some(false),
-                mergeable: Some(true),
-            },
-        ];
-
-        assert_eq!(
-            account_open_position_summary(&rows),
-            AccountOpenPositionSummary {
-                count: 1,
-                cash_pnl: 10.0
-            }
-        );
-    }
-
-    #[test]
     fn money_and_market_prices_use_grouping() {
         assert_eq!(format_usdc(8751.006), "$8,751.01");
         assert_eq!(format_signed_usdc(-1744.1871), "-$1,744.19");
         assert_eq!(format_market_price(Asset::Btc, 77972.55), "$77,972.55");
         assert_eq!(format_market_price(Asset::Sol, 184.3668), "$184.3668");
+    }
+
+    #[test]
+    fn live_fill_message_uses_requested_shape() {
+        let mut prepared = prepared_trade(Outcome::Up, "up-token");
+        prepared.asset = Asset::Btc;
+        prepared.line_price = 77972.55;
+        prepared.amount_usdc = 50.0;
+        let response = LiveOrderResponse {
+            order_id: "0xorder".to_string(),
+            status: "matched".to_string(),
+            success: true,
+            error_msg: None,
+            making_amount: "49.999999".to_string(),
+            taking_amount: "108.35".to_string(),
+            trade_ids: vec!["trade".to_string()],
+        };
+
+        assert_eq!(
+            live_entry_filled_text(&prepared, &response),
+            "Entered BTC ↑ for $50.00, price line @ $77,972.55"
+        );
+    }
+
+    #[test]
+    fn live_rejection_message_uses_requested_shape_and_reason() {
+        assert_eq!(
+            live_entry_rejected_text(
+                Asset::Eth,
+                &Outcome::Down,
+                "Status: error(400 Bad Request) making POST call to /order with {\"error\":\"invalid signature\"}"
+            ),
+            "Rejected entry of ETH ↓: invalid signature"
+        );
+    }
+
+    #[test]
+    fn settlement_summary_uses_polymarket_closed_rows() {
+        let rows = vec![
+            ClosedPositionPnlRow {
+                realized_pnl: Some(58.352126999999996),
+                slug: Some("btc-updown-5m-1777648800".to_string()),
+                event_slug: None,
+                title: Some("Bitcoin Up or Down - May 1, 11:20AM-11:25AM ET".to_string()),
+                outcome: Some("Up".to_string()),
+            },
+            ClosedPositionPnlRow {
+                realized_pnl: Some(-49.999999),
+                slug: Some("eth-updown-5m-1777648800".to_string()),
+                event_slug: None,
+                title: Some("Ethereum Up or Down - May 1, 11:20AM-11:25AM ET".to_string()),
+                outcome: Some("Down".to_string()),
+            },
+        ];
+
+        assert_eq!(
+            live_settlement_summary_text(&rows),
+            "BTC ↑ won +$58.35\nETH ↓ lost -$50.00\n\nTotal wins: 1 (50%)\nTotal losses: 1 (50%)\n\nTotal PnL: +$8.35"
+        );
+    }
+
+    #[test]
+    fn parses_slot_start_from_market_slug() {
+        assert_eq!(
+            slot_start_from_market_slug("btc-updown-5m-1777648800"),
+            Some(Utc.with_ymd_and_hms(2026, 5, 1, 15, 20, 0).unwrap())
+        );
     }
 
     fn market_with_tokens(asset_ids: Vec<&str>) -> MonitoredMarket {
