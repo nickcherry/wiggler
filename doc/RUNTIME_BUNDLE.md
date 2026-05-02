@@ -8,6 +8,17 @@ cargo run -- monitor --runtime-bundle-dir /path/to/bundle
 WIGGLER_RUNTIME_BUNDLE_DIR=/path/to/bundle cargo run -- monitor
 ```
 
+Regenerate the checked-in bundle locally with the offline training pipeline:
+
+```bash
+cargo run -- training refresh-runtime --output-dir runtime/wiggler-prod-v1
+```
+
+That command syncs Coinbase/Binance spot candles into local Postgres,
+recomputes cross-source VWAP labels, and emits the runtime JSON files consumed
+by `monitor`. Production still loads files only; it does not connect to the
+training database.
+
 The checked-in bundle contains:
 
 - `wiggler-runtime-manifest.json`
@@ -32,6 +43,12 @@ Startup validates the runtime files before opening websockets:
 - anchor mode is `boundary`
 - config asset matches the manifest entry
 - runtime, source-config, and training-input hashes match the manifest
+
+The generator computes:
+
+- `training_input_hash` from the ordered `(open_time_ms, vwap_e8)` training rows.
+- `source_config_hash` from the full probability-grid bucket counts.
+- `runtime_config_hash` from the filtered runtime cells actually shipped to the monitor.
 
 ## Shadow Evaluation
 
@@ -59,6 +76,17 @@ The base executable-edge gate is `risk_defaults.min_edge_probability`. If the
 current absolute lead has decayed below 75% of the max absolute lead observed
 so far in the current 5-minute market, the evaluator adds a 0.005 probability
 edge penalty before walking asks.
+
+Fees are applied at runtime, not inside the probability grid:
+
+```text
+all_in_cost = ask + fee_rate * ask * (1 - ask)
+edge = p_win_lower - all_in_cost
+```
+
+The generated bundle defaults to `fee.taker_fee_rate = 0.072`. If crypto market
+fees change materially, regenerate with `training build-runtime` or
+`training refresh-runtime` and an explicit `--taker-fee-rate`.
 
 `WIGGLER_LIVE_TRADING=false` sends a Telegram shadow decision when all gates
 pass, but it never submits orders. `WIGGLER_LIVE_TRADING=true` sends a live
@@ -98,3 +126,6 @@ still log `skip_reason="insufficient_price_history"` if both exchange candle
 feeds are unavailable or gapped. Path-state also needs a recent price sample from
 approximately 60 seconds ago in the current market, so early or gapped path data
 can log `skip_reason="insufficient_path_history"`.
+
+The offline training bundle uses the same two spot sources but fuses them into a
+local VWAP label source before grid generation.

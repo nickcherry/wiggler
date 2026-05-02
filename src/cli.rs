@@ -4,6 +4,7 @@ use clap::{Parser, Subcommand};
 
 use crate::domain::asset::{Asset, DEFAULT_ASSET_WHITELIST};
 use crate::polymarket::rtds::PriceFeedSource;
+use crate::training::cli::TrainingArgs;
 
 #[derive(Debug, Parser)]
 #[command(name = "wiggler")]
@@ -19,6 +20,8 @@ pub enum Command {
     Doctor(DoctorArgs),
     /// Analyze closed trade performance from Polymarket API data.
     AnalyzeTrades(AnalyzeTradesArgs),
+    /// Offline candle database and runtime-bundle training commands.
+    Training(TrainingArgs),
     /// Stream Chainlink prices and Polymarket CLOB orderbooks for rolling slots.
     Monitor(MonitorArgs),
 }

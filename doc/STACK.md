@@ -5,10 +5,11 @@
 - Rust 2024 edition.
 - Tokio for async runtime, timers, signals, and channels.
 - Clap for the CLI contract.
-- Reqwest with rustls for Gamma REST and future Telegram calls.
+- Reqwest with rustls for Gamma, Coinbase, Binance, and Telegram REST calls.
 - Tokio Tungstenite with rustls for Polymarket websockets.
 - Serde / serde_json for boundary parsing.
 - rust_decimal for probability prices and underlying asset prices.
+- SQLx for local offline-training Postgres access.
 - tracing / tracing-subscriber for JSON logs.
 
 ## External Services
@@ -25,6 +26,15 @@
 - Telegram Bot API
   - Optional.
   - Used for startup, shadow/would-trade, live intent, and live response notifications when configured.
+- Coinbase public market data API: `https://api.coinbase.com`
+  - Used by live in-memory candle reconciliation and local offline candle backfills.
+  - Spot candles only.
+- Binance public market data API: `https://data-api.binance.vision`
+  - Used by live in-memory candle reconciliation and local offline candle backfills.
+  - Spot candles only.
+- Local PostgreSQL
+  - Used only by `training` commands for offline candle storage and runtime-bundle generation.
+  - Not used by the production `monitor` process.
 
 ## Current Shape
 
@@ -34,6 +44,7 @@
 - `src/polymarket/` holds Gamma, CLOB websocket, and RTDS clients.
 - `src/monitor.rs` owns long-running orchestration and rollover.
 - `src/doctor.rs` owns quick connectivity/discovery checks.
+- `src/training/` owns local offline candle sync, VWAP, and runtime-bundle generation.
 - Internal docs live under `doc/`.
 
 ## Philosophy
@@ -42,4 +53,4 @@
 - Keep boundary parsing isolated from trading logic.
 - Store numeric market values as decimals or scaled integers, not floats.
 - Prefer one default runtime path with direct CLI overrides.
-- Keep the live process restartable and stateless unless a future edge requires durable local cache.
+- Keep the live process restartable and DB-free; durable storage belongs to offline training.

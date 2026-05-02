@@ -91,12 +91,15 @@ sudo journalctl --vacuum-time=7d
 
 ## Disk And Memory Guardrails
 
-The monitor is intentionally stateless:
+The production monitor is intentionally stateless:
 
 - no database
 - no application log files
 - no durable cache by default
 - in-memory orderbooks only, pruned to the active watchset on every refresh
+
+Local `training` commands do use PostgreSQL, but that database is an offline
+research/build dependency and should not be part of the hosted monitor service.
 
 If memory grows unexpectedly, systemd should apply pressure at `MemoryHigh` and
 kill/restart the service before it can make the whole server unhealthy.

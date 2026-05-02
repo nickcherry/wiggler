@@ -10,3 +10,4 @@ pub mod runtime;
 pub mod telegram;
 pub mod trade_analysis;
 pub mod trading;
+pub mod training;

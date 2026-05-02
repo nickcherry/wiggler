@@ -20,6 +20,7 @@ price limits after a second pre-submit evaluation.
 - [Stack](./doc/STACK.md): runtime, dependencies, and external services.
 - [CLI](./doc/CLI.md): command contract and examples.
 - [Runtime Bundle](./doc/RUNTIME_BUNDLE.md): production probability-table loading and shadow decisions.
+- [Offline Training](./doc/TRAINING.md): local Postgres candle sync, VWAP, and runtime-bundle generation.
 - [Polymarket](./doc/POLYMARKET.md): discovery, CLOB websocket, RTDS price feed, and slot naming.
 - [Live Monitoring](./doc/LIVE_MONITORING.md): long-running monitor behavior and rollover model.
 - [Operations](./doc/OPERATIONS.md): systemd, journald retention, and runtime guardrails.
@@ -53,6 +54,9 @@ cargo run -- monitor
 
 # Short smoke test.
 cargo run -- monitor --max-runtime-seconds 15
+
+# Locally refresh the production runtime bundle from Coinbase/Binance candles.
+cargo run -- training refresh-runtime
 ```
 
 Useful overrides:
@@ -83,6 +87,7 @@ cargo run -- monitor --runtime-bundle-dir runtime/wiggler-prod-v1
 | `WIGGLER_ORDERBOOK_STALE_AFTER_MS` | `10000` | Max orderbook age for an eligible evaluation |
 | `WIGGLER_MIN_ABS_D_BPS` | `0.01` | Dust threshold around the market line |
 | `WIGGLER_TELEGRAM_PNL_INTERVAL_SECS` | `900` | Telegram summary lookback control; summaries check every 30s, `0` disables summaries |
+| `DATABASE_URL` | `postgres://localhost:5432/wiggler` | Offline training database; not used by `monitor` |
 | `POLYMARKET_GAMMA_BASE_URL` | `https://gamma-api.polymarket.com` | Market discovery |
 | `POLYMARKET_DATA_API_BASE_URL` | `https://data-api.polymarket.com` | Public profile/account PnL, win/loss, and trade-analysis snapshots |
 | `POLYMARKET_CLOB_API_URL` | `https://clob.polymarket.com` | CLOB trading/auth API |
@@ -101,8 +106,8 @@ cargo run -- monitor --runtime-bundle-dir runtime/wiggler-prod-v1
 | `TELEGRAM_BOT_TOKEN` | unset | Optional notification sender |
 | `TELEGRAM_CHAT_ID` | unset | Optional notification target |
 
-## Current Non-Goals
+## Production Non-Goals
 
-- No database.
 - No backtest engine.
-- No CEX candle ingestion; use `../wiggler-data` for historical candles.
+- No production database dependency; local Postgres is only for offline training.
+- No durable production candle cache; live Coinbase/Binance candles stay in memory.

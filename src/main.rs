@@ -1,7 +1,9 @@
 use anyhow::Result;
 use clap::Parser;
 
-use wiggler::{cli::Cli, config::RuntimeConfig, doctor, logging, monitor, trade_analysis};
+use wiggler::{
+    cli::Cli, config::RuntimeConfig, doctor, logging, monitor, trade_analysis, training,
+};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -10,11 +12,15 @@ async fn main() -> Result<()> {
     logging::init();
 
     let cli = Cli::parse();
-    let config = RuntimeConfig::from_env()?;
 
     match cli.command {
-        wiggler::cli::Command::Doctor(args) => doctor::run(args, config).await,
-        wiggler::cli::Command::AnalyzeTrades(args) => trade_analysis::run(args, config).await,
-        wiggler::cli::Command::Monitor(args) => monitor::run(args, config).await,
+        wiggler::cli::Command::Doctor(args) => doctor::run(args, RuntimeConfig::from_env()?).await,
+        wiggler::cli::Command::AnalyzeTrades(args) => {
+            trade_analysis::run(args, RuntimeConfig::from_env()?).await
+        }
+        wiggler::cli::Command::Training(args) => training::run(args.command).await,
+        wiggler::cli::Command::Monitor(args) => {
+            monitor::run(args, RuntimeConfig::from_env()?).await
+        }
     }
 }

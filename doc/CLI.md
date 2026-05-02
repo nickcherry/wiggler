@@ -78,6 +78,57 @@ Side effects:
 - Does not send Telegram messages.
 - Does not write files.
 
+### `training`
+
+Owns the local offline candle database and runtime-bundle generation pipeline.
+These commands are for local research/training only; the production `monitor`
+does not use Postgres.
+
+Common one-command flow:
+
+```bash
+cargo run -- training refresh-runtime
+cargo run -- training refresh-runtime --force-full-range
+cargo run -- training refresh-runtime --assets btc,eth --output-dir tmp/runtime-test
+```
+
+Stepwise flow:
+
+```bash
+cargo run -- training migrate
+cargo run -- training sync --since-days 365
+cargo run -- training vwap --since-days 365
+cargo run -- training build-runtime --since-days 365 --output-dir runtime/wiggler-prod-v1
+```
+
+Default behavior:
+
+- Database: `DATABASE_URL`, defaulting to `postgres://localhost:5432/wiggler`
+- Assets: `btc,eth,sol,xrp,doge`
+- Sources: Coinbase spot and Binance spot
+- Candle timeframe: `1m`
+- Runtime interval: `300` seconds, boundary-aligned
+- Runtime bundle output: `runtime/wiggler-prod-v1`
+- Fee rate: `0.072`
+- Minimum edge probability: `0.015`
+- Minimum runtime cell sample count: `500`
+
+Subcommands:
+
+- `training migrate`: create/update offline training tables.
+- `training reset --yes`: drop and recreate Wiggler-managed offline training tables.
+- `training sync`: sync Coinbase/Binance spot candles into Postgres.
+- `training vwap`: recompute cross-source VWAP rows from stored candles.
+- `training build-runtime`: generate the runtime probability-table bundle.
+- `training refresh-runtime`: run sync, VWAP, and runtime generation.
+
+Side effects:
+
+- `migrate`, `sync`, `vwap`, and `reset` write to local Postgres.
+- `sync` makes Coinbase and Binance public REST requests.
+- `build-runtime` and `refresh-runtime` write runtime JSON files under the output directory.
+- No `training` command opens Polymarket websockets or places orders.
+
 ### `monitor`
 
 Runs the live monitor and shadow evaluator.
@@ -144,4 +195,6 @@ auditing.
 
 ## Destructive Commands
 
-None.
+`training reset --yes` drops and recreates the local offline-training tables:
+`candles`, `candle_sync_runs`, and `candle_vwap`. It does not affect
+production server state unless you point `DATABASE_URL` at that database.

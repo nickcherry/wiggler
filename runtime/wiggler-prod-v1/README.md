@@ -14,13 +14,22 @@ It also intentionally does **not** encode asset-level quarantine/paper/live flag
 
 - `wiggler-runtime-manifest.json` — bundle index and asset list.
 - `<ASSET>_300s_boundary.runtime.json` — runtime probability grid for each asset.
-- `validation_summary.json` — compact OOS calibration/diagnostics summary.
-- `wiggler-runtime-config.schema.json` — lightweight JSON schema.
 - `CODEX_IMPLEMENTATION_INSTRUCTIONS.md` — implementation instructions for the production app.
+
+## Regeneration
+
+From the repo root:
+
+```bash
+cargo run -- training refresh-runtime --output-dir runtime/wiggler-prod-v1
+```
+
+This uses local PostgreSQL, Coinbase spot candles, and Binance spot candles.
+The production monitor only reads the generated JSON files.
 
 ## Important limits
 
-- Historical labels use `vwap_chainlink_proxy`, not actual historical Chainlink prints.
+- Historical labels use Coinbase/Binance `vwap_chainlink_proxy`, not actual historical Chainlink prints.
 - Basis risk versus Chainlink is unmeasured.
 - The 0–59s remaining window is not modeled.
 - Historical Polymarket order books are not included.
