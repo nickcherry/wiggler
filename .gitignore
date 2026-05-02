@@ -1,7 +1,6 @@
-/target/
-/tmp/
-/trade-records/
 /.claude/
+/.cache/
+/node_modules/
 
 .env
 .env.*
