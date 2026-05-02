@@ -59,3 +59,16 @@
 - Add dependencies reluctantly.
 - Prefer crates that reduce boundary risk or async plumbing complexity.
 - Do not add a database or service dependency without a concrete runtime need.
+
+## Scripting
+
+- The production binary is Rust. Anything that does not belong in the binary —
+  ad-hoc analytics, one-off data pulls, deploy/ops helpers, repo tooling —
+  is written in **TypeScript executed with Bun**. No Python, no shell
+  scripts beyond a few lines of glue.
+- Scripts live in `tools/`. Each script is a single `.ts` file with a `#!/usr/bin/env bun`
+  shebang and is executable. Invoke directly: `./tools/foo.ts`.
+- Use Bun's built-in `fetch`, `Bun.file`, and standard library; avoid pulling in
+  npm dependencies unless the task genuinely needs them.
+- Do not commit generated `node_modules/`, lockfiles, or `package.json` unless a
+  script genuinely requires a third-party package.
