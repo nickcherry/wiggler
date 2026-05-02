@@ -1,5 +1,40 @@
 # Operations
 
+## Production Host
+
+When this repo says "prod" or "production server", it means the remote host
+reached with the local `wiggler_prod` shell alias. That alias currently opens an
+interactive shell on `root@65.20.106.235` in `/opt/wiggler`:
+
+```bash
+wiggler_prod
+```
+
+For non-interactive checks, use SSH directly because `wiggler_prod` starts a
+login shell:
+
+```bash
+ssh root@65.20.106.235 'cd /opt/wiggler && systemctl status wiggler --no-pager'
+```
+
+To make sure the production monitor is not running and is not configured to
+start automatically:
+
+```bash
+ssh root@65.20.106.235 '
+systemctl disable --now wiggler
+systemctl reset-failed wiggler || true
+systemctl show wiggler -p ActiveState -p SubState -p UnitFileState -p ExecMainPID --no-pager
+ps -C wiggler -o pid,ppid,lstart,stat,comm,args
+systemctl list-timers --all --no-pager | grep -Ei "wiggler|polymarket" || true
+crontab -l 2>/dev/null | grep -Ei "wiggler|polymarket|/opt/wiggler" || true
+crontab -u wiggler -l 2>/dev/null | grep -Ei "wiggler|polymarket|/opt/wiggler" || true
+'
+```
+
+The expected stopped state is `ActiveState=inactive`, `SubState=dead`,
+`UnitFileState=disabled`, `ExecMainPID=0`, and no `ps -C wiggler` rows.
+
 ## Logging Policy
 
 `wiggler` does not write application log files. It emits structured JSON logs
