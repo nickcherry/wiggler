@@ -1141,7 +1141,7 @@ mod tests {
 
     #[test]
     fn remaining_buckets_sort_from_largest_to_smallest_then_unknowns() {
-        let mut buckets = vec![
+        let mut buckets = [
             RemainingBucket::from_seconds(Some(30), 300),
             RemainingBucket::from_seconds(None, 300),
             RemainingBucket::from_seconds(Some(210), 300),

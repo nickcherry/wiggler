@@ -295,7 +295,7 @@ fn build_series_arrays(closes: &[ClosePoint], vol_lookback_min: usize) -> Series
 
     let min_samples = (vol_lookback_min / 2).max(5);
     let mut recent_vol_at = vec![None; total_minutes];
-    for i in 0..total_minutes {
+    for (i, recent_vol) in recent_vol_at.iter_mut().enumerate().take(total_minutes) {
         let Some(start) = i.checked_sub(vol_lookback_min) else {
             continue;
         };
@@ -306,7 +306,7 @@ fn build_series_arrays(closes: &[ClosePoint], vol_lookback_min: usize) -> Series
             n += 1;
         }
         if n >= min_samples {
-            recent_vol_at[i] = Some((sum_sq / n as f64).sqrt());
+            *recent_vol = Some((sum_sq / n as f64).sqrt());
         }
     }
 

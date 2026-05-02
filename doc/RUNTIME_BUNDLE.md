@@ -59,6 +59,7 @@ Every `WIGGLER_EVALUATION_INTERVAL_MS`, for each active 5-minute market, the mon
 - remaining seconds and the next configured remaining-time bucket
 - distance from line in bps
 - 30-minute realized vol from in-memory one-minute Coinbase/Binance OHLCV candles
+- 1-minute normalized momentum from the same candle store
 - leading side and corresponding Up/Down token
 - current 5-minute price path from the same live price source
 - executable ask-level edge using `p_win_lower`
@@ -66,11 +67,12 @@ Every `WIGGLER_EVALUATION_INTERVAL_MS`, for each active 5-minute market, the mon
 The evaluator skips when data is missing or stale, the market is outside the
 regular 60-240 second trading window, the price is too close to the line, no
 runtime cell matches, the last-60-second price path is retracing against the
-leading side, max path lead is unavailable, or there is no positive-EV
-executable ask depth. As an explicit live experiment, 30-59 seconds remaining
-maps to the runtime's 60-second bucket only when stricter final-window gates
-pass: at least 10 bps from the line, an additional 0.01 required probability
-edge, and a 10 USDC effective order cap.
+leading side, the momentum overlay strongly favors the opposite side, max path
+lead is unavailable, or there is no positive-EV executable ask depth. As an
+explicit live experiment, 30-59 seconds remaining maps to the runtime's
+60-second bucket only when stricter final-window gates pass: at least 10 bps
+from the line, an additional 0.01 required probability edge, and a 10 USDC
+effective order cap.
 
 The base executable-edge gate is `risk_defaults.min_edge_probability`. If the
 current absolute lead has decayed below 75% of the max absolute lead observed
@@ -118,7 +120,8 @@ vol = sqrt(mean(r_i_bps^2))
 ```
 
 The monitor requires a full lookback window of minute samples. It backfills
-separate in-memory Coinbase and Binance 1-minute OHLCV candle stores and keeps
+separate in-memory Coinbase and Binance 1-minute OHLCV candle stores for the
+larger of the runtime vol lookback and the momentum overlay lookback, then keeps
 those candles fresh with Binance websocket updates plus REST reconciliation. Vol
 is computed per exchange and averaged when both sources are available; if one
 source is unavailable, the monitor uses the available source. Fresh processes can
@@ -126,6 +129,18 @@ still log `skip_reason="insufficient_price_history"` if both exchange candle
 feeds are unavailable or gapped. Path-state also needs a recent price sample from
 approximately 60 seconds ago in the current market, so early or gapped path data
 can log `skip_reason="insufficient_path_history"`.
+
+The production momentum overlay uses the same 30-minute vol denominator:
+
+```text
+momentum = 10_000 * ln(close_t / close_t-1) / vol_30m
+```
+
+The last two closed 1-minute candles are computed per exchange, then averaged
+across available sources. A value of `>= 2.0` permits only Up-leading trades; a
+value of `<= -2.0` permits only Down-leading trades. Values inside that band, or
+missing momentum, do not change the base grid decision. The research note is in
+[indicator-overlay-sweep.md](./research/indicator-overlay-sweep.md).
 
 The offline training bundle uses the same two spot sources but fuses them into a
 local VWAP label source before grid generation.

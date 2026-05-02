@@ -8,7 +8,8 @@
 4. Subscribe to every discovered `Up` and `Down` CLOB token.
 5. Stream each whitelisted asset's Chainlink price from RTDS.
 6. Maintain in-memory orderbooks per token.
-7. Maintain bounded in-memory Coinbase/Binance OHLCV candle stores for runtime vol buckets.
+7. Maintain bounded in-memory Coinbase/Binance OHLCV candle stores for runtime
+   vol buckets and the momentum overlay.
 8. Maintain a per-market in-memory price path from the same RTDS price source.
 9. Load the production runtime probability-table bundle.
 10. Refresh the watchset every 10 seconds.
@@ -55,6 +56,8 @@ Shadow decision code checks freshness before logging an eligible decision:
 - latest Chainlink tick age
 - orderbook update age
 - current slot line availability
+- momentum side does not conflict with the current leading side when the
+  1-minute normalized momentum overlay is active
 - market still active/open
 - last-60-second path is not retracing against the current leading side
 - current lead has not decayed enough to fail the adjusted edge gate
@@ -81,12 +84,28 @@ run with `RUST_LOG=wiggler=info,info`.
 
 When `WIGGLER_LOG_EVALUATIONS=true`, evaluation logs include `mode`,
 `decision`, and `skip_reason`. Startup backfills separate in-memory 1-minute
-Coinbase and Binance OHLCV candle stores for the runtime vol lookback, then keeps
-them fresh with Binance kline websocket updates plus REST reconciliation. Vol is
-computed per exchange and averaged when both sources are available; if one
-source is unavailable, the monitor uses the available source. The monitor can
-still log `insufficient_price_history` if both exchange candle feeds are
-unavailable or gapped; current-market path gaps can also produce
+Coinbase and Binance OHLCV candle stores for the larger of the runtime vol
+lookback and the momentum overlay lookback, then
+keeps them fresh with Binance kline websocket updates plus REST reconciliation.
+Vol is computed per exchange and averaged when both sources are available; if
+one source is unavailable, the monitor uses the available source. The monitor
+also computes a 1-minute momentum overlay from those same candles:
+
+```text
+momentum = 10_000 * ln(close_t / close_t-1) / vol_30m
+```
+
+When averaged momentum is at least `2.0`, the monitor blocks Down entries with
+`skip_reason="momentum_side_conflict"`. When it is at most `-2.0`, the monitor
+blocks Up entries. Missing or weaker momentum does not block anything.
+Evaluation logs include `momentum_1m_vol_normalized`,
+`binance_momentum_1m_vol_normalized`,
+`coinbase_momentum_1m_vol_normalized`, `momentum_source_count`,
+`momentum_overlay_side`, `momentum_overlay_threshold`, and
+`momentum_overlay_vol_lookback_min`.
+
+The monitor can still log `insufficient_price_history` if both exchange candle
+feeds are unavailable or gapped; current-market path gaps can also produce
 `insufficient_path_history`. Experimental final-window evaluations include
 `final_window_experimental`, `final_window_min_abs_d_bps`,
 `final_window_extra_edge_probability`, and `effective_max_order_usdc` fields.

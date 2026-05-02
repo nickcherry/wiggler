@@ -63,7 +63,12 @@ pub async fn run(args: MonitorArgs, config: RuntimeConfig) -> Result<()> {
         )
     })?;
     let trade_fee_rates = TradeFeeRates::from_runtime_bundle(&runtime_bundle, &assets)?;
-    let candle_lookback_min = max_vol_lookback_min(&runtime_bundle, &assets);
+    let runtime_vol_lookback_min = max_vol_lookback_min(&runtime_bundle, &assets);
+    let candle_lookback_min = if runtime_vol_lookback_min > 0 {
+        runtime_vol_lookback_min.max(MOMENTUM_OVERLAY_VOL_LOOKBACK_MIN)
+    } else {
+        0
+    };
     let telegram = TelegramClient::from_config(&config);
     let settlement_user = if telegram.is_configured() && !config.telegram_pnl_interval.is_zero() {
         match trade_analysis::resolve_config_user_address(&config) {
@@ -186,6 +191,8 @@ pub async fn run(args: MonitorArgs, config: RuntimeConfig) -> Result<()> {
         price_feed = %args.price_feed,
         evaluation_interval_ms = duration_ms(config.evaluation_interval),
         candle_lookback_min,
+        runtime_vol_lookback_min,
+        momentum_overlay_vol_lookback_min = MOMENTUM_OVERLAY_VOL_LOOKBACK_MIN,
         candle_rest_sync_interval_ms = duration_ms(config.candle_rest_sync_interval),
         log_evaluations = config.log_evaluations,
         "monitor started"
@@ -229,19 +236,21 @@ pub async fn run(args: MonitorArgs, config: RuntimeConfig) -> Result<()> {
                 state.log_status();
             }
             _ = optional_interval_tick(&mut settlement_interval) => {
-                state.send_live_settlement_summaries(
-                    &telegram,
-                    duration,
-                    config.telegram_pnl_interval,
-                    &data_api,
-                    &gamma,
-                    settlement_user
-                        .as_ref()
-                        .cloned()
-                        .expect("settlement interval requires user address"),
-                    &assets,
-                    &trade_fee_rates,
-                ).await;
+                state
+                    .send_live_settlement_summaries(LiveSettlementSummaryContext {
+                        telegram: &telegram,
+                        duration,
+                        pnl_interval: config.telegram_pnl_interval,
+                        data_api: &data_api,
+                        gamma: &gamma,
+                        user: settlement_user
+                            .as_ref()
+                            .cloned()
+                            .expect("settlement interval requires user address"),
+                        assets: &assets,
+                        fee_rates: &trade_fee_rates,
+                    })
+                    .await;
             }
             _ = evaluation_interval.tick() => {
                 state.evaluate_and_maybe_execute(
@@ -449,6 +458,17 @@ struct SlotLine {
     observed_at: DateTime<Utc>,
 }
 
+struct LiveSettlementSummaryContext<'a> {
+    telegram: &'a TelegramClient,
+    duration: TimeDelta,
+    pnl_interval: Duration,
+    data_api: &'a DataApiClient,
+    gamma: &'a GammaClient,
+    user: Address,
+    assets: &'a [Asset],
+    fee_rates: &'a TradeFeeRates,
+}
+
 #[derive(Default)]
 struct MonitorState {
     markets_by_slug: HashMap<String, MonitoredMarket>,
@@ -479,25 +499,15 @@ impl MonitorState {
         }
     }
 
-    async fn send_live_settlement_summaries(
-        &mut self,
-        telegram: &TelegramClient,
-        duration: TimeDelta,
-        pnl_interval: Duration,
-        data_api: &DataApiClient,
-        gamma: &GammaClient,
-        user: Address,
-        assets: &[Asset],
-        fee_rates: &TradeFeeRates,
-    ) {
-        if !telegram.is_configured() {
+    async fn send_live_settlement_summaries(&mut self, context: LiveSettlementSummaryContext<'_>) {
+        if !context.telegram.is_configured() {
             return;
         }
 
         let candidate_slots = live_settlement_candidate_slots(
             Utc::now(),
-            duration,
-            live_settlement_lookback_slots(duration, pnl_interval),
+            context.duration,
+            live_settlement_lookback_slots(context.duration, context.pnl_interval),
         );
         let unsent_slots = candidate_slots
             .into_iter()
@@ -513,13 +523,13 @@ impl MonitorState {
         );
 
         let api_rows = match trade_analysis::fetch_api_trade_pnl_rows(
-            data_api,
-            gamma,
-            user,
-            assets,
-            duration,
+            context.data_api,
+            context.gamma,
+            context.user,
+            context.assets,
+            context.duration,
             TELEGRAM_SETTLEMENT_MAX_TRADES,
-            fee_rates,
+            context.fee_rates,
         )
         .await
         {
@@ -581,7 +591,7 @@ impl MonitorState {
 
         for (slot_start, slot_rows) in summaries {
             let message = live_settlement_summary_text(&slot_rows, all_time_totals);
-            match telegram.send_message(&message).await {
+            match context.telegram.send_message(&message).await {
                 Ok(()) => {
                     self.sent_live_settlement_slots.insert(slot_start);
                     info!(
@@ -997,6 +1007,23 @@ impl MonitorState {
         let binance_vol_bps_per_sqrt_min = exchange_vol.and_then(|vol| vol.binance);
         let coinbase_vol_bps_per_sqrt_min = exchange_vol.and_then(|vol| vol.coinbase);
         let vol_bps_per_sqrt_min = exchange_vol.and_then(|vol| vol.average());
+        let exchange_momentum = runtime.map(|_| {
+            self.candle_store.normalized_momentum_1m(
+                market.asset,
+                now,
+                MOMENTUM_OVERLAY_VOL_LOOKBACK_MIN,
+            )
+        });
+        let binance_momentum_1m_vol_normalized =
+            exchange_momentum.and_then(|momentum| momentum.binance);
+        let coinbase_momentum_1m_vol_normalized =
+            exchange_momentum.and_then(|momentum| momentum.coinbase);
+        let momentum_1m_vol_normalized = exchange_momentum.and_then(|momentum| momentum.average());
+        let momentum_source_count = exchange_momentum
+            .map(|momentum| momentum.source_count())
+            .unwrap_or_default();
+        let momentum_overlay_side =
+            momentum_1m_vol_normalized.and_then(momentum_overlay_side_for_value);
         let vol_bin = runtime
             .zip(vol_bps_per_sqrt_min)
             .map(|(runtime, vol)| runtime.vol_bin(vol));
@@ -1057,6 +1084,7 @@ impl MonitorState {
                 d_bps,
                 abs_d_bps_f64,
                 side_leading,
+                momentum_overlay_side,
                 token,
                 book,
                 book_age_ms,
@@ -1112,6 +1140,13 @@ impl MonitorState {
                 binance_vol_bps_per_sqrt_min = ?binance_vol_bps_per_sqrt_min,
                 coinbase_vol_bps_per_sqrt_min = ?coinbase_vol_bps_per_sqrt_min,
                 vol_source_count = exchange_vol.map(|vol| vol.source_count()).unwrap_or_default(),
+                momentum_1m_vol_normalized = ?momentum_1m_vol_normalized,
+                binance_momentum_1m_vol_normalized = ?binance_momentum_1m_vol_normalized,
+                coinbase_momentum_1m_vol_normalized = ?coinbase_momentum_1m_vol_normalized,
+                momentum_source_count,
+                momentum_overlay_side = ?momentum_overlay_side.map(SideLeading::as_str),
+                momentum_overlay_threshold = MOMENTUM_OVERLAY_THRESHOLD_VOL_UNITS,
+                momentum_overlay_vol_lookback_min = MOMENTUM_OVERLAY_VOL_LOOKBACK_MIN,
                 vol_bin = ?vol_bin.map(|bin| bin.as_str()),
                 matched_remaining_sec_bucket = ?cell.map(|cell| cell.remaining_sec),
                 matched_vol_bin = ?cell.map(|cell| cell.vol_bin.as_str()),
@@ -1216,6 +1251,13 @@ impl MonitorState {
             estimated_profit_usdc,
             remaining_sec_bucket: remaining_bucket,
             vol_bps_per_sqrt_min,
+            momentum_1m_vol_normalized,
+            binance_momentum_1m_vol_normalized,
+            coinbase_momentum_1m_vol_normalized,
+            momentum_source_count,
+            momentum_overlay_side: momentum_overlay_side.map(|side| side.as_str().to_string()),
+            momentum_overlay_threshold: MOMENTUM_OVERLAY_THRESHOLD_VOL_UNITS,
+            momentum_overlay_vol_lookback_min: MOMENTUM_OVERLAY_VOL_LOOKBACK_MIN,
             vol_bin: vol_bin.map(|bin| bin.as_str().to_string()),
             matched_remaining_sec_bucket: cell.map(|cell| cell.remaining_sec),
             matched_abs_d_bps_min: cell.map(|cell| cell.abs_d_bps_min),
@@ -1503,6 +1545,7 @@ impl MonitorState {
         d_bps: Option<Decimal>,
         abs_d_bps: Option<f64>,
         side_leading: Option<SideLeading>,
+        momentum_overlay_side: Option<SideLeading>,
         token: Option<&OutcomeToken>,
         book: Option<&TokenBook>,
         book_age_ms: Option<i64>,
@@ -1553,6 +1596,12 @@ impl MonitorState {
             && abs_d_bps.is_none_or(|abs_d_bps| abs_d_bps < EXPERIMENTAL_FINAL_WINDOW_MIN_ABS_D_BPS)
         {
             return Some("final_window_distance_below_min");
+        }
+        if side_leading
+            .zip(momentum_overlay_side)
+            .is_some_and(|(side_leading, momentum_side)| side_leading != momentum_side)
+        {
+            return Some("momentum_side_conflict");
         }
         if market_resolved {
             return Some("market_closed_or_resolved");
@@ -1947,6 +1996,15 @@ fn trade_entry_record_json(
             "training_input_hash": prepared.training_input_hash.as_deref(),
             "training_label_source_kind": prepared.training_label_source_kind.as_deref(),
         },
+        "momentum": {
+            "momentum_1m_vol_normalized": prepared.momentum_1m_vol_normalized,
+            "binance_momentum_1m_vol_normalized": prepared.binance_momentum_1m_vol_normalized,
+            "coinbase_momentum_1m_vol_normalized": prepared.coinbase_momentum_1m_vol_normalized,
+            "source_count": prepared.momentum_source_count,
+            "overlay_side": prepared.momentum_overlay_side.as_deref(),
+            "overlay_threshold": prepared.momentum_overlay_threshold,
+            "vol_lookback_min": prepared.momentum_overlay_vol_lookback_min,
+        },
         "path": {
             "return_last_60s_bps": prepared.return_last_60s_bps,
             "retracing_60s": prepared.retracing_60s,
@@ -2018,6 +2076,13 @@ struct PreparedTrade {
     estimated_profit_usdc: Option<f64>,
     remaining_sec_bucket: Option<u32>,
     vol_bps_per_sqrt_min: Option<f64>,
+    momentum_1m_vol_normalized: Option<f64>,
+    binance_momentum_1m_vol_normalized: Option<f64>,
+    coinbase_momentum_1m_vol_normalized: Option<f64>,
+    momentum_source_count: u8,
+    momentum_overlay_side: Option<String>,
+    momentum_overlay_threshold: f64,
+    momentum_overlay_vol_lookback_min: u32,
     vol_bin: Option<String>,
     matched_remaining_sec_bucket: Option<u32>,
     matched_abs_d_bps_min: Option<f64>,
@@ -2303,6 +2368,20 @@ fn side_for_distance(value: Decimal) -> Option<SideLeading> {
     }
 }
 
+fn momentum_overlay_side_for_value(value: f64) -> Option<SideLeading> {
+    if !value.is_finite() {
+        return None;
+    }
+
+    if value >= MOMENTUM_OVERLAY_THRESHOLD_VOL_UNITS {
+        Some(SideLeading::UpLeading)
+    } else if value <= -MOMENTUM_OVERLAY_THRESHOLD_VOL_UNITS {
+        Some(SideLeading::DownLeading)
+    } else {
+        None
+    }
+}
+
 fn outcome_for_side(side: SideLeading) -> Outcome {
     match side {
         SideLeading::UpLeading => Outcome::Up,
@@ -2325,6 +2404,8 @@ const LEAD_DECAY_PENALTY_THRESHOLD: f64 = 0.75;
 const LEAD_DECAY_EDGE_PENALTY: f64 = 0.005;
 const RETRYABLE_NO_FILL_COOLDOWN_SECONDS: i64 = 10;
 const LIVE_SETTLEMENT_CHECK_INTERVAL_SECONDS: u64 = 30;
+const MOMENTUM_OVERLAY_VOL_LOOKBACK_MIN: u32 = 30;
+const MOMENTUM_OVERLAY_THRESHOLD_VOL_UNITS: f64 = 2.0;
 // Monitor-only final-window experiment; the runtime bundle still has no <60s cells.
 const EXPERIMENTAL_MIN_REMAINING_SEC_TO_TRADE: i64 = 30;
 const EXPERIMENTAL_FINAL_WINDOW_MIN_ABS_D_BPS: f64 = 10.0;
@@ -2568,16 +2649,17 @@ mod tests {
     };
 
     use super::{
-        ClosedPositionPnlRow, LIVE_SETTLEMENT_CHECK_INTERVAL_SECONDS, MarketPricePath,
+        ClosedPositionPnlRow, LIVE_SETTLEMENT_CHECK_INTERVAL_SECONDS,
+        MOMENTUM_OVERLAY_THRESHOLD_VOL_UNITS, MOMENTUM_OVERLAY_VOL_LOOKBACK_MIN, MarketPricePath,
         MonitorState, PathState, PreparedTrade, SlotLine, adjusted_required_edge_probability,
         asset_ids_for_markets, clean_failure_reason, closed_position_row_from_api_trade,
         closed_position_slot_start, closed_position_totals, distance_bps, effective_max_order_usdc,
         experimental_final_window_applies, format_market_price, format_signed_usdc, format_usdc,
         is_retryable_no_fill_error, live_entry_filled_text, live_entry_rejected_text,
         live_settlement_candidate_slots, live_settlement_lookback_slots,
-        live_settlement_summary_text, monitor_remaining_bucket, pre_submit_matches_initial,
-        required_edge_probability, slot_start_from_market_slug, summarize_asks,
-        telegram_settlement_interval_duration,
+        live_settlement_summary_text, momentum_overlay_side_for_value, monitor_remaining_bucket,
+        pre_submit_matches_initial, required_edge_probability, slot_start_from_market_slug,
+        summarize_asks, telegram_settlement_interval_duration,
     };
 
     #[test]
@@ -2812,22 +2894,23 @@ mod tests {
                 Asset::Bnb,
                 None,
                 120,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
+                None, // line
+                None, // latest_tick
+                None, // price_age_ms
+                None, // price_exchange_age_ms
+                None, // d_bps
+                None, // abs_d_bps
+                None, // side_leading
+                None, // momentum_overlay_side
+                None, // token
+                None, // book
+                None, // book_age_ms
+                None, // vol_bps_per_sqrt_min
+                None, // cell
+                None, // path_state
+                None, // required_edge
+                None, // best_ask
+                None, // edge_summary
                 false,
                 false,
                 &config,
@@ -2839,22 +2922,23 @@ mod tests {
                 Asset::Btc,
                 None,
                 120,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
+                None, // line
+                None, // latest_tick
+                None, // price_age_ms
+                None, // price_exchange_age_ms
+                None, // d_bps
+                None, // abs_d_bps
+                None, // side_leading
+                None, // momentum_overlay_side
+                None, // token
+                None, // book
+                None, // book_age_ms
+                None, // vol_bps_per_sqrt_min
+                None, // cell
+                None, // path_state
+                None, // required_edge
+                None, // best_ask
+                None, // edge_summary
                 false,
                 false,
                 &config,
@@ -2925,6 +3009,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
                 false,
                 false,
                 &config,
@@ -2964,11 +3049,66 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
                 false,
                 false,
                 &config,
             ),
             Some("final_window_distance_below_min")
+        );
+    }
+
+    #[test]
+    fn momentum_overlay_side_uses_global_threshold() {
+        assert_eq!(momentum_overlay_side_for_value(1.999), None);
+        assert_eq!(
+            momentum_overlay_side_for_value(2.0),
+            Some(SideLeading::UpLeading)
+        );
+        assert_eq!(
+            momentum_overlay_side_for_value(-2.0),
+            Some(SideLeading::DownLeading)
+        );
+        assert_eq!(momentum_overlay_side_for_value(f64::NAN), None);
+    }
+
+    #[test]
+    fn skip_reason_blocks_side_that_conflicts_with_momentum_overlay() {
+        let state = MonitorState::default();
+        let config = test_config(false);
+        let (runtime, _) = btc_runtime_and_cell();
+        let now = Utc::now();
+
+        assert_eq!(
+            state.trade_skip_reason(
+                Asset::Btc,
+                Some(runtime),
+                120,
+                Some(&SlotLine {
+                    price: Decimal::new(100, 0),
+                    observed_at: now,
+                }),
+                Some(&price_tick(Asset::Btc, now, "101")),
+                Some(0),
+                Some(0),
+                Some(Decimal::new(100, 0)),
+                Some(100.0),
+                Some(SideLeading::UpLeading),
+                Some(SideLeading::DownLeading),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                false,
+                false,
+                &config,
+            ),
+            Some("momentum_side_conflict")
         );
     }
 
@@ -3009,6 +3149,7 @@ mod tests {
                 Some(Decimal::new(100, 0)),
                 Some(100.0),
                 Some(SideLeading::UpLeading),
+                None,
                 Some(&token),
                 Some(&book),
                 Some(0),
@@ -3039,6 +3180,7 @@ mod tests {
                 Some(Decimal::new(100, 0)),
                 Some(100.0),
                 Some(SideLeading::UpLeading),
+                None,
                 Some(&token),
                 Some(&book),
                 Some(0),
@@ -3088,6 +3230,7 @@ mod tests {
                 Some(Decimal::new(100, 0)),
                 Some(100.0),
                 Some(SideLeading::UpLeading),
+                None,
                 Some(&token),
                 Some(&book),
                 Some(0),
@@ -3118,6 +3261,7 @@ mod tests {
                 Some(Decimal::new(100, 0)),
                 Some(100.0),
                 Some(SideLeading::UpLeading),
+                None,
                 Some(&token),
                 Some(&book),
                 Some(10_001),
@@ -3496,6 +3640,13 @@ mod tests {
             estimated_profit_usdc: Some(2.5),
             remaining_sec_bucket: Some(120),
             vol_bps_per_sqrt_min: Some(1.5),
+            momentum_1m_vol_normalized: Some(2.1),
+            binance_momentum_1m_vol_normalized: Some(2.0),
+            coinbase_momentum_1m_vol_normalized: Some(2.2),
+            momentum_source_count: 2,
+            momentum_overlay_side: Some(SideLeading::UpLeading.as_str().to_string()),
+            momentum_overlay_threshold: MOMENTUM_OVERLAY_THRESHOLD_VOL_UNITS,
+            momentum_overlay_vol_lookback_min: MOMENTUM_OVERLAY_VOL_LOOKBACK_MIN,
             vol_bin: Some("low".to_string()),
             matched_remaining_sec_bucket: Some(120),
             matched_abs_d_bps_min: Some(0.0),
