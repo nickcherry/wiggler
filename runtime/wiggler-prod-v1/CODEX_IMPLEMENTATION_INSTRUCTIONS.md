@@ -207,9 +207,9 @@ Evaluate the current best bid as a maker entry. The entry cost is the bid price
 with zero maker fee.
 
 Use the best bid as the maker limit price only. Do not size from best-bid
-depth; size from the configured notional caps divided by the selected limit
-price. Truncate share size to Polymarket's two-decimal lot precision before
-signing.
+depth; choose a USDC notional inside the configured min/max sizing range, then
+derive shares from the selected limit price. Truncate share size to
+Polymarket's two-decimal lot precision before signing.
 
 ## Order behavior
 

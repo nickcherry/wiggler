@@ -1066,14 +1066,20 @@ impl MonitorState {
                 adjusted_required_edge_probability(runtime, state, final_window_experimental)
             });
         let order_cap_usdc = effective_max_order_usdc(config, final_window_experimental);
+        let target_order_notional_usdc = runtime.and_then(|runtime| {
+            target_order_notional_usdc(runtime, config, final_window_experimental)
+        });
         let maker_limit_price = best_bid.as_ref().map(|level| level.price);
         let edge_summary = runtime
             .zip(cell)
             .zip(maker_limit_price)
             .zip(required_edge)
-            .and_then(|(((runtime, cell), limit_price), required_edge)| {
-                summarize_maker_limit(runtime, cell, limit_price, required_edge, order_cap_usdc)
-            });
+            .zip(target_order_notional_usdc)
+            .and_then(
+                |((((_, cell), limit_price), required_edge), target_notional)| {
+                    summarize_maker_limit(cell, limit_price, required_edge, target_notional)
+                },
+            );
         let already_positioned = self.positioned_markets.contains(&market.condition_id)
             || self.pending_markets.contains(&market.condition_id);
         let market_resolved = self.resolved_markets.contains(&market.condition_id);
@@ -1178,6 +1184,7 @@ impl MonitorState {
                 maker_order_price = ?edge_summary.as_ref().and_then(|summary| summary.order_price).map(|price| price.to_string()),
                 maker_order_size_shares = ?edge_summary.as_ref().and_then(|summary| summary.order_size_shares).map(|size| size.to_string()),
                 maker_order_notional_usdc = ?edge_summary.as_ref().and_then(|summary| summary.order_notional_usdc).map(|amount| amount.to_string()),
+                target_order_notional_usdc = ?target_order_notional_usdc.map(|amount| amount.to_string()),
                 weighted_avg_price = ?edge_summary.as_ref().and_then(|summary| summary.weighted_avg_price),
                 all_in_cost = ?edge_summary.as_ref().and_then(|summary| summary.best_all_in_cost),
                 edge = ?edge_summary.as_ref().and_then(|summary| summary.best_edge),
@@ -1213,6 +1220,7 @@ impl MonitorState {
         let line = line?;
         let latest_tick = latest_tick?;
         let edge_summary = edge_summary.as_ref()?;
+        let target_order_notional_usdc = target_order_notional_usdc?;
         let order_price = edge_summary.order_price?;
         let order_size_shares = edge_summary.order_size_shares?;
         let amount_usdc_decimal = edge_summary.order_notional_usdc?;
@@ -1251,6 +1259,7 @@ impl MonitorState {
             remaining_sec,
             final_window_experimental,
             order_cap_usdc,
+            target_order_notional_usdc: target_order_notional_usdc.to_f64()?,
             d_bps: d_bps.map(|value| value.round_dp(6).to_string()),
             p_win: cell.map(|cell| cell.p_win),
             p_win_lower: cell.map(|cell| cell.p_win_lower),
@@ -1682,6 +1691,9 @@ impl MonitorState {
         {
             return Some("order_book_crossed_or_locked");
         }
+        if target_order_notional_usdc(runtime, config, final_window_experimental).is_none() {
+            return Some("order_dollar_range_unavailable");
+        }
         let Some(edge_summary) = edge_summary else {
             return Some("missing_maker_order_summary");
         };
@@ -1700,7 +1712,7 @@ impl MonitorState {
             .and_then(|notional| notional.to_f64())
             .is_none_or(|notional| notional < config.min_order_usdc)
         {
-            return Some("order_size_below_min");
+            return Some("order_notional_below_min_after_lot_truncation");
         }
 
         None
@@ -2004,6 +2016,7 @@ fn trade_entry_record_json(
             "amount_usdc": prepared.amount_usdc,
             "size_shares": prepared.size_shares,
             "order_cap_usdc": prepared.order_cap_usdc,
+            "target_order_notional_usdc": prepared.target_order_notional_usdc,
             "order_price": prepared.order_price,
             "expires_at": prepared.expires_at,
             "expected_fill_price": prepared.expected_fill_price,
@@ -2113,6 +2126,7 @@ struct PreparedTrade {
     remaining_sec: i64,
     final_window_experimental: bool,
     order_cap_usdc: f64,
+    target_order_notional_usdc: f64,
     d_bps: Option<String>,
     p_win: Option<f64>,
     p_win_lower: Option<f64>,
@@ -2518,6 +2532,28 @@ fn effective_max_order_usdc(config: &RuntimeConfig, final_window_experimental: b
     }
 }
 
+fn target_order_notional_usdc(
+    runtime: &AssetRuntime,
+    config: &RuntimeConfig,
+    final_window_experimental: bool,
+) -> Option<Decimal> {
+    let upper_bound = runtime
+        .max_position_usdc()
+        .min(effective_max_order_usdc(config, final_window_experimental));
+    if upper_bound < config.min_order_usdc {
+        return None;
+    }
+
+    let target = Decimal::from_f64(upper_bound)?
+        .trunc_with_scale(ORDER_NOTIONAL_SCALE)
+        .normalize();
+    if target <= Decimal::ZERO || target.to_f64()? < config.min_order_usdc {
+        return None;
+    }
+
+    Some(target)
+}
+
 fn maker_order_expires_at(slot_end: DateTime<Utc>) -> DateTime<Utc> {
     slot_end + TimeDelta::seconds(60)
 }
@@ -2656,11 +2692,10 @@ struct EdgeSummary {
 }
 
 fn summarize_maker_limit(
-    runtime: &AssetRuntime,
     cell: &RuntimeCell,
     limit_price: Decimal,
     required_edge: f64,
-    order_cap_usdc: f64,
+    target_notional: Decimal,
 ) -> Option<EdgeSummary> {
     let mut summary = EdgeSummary::default();
 
@@ -2677,7 +2712,6 @@ fn summarize_maker_limit(
         return Some(summary);
     }
 
-    let target_notional = Decimal::from_f64(runtime.max_position_usdc().min(order_cap_usdc))?;
     let size_shares = (target_notional / price)
         .trunc_with_scale(LIVE_ORDER_SIZE_SCALE)
         .normalize();
@@ -2730,7 +2764,7 @@ mod tests {
         live_settlement_candidate_slots, live_settlement_lookback_slots,
         live_settlement_summary_text, momentum_overlay_side_for_value, monitor_remaining_bucket,
         pre_submit_matches_initial, required_edge_probability, slot_start_from_market_slug,
-        summarize_maker_limit, telegram_settlement_interval_duration,
+        summarize_maker_limit, target_order_notional_usdc, telegram_settlement_interval_duration,
     };
 
     #[test]
@@ -2822,11 +2856,10 @@ mod tests {
             .unwrap();
 
         let summary = summarize_maker_limit(
-            runtime,
             cell,
             Decimal::new(80, 2),
             runtime.min_edge_probability(),
-            25.0,
+            Decimal::new(25, 0),
         )
         .unwrap();
 
@@ -2846,13 +2879,12 @@ mod tests {
         assert!(cell.p_win > cell.p_win_lower);
 
         let summary = summarize_maker_limit(
-            runtime,
             cell,
             Decimal::from_f64(cell.p_win - runtime.min_edge_probability())
                 .unwrap()
                 .trunc_with_scale(4),
             runtime.min_edge_probability(),
-            25.0,
+            Decimal::new(25, 0),
         )
         .unwrap();
 
@@ -2866,11 +2898,10 @@ mod tests {
     fn maker_limit_sizes_from_notional_cap() {
         let (runtime, cell) = btc_runtime_and_cell();
         let summary = summarize_maker_limit(
-            runtime,
             cell,
             Decimal::new(80, 2),
             runtime.min_edge_probability(),
-            10.0,
+            Decimal::new(10, 0),
         )
         .unwrap();
 
@@ -2883,16 +2914,15 @@ mod tests {
     fn maker_limit_truncates_size_to_polymarket_lot_precision() {
         let (runtime, cell) = btc_runtime_and_cell();
         let summary = summarize_maker_limit(
-            runtime,
             cell,
-            Decimal::new(19, 2),
+            Decimal::new(36, 2),
             runtime.min_edge_probability(),
-            25.0,
+            Decimal::new(50, 0),
         )
         .unwrap();
 
-        assert_eq!(summary.order_size_shares, Some(Decimal::new(13157, 2)));
-        assert_eq!(summary.order_notional_usdc, Some(Decimal::new(249983, 4)));
+        assert_eq!(summary.order_size_shares, Some(Decimal::new(13888, 2)));
+        assert_eq!(summary.order_notional_usdc, Some(Decimal::new(499968, 4)));
     }
 
     #[test]
@@ -3052,6 +3082,29 @@ mod tests {
             effective_max_order_usdc(&config, false),
             config.max_order_usdc
         );
+    }
+
+    #[test]
+    fn target_order_notional_uses_configured_dollar_max() {
+        let (runtime, _) = btc_runtime_and_cell();
+        let mut config = test_config(false);
+        config.min_order_usdc = 25.0;
+        config.max_order_usdc = 50.0;
+
+        assert_eq!(
+            target_order_notional_usdc(runtime, &config, false),
+            Some(Decimal::new(50, 0))
+        );
+    }
+
+    #[test]
+    fn target_order_notional_rejects_effective_max_below_dollar_min() {
+        let (runtime, _) = btc_runtime_and_cell();
+        let mut config = test_config(false);
+        config.min_order_usdc = 25.0;
+        config.max_order_usdc = 50.0;
+
+        assert_eq!(target_order_notional_usdc(runtime, &config, true), None);
     }
 
     #[test]
@@ -3708,6 +3761,7 @@ mod tests {
             remaining_sec: 120,
             final_window_experimental: false,
             order_cap_usdc: 25.0,
+            target_order_notional_usdc: 25.0,
             d_bps: Some("1".to_string()),
             p_win: Some(0.91),
             p_win_lower: Some(0.9),

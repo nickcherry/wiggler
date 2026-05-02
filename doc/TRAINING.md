@@ -158,7 +158,7 @@ edge = p_win_lower - all_in_cost
 ```
 
 This best bid is a price anchor for the maker limit. Order size is still a
-notional-cap decision and does not use displayed best-bid depth.
+USDC min/max-range decision and does not use displayed best-bid depth.
 
 The runtime bundle still records `--taker-fee-rate` for historical taker
 analysis and provenance. For live maker entries, use `--min-edge-probability`

@@ -89,8 +89,8 @@ edge = p_win_lower - all_in_cost
 ```
 
 Order size is separate from book depth. Once the maker price passes the edge
-gate, shares are sized from Wiggler's notional caps divided by that limit
-price.
+gate, Wiggler selects a USDC notional inside the configured min/max range, then
+derives shares from that notional divided by the limit price.
 
 The generated bundle still records `fee.taker_fee_rate = 0.072` for historical
 taker analysis and bundle provenance, but live entry gating does not subtract

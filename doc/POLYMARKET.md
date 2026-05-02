@@ -106,8 +106,8 @@ while live trading is enabled. It only submits buy-side maker orders with:
 - `GTD` order type
 - `postOnly=true`
 - limit price at the current best bid
-- size derived from Wiggler's notional caps at that limit price, not from the
-  displayed best-bid depth
+- dollar size selected inside Wiggler's configured min/max notional range, then
+  converted to shares at that limit price
 - share size truncated to Polymarket's two-decimal lot precision
 - no sell/flipping path
 - no repeated local or remote exposure in the same market
