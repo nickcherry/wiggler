@@ -1,12 +1,6 @@
 use std::{future, sync::Arc, time::Duration};
 
 use anyhow::{Context, Result, bail};
-use chrono::{DateTime, TimeDelta, Utc};
-use polymarket_client_sdk_v2::types::Address;
-use rust_decimal::{
-    Decimal,
-    prelude::{FromPrimitive, ToPrimitive},
-};
 use tokio::{sync::mpsc, task::JoinHandle, time};
 use tracing::{info, warn};
 
@@ -15,7 +9,6 @@ use crate::{
     config::RuntimeConfig,
     domain::{
         asset::{Asset, format_assets, normalize_assets},
-        market::Outcome,
         time::duration_from_seconds,
     },
     exchange_candles::{Candle, LiveCandleFeedConfig, run_live_candle_feed},
@@ -25,25 +18,30 @@ use crate::{
         market_ws::MarketWsEvent,
         rtds::{PriceTick, run_price_feed},
     },
-    runtime::{AssetRuntime, RuntimeBundle, SideLeading},
+    runtime::{AssetRuntime, RuntimeBundle},
     telegram::TelegramClient,
-    trade_analysis::{self, ApiClosedPositionPnlRow},
-    trading::{LiveFill, LiveOrderResponse, LiveTradeExecutor, executor::MarketExposureSnapshot},
+    trade_analysis,
+    trading::{LiveFill, LiveTradeExecutor},
 };
 
+mod decision;
+mod execution;
 mod formatting;
+mod live_exposure_reconcile;
+mod live_tracking;
+mod logic;
 mod path;
 mod settlement;
+mod settlement_fetch;
+mod skip;
 mod state;
 mod telegram_outbox;
 mod trades;
 mod watchset;
 
-const TELEGRAM_SETTLEMENT_MAX_POSITIONS: usize = 10_000;
 const WATCHSET_REFRESH_INTERVAL_SECONDS: u64 = 10;
 const LIVE_EXPOSURE_RECONCILE_INTERVAL_MS: u64 = 5_000;
 const LIVE_EXPOSURE_CACHE_MAX_AGE_MS: i64 = 12_000;
-const LIVE_EXPOSURE_RECENT_TRADES_MAX: usize = 1_000;
 
 use formatting::{
     clean_failure_reason, format_percent, format_signed_usdc, format_whole_number,
@@ -52,15 +50,39 @@ use formatting::{
 };
 #[cfg(test)]
 use formatting::{format_market_price, format_usdc};
+use live_exposure_reconcile::{LiveExposureReconcileResult, maybe_spawn_live_exposure_reconcile};
+use logic::{
+    EXPERIMENTAL_FINAL_WINDOW_EXTRA_EDGE_PROBABILITY, EXPERIMENTAL_FINAL_WINDOW_MIN_ABS_D_BPS,
+    MOMENTUM_OVERLAY_THRESHOLD_VOL_UNITS, MOMENTUM_OVERLAY_VOL_LOOKBACK_MIN, ORDER_NOTIONAL_SCALE,
+    RETRYABLE_NO_FILL_COOLDOWN_SECONDS, adjusted_required_edge_probability, age_ms, decimal_abs,
+    distance_bps, duration_ms, effective_max_order_usdc, experimental_final_window_applies,
+    is_retryable_no_fill_error, is_retryable_no_fill_response, maker_order_effective_until,
+    maker_order_expires_at, momentum_overlay_side_for_value, monitor_min_remaining_sec_to_trade,
+    monitor_remaining_bucket, outcome_for_side, retryable_no_fill_key, side_for_distance,
+    target_order_notional_usdc,
+};
 #[cfg(test)]
 use path::{MarketPricePath, summarize_maker_limit};
+#[cfg(test)]
 use path::{PathState, required_edge_probability};
 #[cfg(test)]
 use settlement::slot_start_from_market_slug;
+#[cfg(test)]
 use settlement::{
-    ClosedPositionPnlRow, closed_position_outcome_label, closed_position_slot_start,
-    closed_position_ticker, closed_position_totals, live_settlement_candidate_slots,
-    live_settlement_lookback_slots, live_settlement_summary_text,
+    ClosedPositionPnlRow, closed_position_slot_start, live_settlement_candidate_slots,
+    live_settlement_lookback_slots,
+};
+use settlement::{
+    closed_position_outcome_label, closed_position_ticker, closed_position_totals,
+    live_settlement_summary_text,
+};
+#[cfg(test)]
+use settlement_fetch::{
+    LIVE_SETTLEMENT_CHECK_INTERVAL_SECONDS, telegram_settlement_interval_duration,
+};
+use settlement_fetch::{
+    closed_position_row_from_api_position, closed_rows_for_slot, maybe_spawn_live_settlement_fetch,
+    telegram_settlement_interval,
 };
 #[cfg(test)]
 use state::SlotLine;
@@ -430,300 +452,12 @@ async fn sleep_until(deadline: Option<time::Instant>) {
     }
 }
 
-fn telegram_settlement_interval(
-    telegram: &TelegramClient,
-    pnl_interval: Duration,
-) -> Option<time::Interval> {
-    telegram_settlement_interval_duration(telegram, pnl_interval).map(time::interval)
-}
-
-fn telegram_settlement_interval_duration(
-    telegram: &TelegramClient,
-    pnl_interval: Duration,
-) -> Option<Duration> {
-    if !telegram.is_configured() || pnl_interval.is_zero() {
-        return None;
-    }
-
-    Some(Duration::from_secs(LIVE_SETTLEMENT_CHECK_INTERVAL_SECONDS))
-}
-
-fn closed_rows_for_slot(
-    rows: &[ClosedPositionPnlRow],
-    slot_start: DateTime<Utc>,
-) -> Vec<ClosedPositionPnlRow> {
-    rows.iter()
-        .filter(|row| closed_position_slot_start(row) == Some(slot_start))
-        .cloned()
-        .collect()
-}
-
-fn closed_position_row_from_api_position(row: ApiClosedPositionPnlRow) -> ClosedPositionPnlRow {
-    ClosedPositionPnlRow {
-        realized_pnl: Some(row.realized_pnl),
-        slug: Some(row.slug),
-        event_slug: Some(row.event_slug),
-        title: Some(row.title),
-        outcome: Some(row.outcome),
-    }
-}
-
 async fn optional_interval_tick(interval: &mut Option<time::Interval>) {
     if let Some(interval) = interval {
         interval.tick().await;
     } else {
         future::pending::<()>().await;
     }
-}
-
-struct LiveExposureReconcileResult {
-    condition_ids: Vec<String>,
-    checked_at: DateTime<Utc>,
-    result: Result<MarketExposureSnapshot>,
-}
-
-fn maybe_spawn_live_exposure_reconcile(
-    executor: Option<&Arc<LiveTradeExecutor>>,
-    state: &MonitorState,
-    tx: &mpsc::Sender<LiveExposureReconcileResult>,
-    in_flight: &mut bool,
-) {
-    if *in_flight {
-        return;
-    }
-    let Some(executor) = executor else {
-        return;
-    };
-    let condition_ids = state.live_exposure_reconcile_condition_ids();
-    if condition_ids.is_empty() {
-        return;
-    }
-
-    *in_flight = true;
-    let executor = Arc::clone(executor);
-    let tx = tx.clone();
-    tokio::spawn(async move {
-        let result = executor
-            .reconcile_market_exposure(&condition_ids, LIVE_EXPOSURE_RECENT_TRADES_MAX)
-            .await;
-        let _ = tx
-            .send(LiveExposureReconcileResult {
-                condition_ids,
-                checked_at: Utc::now(),
-                result,
-            })
-            .await;
-    });
-}
-
-fn maybe_spawn_live_settlement_fetch(
-    data_api: &DataApiClient,
-    user: Address,
-    assets: &[Asset],
-    duration: TimeDelta,
-    pnl_interval: Duration,
-    state: &MonitorState,
-    tx: &mpsc::Sender<LiveSettlementFetchResult>,
-    in_flight: &mut bool,
-) {
-    if *in_flight {
-        return;
-    }
-
-    let candidate_slots = live_settlement_candidate_slots(
-        Utc::now(),
-        duration,
-        live_settlement_lookback_slots(duration, pnl_interval),
-    );
-    let unsent_slots = candidate_slots
-        .into_iter()
-        .filter(|slot_start| !state.sent_live_settlement_slots.contains(slot_start))
-        .collect::<Vec<_>>();
-    if unsent_slots.is_empty() {
-        return;
-    }
-
-    info!(
-        event = "live_settlement_summary_check",
-        unsent_slot_count = unsent_slots.len(),
-        "checking Polymarket API position PnL for Telegram summaries"
-    );
-
-    *in_flight = true;
-    let data_api = data_api.clone();
-    let assets = assets.to_vec();
-    let tx = tx.clone();
-    tokio::spawn(async move {
-        let result = trade_analysis::fetch_api_closed_position_pnl_rows(
-            &data_api,
-            user,
-            &assets,
-            TELEGRAM_SETTLEMENT_MAX_POSITIONS,
-        )
-        .await;
-        let _ = tx
-            .send(LiveSettlementFetchResult {
-                unsent_slots,
-                result,
-            })
-            .await;
-    });
-}
-
-fn is_retryable_no_fill_response(response: &LiveOrderResponse) -> bool {
-    !response.success
-        && response
-            .error_msg
-            .as_deref()
-            .is_some_and(is_retryable_no_fill_error)
-}
-
-fn is_retryable_no_fill_error(error: &str) -> bool {
-    let normalized = error.to_ascii_lowercase();
-    (normalized.contains("invalid_post_only_order")
-        && !normalized.contains("invalid_post_only_order_type"))
-        || normalized.contains("invalid post-only order")
-        || normalized.contains("order crosses book")
-        || (normalized.contains("post-only") && normalized.contains("would cross"))
-}
-
-fn retryable_no_fill_key(condition_id: &str, token_id: &str) -> String {
-    format!("{condition_id}:{token_id}")
-}
-
-fn distance_bps(price: Decimal, line: Decimal) -> Option<Decimal> {
-    if line.is_zero() {
-        return None;
-    }
-
-    Some(((price - line) / line) * Decimal::from(10_000))
-}
-
-fn decimal_abs(value: Decimal) -> Decimal {
-    if value < Decimal::ZERO { -value } else { value }
-}
-
-fn side_for_distance(value: Decimal) -> Option<SideLeading> {
-    if value > Decimal::ZERO {
-        Some(SideLeading::UpLeading)
-    } else if value < Decimal::ZERO {
-        Some(SideLeading::DownLeading)
-    } else {
-        None
-    }
-}
-
-fn momentum_overlay_side_for_value(value: f64) -> Option<SideLeading> {
-    if !value.is_finite() {
-        return None;
-    }
-
-    if value >= MOMENTUM_OVERLAY_THRESHOLD_VOL_UNITS {
-        Some(SideLeading::UpLeading)
-    } else if value <= -MOMENTUM_OVERLAY_THRESHOLD_VOL_UNITS {
-        Some(SideLeading::DownLeading)
-    } else {
-        None
-    }
-}
-
-fn outcome_for_side(side: SideLeading) -> Outcome {
-    match side {
-        SideLeading::UpLeading => Outcome::Up,
-        SideLeading::DownLeading => Outcome::Down,
-    }
-}
-
-fn age_ms(now: DateTime<Utc>, timestamp: DateTime<Utc>) -> i64 {
-    (now - timestamp).num_milliseconds().max(0)
-}
-
-fn duration_ms(duration: Duration) -> i64 {
-    duration.as_millis().try_into().unwrap_or(i64::MAX)
-}
-
-const RETRYABLE_NO_FILL_COOLDOWN_SECONDS: i64 = 2;
-const LIVE_SETTLEMENT_CHECK_INTERVAL_SECONDS: u64 = 30;
-const MOMENTUM_OVERLAY_VOL_LOOKBACK_MIN: u32 = 30;
-const MOMENTUM_OVERLAY_THRESHOLD_VOL_UNITS: f64 = 2.0;
-const ORDER_NOTIONAL_SCALE: u32 = 6;
-// Monitor-only final-window experiment; the runtime bundle still has no <60s cells.
-const EXPERIMENTAL_MIN_REMAINING_SEC_TO_TRADE: i64 = 30;
-const EXPERIMENTAL_FINAL_WINDOW_MIN_ABS_D_BPS: f64 = 10.0;
-const EXPERIMENTAL_FINAL_WINDOW_EXTRA_EDGE_PROBABILITY: f64 = 0.01;
-const EXPERIMENTAL_FINAL_WINDOW_MAX_ORDER_USDC: f64 = 10.0;
-
-fn monitor_min_remaining_sec_to_trade(runtime: &AssetRuntime) -> i64 {
-    runtime
-        .min_remaining_sec_to_trade()
-        .min(EXPERIMENTAL_MIN_REMAINING_SEC_TO_TRADE)
-}
-
-fn experimental_final_window_applies(runtime: &AssetRuntime, remaining_sec: i64) -> bool {
-    remaining_sec >= EXPERIMENTAL_MIN_REMAINING_SEC_TO_TRADE
-        && remaining_sec < runtime.min_remaining_sec_to_trade()
-}
-
-fn monitor_remaining_bucket(runtime: &AssetRuntime, remaining_sec: i64) -> Option<u32> {
-    if experimental_final_window_applies(runtime, remaining_sec) {
-        return runtime.remaining_bucket(runtime.min_remaining_sec_to_trade());
-    }
-
-    runtime.remaining_bucket(remaining_sec)
-}
-
-fn adjusted_required_edge_probability(
-    runtime: &AssetRuntime,
-    path_state: &PathState,
-    final_window_experimental: bool,
-) -> Option<f64> {
-    required_edge_probability(runtime, path_state).map(|edge| {
-        edge + if final_window_experimental {
-            EXPERIMENTAL_FINAL_WINDOW_EXTRA_EDGE_PROBABILITY
-        } else {
-            0.0
-        }
-    })
-}
-
-fn effective_max_order_usdc(config: &RuntimeConfig, final_window_experimental: bool) -> f64 {
-    if final_window_experimental {
-        config
-            .max_order_usdc
-            .min(EXPERIMENTAL_FINAL_WINDOW_MAX_ORDER_USDC)
-    } else {
-        config.max_order_usdc
-    }
-}
-
-fn target_order_notional_usdc(
-    runtime: &AssetRuntime,
-    config: &RuntimeConfig,
-    final_window_experimental: bool,
-) -> Option<Decimal> {
-    let upper_bound = runtime
-        .max_position_usdc()
-        .min(effective_max_order_usdc(config, final_window_experimental));
-    if upper_bound < config.min_order_usdc {
-        return None;
-    }
-
-    let target = Decimal::from_f64(upper_bound)?
-        .trunc_with_scale(ORDER_NOTIONAL_SCALE)
-        .normalize();
-    if target <= Decimal::ZERO || target.to_f64()? < config.min_order_usdc {
-        return None;
-    }
-
-    Some(target)
-}
-
-fn maker_order_expires_at(slot_end: DateTime<Utc>) -> DateTime<Utc> {
-    slot_end + TimeDelta::seconds(60)
-}
-
-fn maker_order_effective_until(expires_at: DateTime<Utc>) -> DateTime<Utc> {
-    expires_at - TimeDelta::seconds(60)
 }
 
 #[cfg(test)]
