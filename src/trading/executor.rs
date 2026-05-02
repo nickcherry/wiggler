@@ -52,7 +52,6 @@ type AuthenticatedClient = Client<
 type ClientState = Arc<Mutex<AuthenticatedClient>>;
 type HeartbeatState = Arc<Mutex<Option<Uuid>>>;
 type CredentialRotationLock = Arc<Mutex<()>>;
-const INITIAL_CURSOR: &str = "MA==";
 static LAST_FRESH_API_NONCE: AtomicU32 = AtomicU32::new(0);
 
 sol! {
@@ -222,10 +221,7 @@ impl LiveTradeExecutor {
         let market = B256::from_str(condition_id).context("parse market condition id")?;
         let orders_request = OrdersRequest::builder().market(market).build();
         let mut client = self.current_client().await;
-        let orders = match client
-            .orders(&orders_request, Some(INITIAL_CURSOR.to_string()))
-            .await
-        {
+        let orders = match client.orders(&orders_request, None).await {
             Ok(orders) => orders,
             Err(error) if is_l2_auth_error(&error) => {
                 warn!(
@@ -238,10 +234,7 @@ impl LiveTradeExecutor {
                     .await
                     .context("refresh CLOB heartbeat after open-orders auth error")?;
                 match client
-                    .orders(
-                        &OrdersRequest::builder().market(market).build(),
-                        Some(INITIAL_CURSOR.to_string()),
-                    )
+                    .orders(&OrdersRequest::builder().market(market).build(), None)
                     .await
                 {
                     Ok(orders) => orders,
@@ -250,10 +243,7 @@ impl LiveTradeExecutor {
                             .rotate_api_key_after_l2_auth_error("data/orders", &retry_error)
                             .await?;
                         client
-                            .orders(
-                                &OrdersRequest::builder().market(market).build(),
-                                Some(INITIAL_CURSOR.to_string()),
-                            )
+                            .orders(&OrdersRequest::builder().market(market).build(), None)
                             .await
                             .context("query open orders after API credential rotation")?
                     }

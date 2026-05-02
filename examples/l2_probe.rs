@@ -111,20 +111,6 @@ async fn main() -> Result<()> {
             )
         }),
     );
-    report(
-        "orders_initial_cursor",
-        client
-            .orders(&orders_request, Some("MA==".to_string()))
-            .await
-            .map(|value| {
-                format!(
-                    "ok rows={} next_cursor={}",
-                    value.data.len(),
-                    value.next_cursor
-                )
-            }),
-    );
-
     let data_api = DataApiClient::new(&config.data_api_base_url)?;
     let data_api_user = data_api_user_address(&config, signer.address())?;
     if let Some(market) = probe_market()? {
