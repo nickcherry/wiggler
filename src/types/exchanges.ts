@@ -22,3 +22,21 @@ export const quoteTickSchema = z.object({
 });
 
 export type QuoteTick = z.infer<typeof quoteTickSchema>;
+
+/**
+ * Persisted shape of one `prices:capture` run. Matches
+ * `CaptureAllQuoteStreamsResult` so a saved JSON file can be parsed back
+ * with the same Zod boundary.
+ */
+export const quoteCaptureSchema = z.object({
+  startedAtMs: z.number(),
+  endedAtMs: z.number(),
+  durationMs: z.number(),
+  ticks: z.array(quoteTickSchema),
+  tickCounts: z.record(exchangeIdSchema, z.number().int().nonnegative()),
+  errors: z.array(
+    z.object({ exchange: exchangeIdSchema, error: z.string() }),
+  ),
+});
+
+export type QuoteCapture = z.infer<typeof quoteCaptureSchema>;

@@ -4,7 +4,6 @@
  */
 export const exchangeIdValues = [
   "coinbase-spot",
-  "kraken-spot",
   "bitstamp-spot",
   "gemini-spot",
   "binance-spot",
@@ -13,5 +12,4 @@ export const exchangeIdValues = [
   "okx-swap",
   "bybit-spot",
   "bybit-perp",
-  "bitfinex-spot",
 ] as const;

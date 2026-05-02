@@ -2,6 +2,7 @@
 import { candlesSyncCommand } from "@wiggler/bin/candles/sync";
 import { dbMigrateCommand } from "@wiggler/bin/db/migrate";
 import { pricesCaptureCommand } from "@wiggler/bin/prices/capture";
+import { pricesChartCommand } from "@wiggler/bin/prices/chart";
 import { telegramTestCommand } from "@wiggler/bin/telegram/test";
 import { createCli } from "@wiggler/lib/cli/createCli";
 
@@ -12,6 +13,7 @@ const cli = createCli({
     dbMigrateCommand,
     candlesSyncCommand,
     pricesCaptureCommand,
+    pricesChartCommand,
     telegramTestCommand,
   ],
 });

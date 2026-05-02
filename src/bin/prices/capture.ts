@@ -1,4 +1,3 @@
-import { spawn } from "node:child_process";
 import { mkdir, writeFile } from "node:fs/promises";
 import { resolve as resolvePath } from "node:path";
 import pc from "picocolors";
@@ -7,7 +6,8 @@ import { defineCommand } from "@wiggler/lib/cli/defineCommand";
 import { defineFlagOption } from "@wiggler/lib/cli/defineFlagOption";
 import { defineValueOption } from "@wiggler/lib/cli/defineValueOption";
 import { captureAllQuoteStreams } from "@wiggler/lib/exchangePrices/captureAllQuoteStreams";
-import { renderPriceChartHtml } from "@wiggler/lib/exchangePrices/renderPriceChartHtml";
+import { openHtmlOnDarwin } from "@wiggler/lib/exchangePrices/openHtmlOnDarwin";
+import { writePriceChartHtml } from "@wiggler/lib/exchangePrices/writePriceChartHtml";
 import { exchangeIdSchema } from "@wiggler/types/exchanges";
 import { z } from "zod";
 
@@ -24,7 +24,7 @@ export const pricesCaptureCommand = defineCommand({
   name: "prices:capture",
   summary: "Record BBO mid-price ticks across exchanges and chart them",
   description:
-    "Opens a public WebSocket to each requested exchange, accumulates every BBO update for the configured duration, then writes a JSON snapshot and an interactive Plotly chart to wiggler/tmp/. Useful for comparing how quickly different venues react to the same price move.",
+    "Opens a public WebSocket to each requested exchange, accumulates every BBO update for the configured duration, then writes a JSON snapshot and an interactive ECharts chart to wiggler/tmp/. Useful for comparing how quickly different venues react to the same price move.",
   options: [
     defineValueOption({
       key: "duration",
@@ -118,17 +118,10 @@ export const pricesCaptureCommand = defineCommand({
     io.writeStdout(`${pc.green("wrote")} ${pc.dim(jsonPath)}\n`);
 
     if (!options.noChart) {
-      const html = renderPriceChartHtml({
-        ticks: result.ticks,
-        tickCounts: result.tickCounts,
-        startedAtMs: result.startedAtMs,
-        endedAtMs: result.endedAtMs,
-      });
-      await writeFile(htmlPath, html);
+      await writePriceChartHtml({ capture: result, htmlPath });
       io.writeStdout(`${pc.green("wrote")} ${pc.dim(htmlPath)}\n`);
-
-      if (!options.noOpen && process.platform === "darwin") {
-        spawn("open", [htmlPath], { detached: true, stdio: "ignore" }).unref();
+      if (!options.noOpen) {
+        openHtmlOnDarwin({ path: htmlPath });
       }
     }
 

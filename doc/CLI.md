@@ -27,6 +27,7 @@ Everything that matters is reachable through one non-interactive entrypoint:
   `candles:sync`
 - `prices:*`
   `prices:capture`
+  `prices:chart`
 - `telegram:*`
   `telegram:test`
 - `help`
