@@ -2,9 +2,9 @@ use anyhow::{Context, Result};
 use polymarket_client_sdk_v2::{
     data::{
         Client,
-        types::{Side, request::TradesRequest, response::Trade},
+        types::{MarketFilter, Side, request::TradesRequest, response::Trade},
     },
-    types::Address,
+    types::{Address, B256},
 };
 
 const TRADES_PAGE_LIMIT: i32 = 10_000;
@@ -56,6 +56,25 @@ impl DataApiClient {
         }
 
         Ok(rows)
+    }
+
+    pub async fn has_market_trade(&self, user: Address, market: B256) -> Result<bool> {
+        let request = TradesRequest::builder()
+            .user(user)
+            .filter(MarketFilter::markets([market]))
+            .limit(1)
+            .context("set trades page limit")?
+            .offset(0)
+            .context("set trades page offset")?
+            .taker_only(false)
+            .build();
+
+        let rows = self
+            .inner
+            .trades(&request)
+            .await
+            .context("fetch market trades")?;
+        Ok(!rows.is_empty())
     }
 }
 

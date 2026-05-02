@@ -150,10 +150,12 @@ set +a
 cargo run --example l2_probe
 ```
 
-The probe checks `closed_only`, balance/allowance, open orders, and trade
-history with the current L2 credentials, then posts one heartbeat. Set
-`WIGGLER_PROBE_MARKET=<condition id>` to include a market-filtered
-orders/trades check.
+The probe checks `closed_only`, balance/allowance, and open orders with the
+current L2 credentials, then checks trade history through the public Polymarket
+Data API. Set `WIGGLER_PROBE_MARKET=<condition id>` to include market-filtered
+orders/trades checks. Production exposure reconciliation uses the same split:
+CLOB for live open orders and Data API for historical trades, because CLOB
+`/data/trades` can reject otherwise valid API keys.
 
 When the account is a Polymarket proxy wallet, verify the signature type before
 live trading. `proxy`, `gnosis-safe`, and `eoa` can all authenticate, but only

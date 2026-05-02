@@ -9,7 +9,7 @@ use polymarket_client_sdk_v2::{
         Client, Config,
         types::{
             AssetType, SignatureType,
-            request::{BalanceAllowanceRequest, OrdersRequest, TradesRequest},
+            request::{BalanceAllowanceRequest, OrdersRequest},
             response::HeartbeatResponse,
         },
     },
@@ -17,7 +17,10 @@ use polymarket_client_sdk_v2::{
     types::{Address, B256},
 };
 use serde::Deserialize;
-use wiggler::config::{PolymarketSignatureType, RuntimeConfig};
+use wiggler::{
+    config::{PolymarketSignatureType, RuntimeConfig},
+    polymarket::data::DataApiClient,
+};
 
 type AuthenticatedClient = Client<
     polymarket_client_sdk_v2::auth::state::Authenticated<polymarket_client_sdk_v2::auth::Normal>,
@@ -122,30 +125,25 @@ async fn main() -> Result<()> {
             }),
     );
 
-    let trades_request = market_trades_request()?;
-    report(
-        "trades_no_cursor",
-        client.trades(&trades_request, None).await.map(|value| {
-            format!(
-                "ok rows={} next_cursor={}",
-                value.data.len(),
-                value.next_cursor
-            )
-        }),
-    );
-    report(
-        "trades_initial_cursor",
-        client
-            .trades(&trades_request, Some("MA==".to_string()))
-            .await
-            .map(|value| {
-                format!(
-                    "ok rows={} next_cursor={}",
-                    value.data.len(),
-                    value.next_cursor
-                )
-            }),
-    );
+    let data_api = DataApiClient::new(&config.data_api_base_url)?;
+    let data_api_user = data_api_user_address(&config, signer.address())?;
+    if let Some(market) = probe_market()? {
+        report(
+            "data_api_market_trades",
+            data_api
+                .has_market_trade(data_api_user, market)
+                .await
+                .map(|value| format!("ok has_trade={value}")),
+        );
+    } else {
+        report(
+            "data_api_recent_trades",
+            data_api
+                .fetch_trades(data_api_user, 1)
+                .await
+                .map(|value| format!("ok rows={}", value.len())),
+        );
+    }
     Ok(())
 }
 
@@ -182,20 +180,23 @@ fn market_orders_request() -> Result<OrdersRequest> {
     }
 }
 
-fn market_trades_request() -> Result<TradesRequest> {
-    if let Some(market) = probe_market()? {
-        Ok(TradesRequest::builder().market(market).build())
-    } else {
-        Ok(TradesRequest::default())
-    }
-}
-
 fn probe_market() -> Result<Option<B256>> {
     env::var("WIGGLER_PROBE_MARKET")
         .ok()
         .filter(|value| !value.trim().is_empty())
         .map(|value| B256::from_str(value.trim()).context("parse WIGGLER_PROBE_MARKET"))
         .transpose()
+}
+
+fn data_api_user_address(config: &RuntimeConfig, signer_address: Address) -> Result<Address> {
+    if let Some(user) = &config.polymarket_user_address {
+        return Address::from_str(user).context("parse POLYMARKET_USER_ADDRESS");
+    }
+    if let Some(funder) = &config.polymarket_funder_address {
+        return Address::from_str(funder).context("parse POLYMARKET_FUNDER_ADDRESS");
+    }
+
+    Ok(signer_address)
 }
 
 fn report<T, E>(label: &str, result: std::result::Result<T, E>)

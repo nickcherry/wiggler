@@ -26,7 +26,7 @@ use polymarket_client_sdk_v2::{
         Client, Config,
         types::{
             Amount, AssetType, OrderType, Side, SignatureType,
-            request::{BalanceAllowanceRequest, OrdersRequest, TradesRequest},
+            request::{BalanceAllowanceRequest, OrdersRequest},
             response::{BalanceAllowanceResponse, HeartbeatResponse},
         },
     },
@@ -41,6 +41,7 @@ use tracing::{info, warn};
 
 use crate::{
     config::{LiveOrderType, PolymarketSignatureType, RuntimeConfig},
+    polymarket::data::DataApiClient,
     telegram::TelegramClient,
     trading::order::{LiveOrderRequest, LiveOrderResponse},
 };
@@ -67,6 +68,8 @@ pub struct LiveTradeExecutor {
     client: ClientState,
     signer: PrivateKeySigner,
     auth_config: LiveAuthConfig,
+    data_api: DataApiClient,
+    data_api_user: Address,
     order_type: OrderType,
     heartbeat_state: HeartbeatState,
     credential_rotation_lock: CredentialRotationLock,
@@ -125,6 +128,8 @@ impl LiveTradeExecutor {
             signature_type: config.polymarket_signature_type,
             funder_address,
         };
+        let data_api = DataApiClient::new(&config.data_api_base_url)?;
+        let data_api_user = data_api_user_address(config, signer.address(), funder_address)?;
         let credential_rotation_lock = Arc::new(Mutex::new(()));
         let mut client = authenticate_client(&auth_config, &signer, CredentialSource::Configured)
             .await
@@ -205,6 +210,8 @@ impl LiveTradeExecutor {
             client,
             signer,
             auth_config,
+            data_api,
+            data_api_user,
             order_type: map_order_type(config.live_order_type),
             heartbeat_state,
             credential_rotation_lock,
@@ -262,52 +269,10 @@ impl LiveTradeExecutor {
             return Ok(true);
         }
 
-        let trades_request = TradesRequest::builder().market(market).build();
-        let trades = match client
-            .trades(&trades_request, Some(INITIAL_CURSOR.to_string()))
+        self.data_api
+            .has_market_trade(self.data_api_user, market)
             .await
-        {
-            Ok(trades) => trades,
-            Err(error) if is_l2_auth_error(&error) => {
-                warn!(
-                    event = "live_auth_refresh",
-                    endpoint = "data/trades",
-                    error = %error,
-                    "refreshing heartbeat after L2 auth error"
-                );
-                refresh_heartbeat(&client, &self.heartbeat_state)
-                    .await
-                    .context("refresh CLOB heartbeat after trades auth error")?;
-                match client
-                    .trades(
-                        &TradesRequest::builder().market(market).build(),
-                        Some(INITIAL_CURSOR.to_string()),
-                    )
-                    .await
-                {
-                    Ok(trades) => trades,
-                    Err(retry_error) if is_l2_auth_error(&retry_error) => {
-                        client = self
-                            .rotate_api_key_after_l2_auth_error("data/trades", &retry_error)
-                            .await?;
-                        client
-                            .trades(
-                                &TradesRequest::builder().market(market).build(),
-                                Some(INITIAL_CURSOR.to_string()),
-                            )
-                            .await
-                            .context("query trade history after API credential rotation")?
-                    }
-                    Err(retry_error) => {
-                        return Err(retry_error)
-                            .context("query trade history after heartbeat refresh");
-                    }
-                }
-            }
-            Err(error) => return Err(error).context("query trade history"),
-        };
-
-        Ok(!trades.data.is_empty())
+            .context("query Data API trade exposure")
     }
 
     pub async fn execute(&self, request: &LiveOrderRequest) -> Result<LiveOrderResponse> {
@@ -1213,6 +1178,18 @@ fn validate_funder_address(
     }
 
     Ok(())
+}
+
+fn data_api_user_address(
+    config: &RuntimeConfig,
+    signer_address: Address,
+    funder_address: Option<Address>,
+) -> Result<Address> {
+    if let Some(user) = &config.polymarket_user_address {
+        return Address::from_str(user).context("parse POLYMARKET_USER_ADDRESS");
+    }
+
+    Ok(funder_address.unwrap_or(signer_address))
 }
 
 fn positive_decimal_truncated(name: &str, value: f64, scale: u32) -> Result<Decimal> {
