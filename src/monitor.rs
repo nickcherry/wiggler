@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet, VecDeque},
+    collections::{HashMap, HashSet},
     fs, future,
     path::{Path, PathBuf},
     sync::Arc,
@@ -8,7 +8,6 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, TimeDelta, Utc};
-use futures_util::{StreamExt, stream};
 use polymarket_client_sdk_v2::types::Address;
 use rust_decimal::{
     Decimal,
@@ -25,43 +24,60 @@ use crate::{
         asset::{Asset, format_assets, normalize_assets},
         market::{MonitoredMarket, Outcome, OutcomeToken},
         orderbook::{OrderBookSet, PriceLevel, TokenBook},
-        time::{MarketSlot, duration_from_seconds},
+        time::duration_from_seconds,
     },
     exchange_candles::{Candle, CandleStore, LiveCandleFeedConfig, run_live_candle_feed},
     polymarket::{
         data::DataApiClient,
         gamma::GammaClient,
-        market_ws::{MarketWsEvent, run_market_feed},
+        market_ws::MarketWsEvent,
         rtds::{PriceTick, run_price_feed},
-        user_ws::{UserFillFeedConfig, run_user_fill_feed},
     },
     runtime::{AssetRuntime, RuntimeBundle, RuntimeCell, SideLeading},
     telegram::TelegramClient,
     trade_analysis::{self, ApiClosedPositionPnlRow, ApiClosedPositionPnlRows},
     trading::{
-        LIVE_ORDER_SIZE_SCALE, LiveFill, LiveOrderRequest, LiveOrderResponse, LiveTradeExecutor,
+        LiveFill, LiveOrderRequest, LiveOrderResponse, LiveTradeExecutor,
         executor::MarketExposureSnapshot,
-        fees::{LiquidityRole, platform_fee_usdc},
     },
 };
 
+mod formatting;
+mod path;
 mod settlement;
+mod telegram_outbox;
+mod watchset;
 
 const TELEGRAM_SETTLEMENT_MAX_POSITIONS: usize = 10_000;
-const TELEGRAM_OUTBOX_CAPACITY: usize = 256;
 const WATCHSET_REFRESH_INTERVAL_SECONDS: u64 = 10;
-const WATCHSET_REFRESH_TIMEOUT_SECONDS: u64 = 4;
-const WATCHSET_FETCH_CONCURRENCY: usize = 8;
 const LIVE_EXPOSURE_RECONCILE_INTERVAL_MS: u64 = 5_000;
 const LIVE_EXPOSURE_CACHE_MAX_AGE_MS: i64 = 12_000;
 const LIVE_EXPOSURE_RECENT_TRADES_MAX: usize = 1_000;
 
+use formatting::{
+    clean_failure_reason, format_percent, format_signed_usdc, format_whole_number,
+    live_entry_filled_text, live_entry_posted_text, live_entry_rejected_text,
+    live_startup_error_text, outcome_label,
+};
+#[cfg(test)]
+use formatting::{format_market_price, format_usdc};
+use path::{
+    EdgeSummary, MarketPricePath, PathState, edge_penalty_applies, required_edge_probability,
+    summarize_maker_limit,
+};
 #[cfg(test)]
 use settlement::slot_start_from_market_slug;
 use settlement::{
     ClosedPositionPnlRow, closed_position_outcome_label, closed_position_slot_start,
     closed_position_ticker, closed_position_totals, live_settlement_candidate_slots,
     live_settlement_lookback_slots, live_settlement_summary_text,
+};
+use telegram_outbox::TelegramOutbox;
+#[cfg(test)]
+use watchset::asset_ids_for_markets;
+use watchset::{
+    WatchsetConfig, WatchsetRefreshResult, apply_watchset_markets, fetch_watchset_with_timeout,
+    maybe_spawn_watchset_refresh, refresh_live_user_fill_feed,
 };
 
 pub async fn run(args: MonitorArgs, config: RuntimeConfig) -> Result<()> {
@@ -399,202 +415,6 @@ pub async fn run(args: MonitorArgs, config: RuntimeConfig) -> Result<()> {
     Ok(())
 }
 
-fn apply_watchset_markets(
-    markets: Vec<MonitoredMarket>,
-    ws_endpoint: &str,
-    state: &mut MonitorState,
-    subscribed_asset_ids: &mut Vec<String>,
-    market_handle: &mut Option<JoinHandle<()>>,
-    market_tx: mpsc::Sender<MarketWsEvent>,
-) {
-    state.replace_markets(markets.clone());
-
-    let next_asset_ids = asset_ids_for_markets(&markets);
-    if *subscribed_asset_ids == next_asset_ids {
-        return;
-    }
-
-    if let Some(handle) = market_handle.take() {
-        handle.abort();
-    }
-
-    *subscribed_asset_ids = next_asset_ids.clone();
-    if next_asset_ids.is_empty() {
-        warn!("no Polymarket token ids discovered for watchset");
-        return;
-    }
-
-    info!(
-        asset_count = next_asset_ids.len(),
-        market_count = markets.len(),
-        "refreshing market websocket subscription"
-    );
-    *market_handle = Some(tokio::spawn(run_market_feed(
-        ws_endpoint.to_string(),
-        next_asset_ids,
-        market_tx,
-    )));
-}
-
-async fn refresh_live_user_fill_feed(
-    executor: Option<&Arc<LiveTradeExecutor>>,
-    ws_endpoint: &str,
-    state: &MonitorState,
-    subscribed_condition_ids: &mut Vec<String>,
-    user_fill_handle: &mut Option<JoinHandle<()>>,
-    live_fill_tx: mpsc::Sender<LiveFill>,
-) -> Result<()> {
-    let Some(executor) = executor else {
-        return Ok(());
-    };
-
-    let mut next_condition_ids = state.live_exposure_reconcile_condition_ids();
-    next_condition_ids.sort();
-    next_condition_ids.dedup();
-    let handle_finished = user_fill_handle
-        .as_ref()
-        .is_some_and(JoinHandle::is_finished);
-    if *subscribed_condition_ids == next_condition_ids && !handle_finished {
-        return Ok(());
-    }
-
-    if let Some(handle) = user_fill_handle.take() {
-        handle.abort();
-    }
-    *subscribed_condition_ids = next_condition_ids.clone();
-    if next_condition_ids.is_empty() {
-        return Ok(());
-    }
-
-    let config = UserFillFeedConfig {
-        endpoint: ws_endpoint.to_string(),
-        credentials: executor.current_credentials().await,
-        user_address: executor.user_address(),
-        condition_ids: next_condition_ids,
-    };
-    *user_fill_handle = Some(tokio::spawn(run_user_fill_feed(config, live_fill_tx)));
-
-    Ok(())
-}
-
-struct WatchsetRefreshResult {
-    checked_at: DateTime<Utc>,
-    result: Result<Vec<MonitoredMarket>>,
-}
-
-fn maybe_spawn_watchset_refresh(
-    gamma: &GammaClient,
-    config: &WatchsetConfig,
-    tx: &mpsc::Sender<WatchsetRefreshResult>,
-    in_flight: &mut bool,
-) {
-    if *in_flight {
-        return;
-    }
-
-    *in_flight = true;
-    let gamma = gamma.clone();
-    let config = config.clone();
-    let tx = tx.clone();
-    tokio::spawn(async move {
-        let result = fetch_watchset_with_timeout(&gamma, &config).await;
-        let _ = tx
-            .send(WatchsetRefreshResult {
-                checked_at: Utc::now(),
-                result,
-            })
-            .await;
-    });
-}
-
-async fn fetch_watchset_with_timeout(
-    gamma: &GammaClient,
-    config: &WatchsetConfig,
-) -> Result<Vec<MonitoredMarket>> {
-    time::timeout(
-        Duration::from_secs(WATCHSET_REFRESH_TIMEOUT_SECONDS),
-        fetch_watchset(
-            gamma,
-            &config.assets,
-            config.duration,
-            config.lookahead_slots,
-        ),
-    )
-    .await
-    .context("watchset refresh timed out")?
-}
-
-async fn fetch_watchset(
-    gamma: &GammaClient,
-    assets: &[Asset],
-    duration: chrono::TimeDelta,
-    lookahead_slots: u32,
-) -> Result<Vec<MonitoredMarket>> {
-    let current_slot = MarketSlot::current(Utc::now(), duration)?;
-    let mut requests = Vec::new();
-    for &asset in assets {
-        for offset in 0..=lookahead_slots {
-            requests.push((asset, current_slot.offset(i64::from(offset))?));
-        }
-    }
-
-    let mut markets = stream::iter(requests)
-        .map(|(asset, slot)| {
-            let gamma = gamma.clone();
-            async move {
-                match gamma.fetch_slot_market(asset, &slot).await {
-                    Ok(Some(market)) => {
-                        debug!(
-                            asset = %asset,
-                            slug = market.slug,
-                            start = %market.slot.start(),
-                            end = %market.slot.end(),
-                            token_count = market.tokens.len(),
-                            "discovered market"
-                        );
-                        Some(market)
-                    }
-                    Ok(None) => {
-                        let slug = slot.slug(asset).ok();
-                        debug!(asset = %asset, slug, "market not yet available");
-                        None
-                    }
-                    Err(error) => {
-                        let slug = slot.slug(asset).ok();
-                        warn!(asset = %asset, slug, error = %error, "failed to fetch market");
-                        None
-                    }
-                }
-            }
-        })
-        .buffer_unordered(WATCHSET_FETCH_CONCURRENCY)
-        .filter_map(future::ready)
-        .collect::<Vec<_>>()
-        .await;
-    markets.sort_by(|left, right| left.slug.cmp(&right.slug));
-
-    Ok(markets)
-}
-
-#[derive(Clone)]
-struct WatchsetConfig {
-    ws_endpoint: String,
-    assets: Vec<Asset>,
-    duration: chrono::TimeDelta,
-    lookahead_slots: u32,
-}
-
-fn asset_ids_for_markets(markets: &[MonitoredMarket]) -> Vec<String> {
-    let mut seen = HashSet::new();
-    let mut asset_ids = markets
-        .iter()
-        .flat_map(MonitoredMarket::asset_ids)
-        .filter(|asset_id| seen.insert(asset_id.clone()))
-        .collect::<Vec<_>>();
-    asset_ids.sort();
-    asset_ids
-}
-
 fn max_vol_lookback_min(runtime_bundle: &RuntimeBundle, assets: &[Asset]) -> u32 {
     assets
         .iter()
@@ -609,50 +429,6 @@ async fn sleep_until(deadline: Option<time::Instant>) {
         time::sleep_until(deadline).await;
     } else {
         future::pending::<()>().await;
-    }
-}
-
-#[derive(Clone)]
-struct TelegramOutbox {
-    tx: Option<mpsc::Sender<String>>,
-}
-
-impl TelegramOutbox {
-    fn new(client: TelegramClient) -> Self {
-        if !client.is_configured() {
-            return Self { tx: None };
-        }
-
-        let (tx, mut rx) = mpsc::channel::<String>(TELEGRAM_OUTBOX_CAPACITY);
-        tokio::spawn(async move {
-            while let Some(message) = rx.recv().await {
-                if let Err(error) = client.send_message(&message).await {
-                    warn!(
-                        error = %error,
-                        "failed to send queued Telegram message"
-                    );
-                }
-            }
-        });
-
-        Self { tx: Some(tx) }
-    }
-
-    fn send_message(&self, message: impl Into<String>) -> bool {
-        let Some(tx) = &self.tx else {
-            return false;
-        };
-        match tx.try_send(message.into()) {
-            Ok(()) => true,
-            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
-                warn!("Telegram outbox full; dropped message");
-                false
-            }
-            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
-                warn!("Telegram outbox closed; dropped message");
-                false
-            }
-        }
     }
 }
 
@@ -2602,242 +2378,6 @@ struct PreparedTrade {
     training_label_source_kind: Option<String>,
 }
 
-impl PreparedTrade {
-    fn telegram_text(&self, mode: TradeMode) -> String {
-        let heading = match mode {
-            TradeMode::Live => format!(
-                "Trying {} {}",
-                self.asset.to_string().to_ascii_uppercase(),
-                outcome_label(&self.outcome)
-            ),
-            TradeMode::Shadow => format!(
-                "Shadow trade: {} {}",
-                self.asset.to_string().to_ascii_uppercase(),
-                outcome_label(&self.outcome)
-            ),
-        };
-        let win_text = self
-            .estimated_profit_usdc
-            .zip(self.estimated_payout_usdc)
-            .map(|(profit, payout)| {
-                format!(
-                    "If it wins: +{} profit ({} payout)",
-                    format_usdc(profit),
-                    format_usdc(payout)
-                )
-            })
-            .unwrap_or_else(|| "If it wins: payout estimate unavailable".to_string());
-        format!(
-            "{}\nTarget: {}\nCurrent: {}\nMaker bid: {} for {} shares @ {:.4}\nTime left: {}\n{}",
-            heading,
-            format_market_price(self.asset, self.line_price),
-            format_market_price(self.asset, self.current_price),
-            format_usdc(self.amount_usdc),
-            format_shares(self.size_shares),
-            self.order_price,
-            format_remaining(self.remaining_sec),
-            win_text
-        )
-    }
-}
-
-fn outcome_label(outcome: &Outcome) -> &'static str {
-    match outcome {
-        Outcome::Up => "Up",
-        Outcome::Down => "Down",
-        Outcome::Other(_) => "Other",
-    }
-}
-
-fn format_usdc(value: f64) -> String {
-    format_currency(value, 2)
-}
-
-fn format_shares(value: f64) -> String {
-    format!("{value:.4}")
-        .trim_end_matches('0')
-        .trim_end_matches('.')
-        .to_string()
-}
-
-fn format_signed_usdc(value: f64) -> String {
-    if value > 0.0 {
-        format!("+{}", format_usdc(value))
-    } else if value < 0.0 {
-        format!("-{}", format_usdc(value.abs()))
-    } else {
-        format_usdc(0.0)
-    }
-}
-
-fn format_remaining(seconds: i64) -> String {
-    let seconds = seconds.max(0);
-    let minutes = seconds / 60;
-    let seconds = seconds % 60;
-    if minutes > 0 {
-        format!("{minutes}m {seconds:02}s")
-    } else {
-        format!("{seconds}s")
-    }
-}
-
-fn format_market_price(asset: Asset, value: f64) -> String {
-    match asset {
-        Asset::Btc | Asset::Eth => format_currency(value, 2),
-        Asset::Sol => format_currency(value, 4),
-        Asset::Xrp | Asset::Doge | Asset::Hype | Asset::Bnb => format_currency(value, 6),
-    }
-}
-
-fn format_currency(value: f64, decimals: usize) -> String {
-    let sign = if value < 0.0 { "-" } else { "" };
-    let raw = format!("{:.*}", decimals, value.abs());
-    let (whole, fractional) = raw.split_once('.').unwrap_or((raw.as_str(), ""));
-    if decimals == 0 {
-        format!("{sign}${}", add_digit_grouping(whole))
-    } else {
-        format!("{sign}${}.{}", add_digit_grouping(whole), fractional)
-    }
-}
-
-fn format_whole_number(value: u64) -> String {
-    add_digit_grouping(&value.to_string())
-}
-
-fn format_percent(value: f64) -> String {
-    let rounded = (value * 10.0).round() / 10.0;
-    if (rounded.fract()).abs() < 0.000001 {
-        format!("{rounded:.0}%")
-    } else {
-        format!("{rounded:.1}%")
-    }
-}
-
-fn format_percent_limited(value: f64, max_decimals: usize) -> String {
-    let mut text = format!("{:.*}", max_decimals, value);
-    if let Some(dot_index) = text.find('.') {
-        while text.ends_with('0') {
-            text.pop();
-        }
-        if text.len() == dot_index + 1 {
-            text.pop();
-        }
-    }
-    format!("{text}%")
-}
-
-fn format_price_line_distance_percent(current_price: f64, line_price: f64) -> String {
-    let line_abs = line_price.abs();
-    if line_abs <= f64::EPSILON {
-        return format_percent_limited(0.0, 2);
-    }
-    format_percent_limited(((current_price - line_price).abs() / line_abs) * 100.0, 2)
-}
-
-fn price_line_position(current_price: f64, line_price: f64) -> &'static str {
-    if current_price < line_price {
-        "below"
-    } else {
-        "above"
-    }
-}
-
-fn add_digit_grouping(digits: &str) -> String {
-    let mut grouped = String::with_capacity(digits.len() + digits.len() / 3);
-    for (index, ch) in digits.chars().rev().enumerate() {
-        if index > 0 && index % 3 == 0 {
-            grouped.push(',');
-        }
-        grouped.push(ch);
-    }
-    grouped.chars().rev().collect()
-}
-
-fn live_startup_error_text(error: &str) -> String {
-    format!("Live trading could not start.\nReason: {error}\nNo live orders were sent.")
-}
-
-fn live_entry_filled_text(prepared: &PreparedTrade, fill: &LiveFill) -> String {
-    format!(
-        "Filled {} {} maker bid for {} ({} shares @ {:.4})\n\nCurrent price is {} {} the price line ({})",
-        asset_ticker(prepared.asset),
-        outcome_arrow(&prepared.outcome),
-        format_usdc(fill.amount_usdc),
-        format_shares(fill.size_shares),
-        fill.price,
-        format_price_line_distance_percent(prepared.current_price, prepared.line_price),
-        price_line_position(prepared.current_price, prepared.line_price),
-        format_market_price(prepared.asset, prepared.line_price),
-    )
-}
-
-fn live_entry_posted_text(prepared: &PreparedTrade) -> String {
-    let effective_until = maker_order_effective_until(prepared.expires_at);
-    format!(
-        "Posted {} {} maker bid for {} ({} shares @ {:.4})\nExpires: {}\n\nCurrent price is {} {} the price line ({})",
-        asset_ticker(prepared.asset),
-        outcome_arrow(&prepared.outcome),
-        format_usdc(prepared.amount_usdc),
-        format_shares(prepared.size_shares),
-        prepared.order_price,
-        effective_until.format("%Y-%m-%d %H:%M:%S UTC"),
-        format_price_line_distance_percent(prepared.current_price, prepared.line_price),
-        price_line_position(prepared.current_price, prepared.line_price),
-        format_market_price(prepared.asset, prepared.line_price),
-    )
-}
-
-fn live_entry_rejected_text(asset: Asset, outcome: &Outcome, reason: &str) -> String {
-    format!(
-        "Rejected entry of {} {}: {}",
-        asset_ticker(asset),
-        outcome_arrow(outcome),
-        clean_failure_reason(reason)
-    )
-}
-
-fn asset_ticker(asset: Asset) -> &'static str {
-    match asset {
-        Asset::Btc => "BTC",
-        Asset::Eth => "ETH",
-        Asset::Sol => "SOL",
-        Asset::Xrp => "XRP",
-        Asset::Doge => "DOGE",
-        Asset::Hype => "HYPE",
-        Asset::Bnb => "BNB",
-    }
-}
-
-fn outcome_arrow(outcome: &Outcome) -> &'static str {
-    match outcome {
-        Outcome::Up => "↑",
-        Outcome::Down => "↓",
-        Outcome::Other(_) => "?",
-    }
-}
-
-fn clean_failure_reason(reason: &str) -> String {
-    let trimmed = reason.trim();
-    extract_error_json_value(trimmed).unwrap_or_else(|| trimmed.to_string())
-}
-
-fn extract_error_json_value(reason: &str) -> Option<String> {
-    let start = reason.find('{')?;
-    let end = reason.rfind('}')?;
-    if end < start {
-        return None;
-    }
-
-    let payload: Value = serde_json::from_str(&reason[start..=end]).ok()?;
-    payload
-        .get("error")
-        .or_else(|| payload.get("error_msg"))
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string)
-}
-
 fn is_retryable_no_fill_response(response: &LiveOrderResponse) -> bool {
     !response.success
         && response
@@ -2910,11 +2450,6 @@ fn duration_ms(duration: Duration) -> i64 {
     duration.as_millis().try_into().unwrap_or(i64::MAX)
 }
 
-const MAX_MARKET_PATH_SECONDS: i64 = 300;
-const PATH_LOOKBACK_SECONDS: i64 = 60;
-const MAX_PATH_LOOKBACK_DRIFT_SECONDS: i64 = 30;
-const LEAD_DECAY_PENALTY_THRESHOLD: f64 = 0.75;
-const LEAD_DECAY_EDGE_PENALTY: f64 = 0.005;
 const RETRYABLE_NO_FILL_COOLDOWN_SECONDS: i64 = 2;
 const LIVE_SETTLEMENT_CHECK_INTERVAL_SECONDS: u64 = 30;
 const MOMENTUM_OVERLAY_VOL_LOOKBACK_MIN: u32 = 30;
@@ -2997,178 +2532,6 @@ fn maker_order_expires_at(slot_end: DateTime<Utc>) -> DateTime<Utc> {
 
 fn maker_order_effective_until(expires_at: DateTime<Utc>) -> DateTime<Utc> {
     expires_at - TimeDelta::seconds(60)
-}
-
-#[derive(Clone, Debug, Default)]
-struct MarketPricePath {
-    samples: VecDeque<PathSample>,
-    max_abs_d_bps_so_far: f64,
-}
-
-impl MarketPricePath {
-    fn push(&mut self, timestamp: DateTime<Utc>, price: Decimal, line_price: Decimal) {
-        if self
-            .samples
-            .back()
-            .is_some_and(|sample| sample.timestamp == timestamp && sample.price == price)
-        {
-            return;
-        }
-
-        if let Some(abs_d_bps) = distance_bps(price, line_price)
-            .map(decimal_abs)
-            .and_then(|value| value.to_f64())
-        {
-            self.max_abs_d_bps_so_far = self.max_abs_d_bps_so_far.max(abs_d_bps);
-        }
-
-        self.samples.push_back(PathSample { timestamp, price });
-        let cutoff = timestamp - TimeDelta::seconds(MAX_MARKET_PATH_SECONDS);
-        while self
-            .samples
-            .front()
-            .is_some_and(|sample| sample.timestamp < cutoff)
-        {
-            self.samples.pop_front();
-        }
-    }
-
-    fn state(
-        &self,
-        current_time: DateTime<Utc>,
-        current_price: Decimal,
-        line_price: Decimal,
-        side_leading: SideLeading,
-        current_abs_d_bps: f64,
-    ) -> Option<PathState> {
-        let price_60s_ago =
-            self.price_near(current_time - TimeDelta::seconds(PATH_LOOKBACK_SECONDS))?;
-        let previous_price = price_60s_ago.price.to_f64()?;
-        let current_price_f64 = current_price.to_f64()?;
-        if previous_price <= 0.0 {
-            return None;
-        }
-
-        let return_last_60s_bps = 10_000.0 * (current_price_f64 / previous_price - 1.0);
-        let retracing_60s = match side_leading {
-            SideLeading::UpLeading => return_last_60s_bps < 0.0,
-            SideLeading::DownLeading => return_last_60s_bps > 0.0,
-        };
-        let max_abs_d_bps_so_far = self
-            .max_abs_d_bps_so_far
-            .max(distance_bps(current_price, line_price)?.to_f64()?.abs())
-            .max(current_abs_d_bps);
-        let lead_decay_ratio = if max_abs_d_bps_so_far > 0.0 {
-            current_abs_d_bps / max_abs_d_bps_so_far
-        } else {
-            0.0
-        };
-
-        Some(PathState {
-            return_last_60s_bps,
-            retracing_60s,
-            max_abs_d_bps_so_far,
-            lead_decay_ratio,
-        })
-    }
-
-    fn price_near(&self, target: DateTime<Utc>) -> Option<PathSample> {
-        let sample = self
-            .samples
-            .iter()
-            .min_by_key(|sample| (sample.timestamp - target).num_milliseconds().abs())
-            .copied()?;
-        let drift_ms = (sample.timestamp - target).num_milliseconds().abs();
-        if drift_ms > TimeDelta::seconds(MAX_PATH_LOOKBACK_DRIFT_SECONDS).num_milliseconds() {
-            return None;
-        }
-
-        Some(sample)
-    }
-}
-
-#[derive(Clone, Copy, Debug)]
-struct PathSample {
-    timestamp: DateTime<Utc>,
-    price: Decimal,
-}
-
-#[derive(Clone, Debug)]
-struct PathState {
-    return_last_60s_bps: f64,
-    retracing_60s: bool,
-    max_abs_d_bps_so_far: f64,
-    lead_decay_ratio: f64,
-}
-
-fn edge_penalty_applies(path_state: &PathState) -> bool {
-    path_state.lead_decay_ratio < LEAD_DECAY_PENALTY_THRESHOLD
-}
-
-fn required_edge_probability(runtime: &AssetRuntime, path_state: &PathState) -> Option<f64> {
-    if path_state.max_abs_d_bps_so_far <= 0.0 {
-        return None;
-    }
-
-    Some(
-        runtime.min_edge_probability()
-            + if edge_penalty_applies(path_state) {
-                LEAD_DECAY_EDGE_PENALTY
-            } else {
-                0.0
-            },
-    )
-}
-
-#[derive(Clone, Debug, Default)]
-struct EdgeSummary {
-    best_fee: Option<f64>,
-    best_all_in_cost: Option<f64>,
-    best_edge: Option<f64>,
-    weighted_avg_price: Option<f64>,
-    max_acceptable_price: Option<f64>,
-    order_price: Option<Decimal>,
-    order_size_shares: Option<Decimal>,
-    order_notional_usdc: Option<Decimal>,
-}
-
-fn summarize_maker_limit(
-    cell: &RuntimeCell,
-    limit_price: Decimal,
-    required_edge: f64,
-    target_notional: Decimal,
-) -> Option<EdgeSummary> {
-    let mut summary = EdgeSummary::default();
-
-    let price = limit_price.normalize();
-    let price_f64 = price.to_f64()?;
-    let fee = platform_fee_usdc(1.0, price_f64, 0.0, LiquidityRole::Maker)?;
-    let all_in_cost = price_f64;
-    let edge = cell.p_win_lower - all_in_cost;
-    summary.best_fee = Some(fee);
-    summary.best_all_in_cost = Some(all_in_cost);
-    summary.best_edge = Some(edge);
-
-    if edge < required_edge {
-        return Some(summary);
-    }
-
-    let size_shares = (target_notional / price)
-        .trunc_with_scale(LIVE_ORDER_SIZE_SCALE)
-        .normalize();
-    if size_shares <= Decimal::ZERO {
-        return Some(summary);
-    }
-    let notional = (size_shares * price)
-        .trunc_with_scale(ORDER_NOTIONAL_SCALE)
-        .normalize();
-    summary.weighted_avg_price = Some(price_f64);
-    summary.max_acceptable_price = Some(price_f64);
-    summary.order_price = Some(price);
-    summary.order_size_shares = Some(size_shares);
-    summary.order_notional_usdc = Some(notional);
-
-    Some(summary)
 }
 
 #[cfg(test)]
