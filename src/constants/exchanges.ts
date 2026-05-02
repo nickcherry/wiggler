@@ -12,4 +12,5 @@ export const exchangeIdValues = [
   "okx-swap",
   "bybit-spot",
   "bybit-perp",
+  "polymarket-chainlink",
 ] as const;

@@ -7,6 +7,7 @@ import { streamCoinbaseSpotQuotes } from "@wiggler/lib/exchangePrices/sources/co
 import { streamGeminiSpotQuotes } from "@wiggler/lib/exchangePrices/sources/gemini/streamGeminiSpotQuotes";
 import { streamOkxSpotQuotes } from "@wiggler/lib/exchangePrices/sources/okx/streamOkxSpotQuotes";
 import { streamOkxSwapQuotes } from "@wiggler/lib/exchangePrices/sources/okx/streamOkxSwapQuotes";
+import { streamPolymarketChainlinkQuotes } from "@wiggler/lib/exchangePrices/sources/polymarket/streamPolymarketChainlinkQuotes";
 import type {
   StreamHandle,
   StreamQuotesParams,
@@ -32,4 +33,5 @@ export const streamStartersByExchange: Record<ExchangeId, StartQuoteStream> = {
   "okx-swap": streamOkxSwapQuotes,
   "bybit-spot": streamBybitSpotQuotes,
   "bybit-perp": streamBybitPerpQuotes,
+  "polymarket-chainlink": streamPolymarketChainlinkQuotes,
 };
