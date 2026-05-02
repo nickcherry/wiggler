@@ -1466,6 +1466,8 @@ impl MonitorState {
                     "filled"
                 } else if response.success {
                     "posted"
+                } else if retryable_no_fill {
+                    "no_fill_retryable"
                 } else {
                     "rejected"
                 };
@@ -1493,7 +1495,7 @@ impl MonitorState {
                     decision,
                     "live order response"
                 );
-                if !response.success {
+                if !response.success && !retryable_no_fill {
                     warn!(
                         event = "live_order_rejected",
                         timestamp = %Utc::now().to_rfc3339(),
@@ -1522,6 +1524,8 @@ impl MonitorState {
                     Some(live_entry_filled_text(&prepared, &response))
                 } else if response.success {
                     Some(live_entry_posted_text(&prepared, &response))
+                } else if retryable_no_fill {
+                    None
                 } else if !response.success {
                     Some(live_entry_rejected_text(
                         request.asset,
@@ -1553,7 +1557,7 @@ impl MonitorState {
                         Utc::now() + TimeDelta::seconds(RETRYABLE_NO_FILL_COOLDOWN_SECONDS),
                     );
                 }
-                self.record_live_error(&market.condition_id, &error_chain);
+                self.record_live_error(&market.condition_id, &error_chain, retryable_no_fill);
                 warn!(
                     event = "live_order_error",
                     timestamp = %Utc::now().to_rfc3339(),
@@ -1564,13 +1568,15 @@ impl MonitorState {
                     error = %error_chain,
                     "live order failed"
                 );
-                let message = live_entry_rejected_text(
-                    request.asset,
-                    &request.outcome,
-                    &clean_failure_reason(&error_chain),
-                );
-                if let Err(telegram_error) = telegram.send_message(&message).await {
-                    warn!(error = %telegram_error, slug = market.slug, "failed to send live error Telegram message");
+                if !retryable_no_fill {
+                    let message = live_entry_rejected_text(
+                        request.asset,
+                        &request.outcome,
+                        &clean_failure_reason(&error_chain),
+                    );
+                    if let Err(telegram_error) = telegram.send_message(&message).await {
+                        warn!(error = %telegram_error, slug = market.slug, "failed to send live error Telegram message");
+                    }
                 }
             }
         }
@@ -1785,6 +1791,7 @@ impl MonitorState {
         let Some(entry) = self.tracked_entries.get_mut(condition_id) else {
             return;
         };
+        let retryable_no_fill = is_retryable_no_fill_response(response);
         entry.track_closeout = response.has_fill();
         if response.has_fill() {
             entry.filled_amount_usdc = response
@@ -1811,13 +1818,15 @@ impl MonitorState {
             "filled"
         } else if response.success {
             "posted"
+        } else if retryable_no_fill {
+            "no_fill_retryable"
         } else {
             "rejected"
         });
         entry.write_record();
     }
 
-    fn record_live_error(&mut self, condition_id: &str, error: &str) {
+    fn record_live_error(&mut self, condition_id: &str, error: &str, retryable_no_fill: bool) {
         let Some(entry) = self.tracked_entries.get_mut(condition_id) else {
             return;
         };
@@ -1826,7 +1835,11 @@ impl MonitorState {
             "received_at": Utc::now().to_rfc3339(),
             "error": error,
         });
-        entry.record["state"] = json!("error");
+        entry.record["state"] = json!(if retryable_no_fill {
+            "no_fill_retryable"
+        } else {
+            "error"
+        });
         entry.write_record();
     }
 
@@ -2433,6 +2446,8 @@ fn is_retryable_no_fill_error(error: &str) -> bool {
     let normalized = error.to_ascii_lowercase();
     (normalized.contains("invalid_post_only_order")
         && !normalized.contains("invalid_post_only_order_type"))
+        || normalized.contains("invalid post-only order")
+        || normalized.contains("order crosses book")
         || (normalized.contains("post-only") && normalized.contains("would cross"))
 }
 
@@ -3445,6 +3460,9 @@ mod tests {
             "Status: error(400 Bad Request) making POST call to /order with {\"error\":\"invalid_post_only_order\"}"
         ));
         assert!(is_retryable_no_fill_error("post-only order would cross"));
+        assert!(is_retryable_no_fill_error(
+            "Status: error(400 Bad Request) making POST call to /order with {\"error\":\"invalid post-only order: order crosses book\"}"
+        ));
         assert!(!is_retryable_no_fill_error(
             "Status: error(401 Unauthorized) making GET call to /data/orders with {\"error\":\"Unauthorized/Invalid api key\"}"
         ));
