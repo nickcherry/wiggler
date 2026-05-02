@@ -3592,6 +3592,7 @@ mod tests {
             polymarket_api_secret: None,
             polymarket_api_passphrase: None,
             polymarket_api_nonce: None,
+            polymarket_api_credential_file: std::path::PathBuf::from("tmp/polymarket-api.env"),
             polymarket_signature_type: PolymarketSignatureType::Eoa,
             polymarket_user_address: None,
             polymarket_funder_address: None,

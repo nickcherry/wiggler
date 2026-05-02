@@ -113,7 +113,17 @@ Before enabling live trading, the funder wallet must have the required
 Polymarket collateral allowance. The SDK/API will reject orders with
 insufficient balance or allowance.
 
-For API-key setup, prefer the checked-in auth helper:
+The monitor keeps Polymarket L2 API credentials in
+`POLYMARKET_API_CREDENTIAL_FILE`, which defaults to
+`tmp/polymarket-api.env`. That file is a local runtime cache and must stay out
+of git. Startup loads the cache first, then falls back to credentials from the
+environment. If Polymarket later rejects the active API key, the monitor
+single-flights recovery, tries to derive credentials from the cached/configured
+nonce, and only creates a fresh key when derivation fails. Successful recovery
+writes the replacement credentials back to the cache and refreshes the
+heartbeat before order, trade, or heartbeat polling resumes.
+
+For emergency manual API-key setup, use the checked-in auth helper:
 
 ```bash
 set -a
@@ -126,14 +136,10 @@ AUTH_MANUAL_WRITE_ENV=tmp/polymarket-api.env \
 cargo run --release --example auth_manual
 ```
 
-The helper uses the same L1 EIP-712 auth as the Rust SDK but sends an explicit
-empty JSON body on `POST /auth/api-key`. That request shape avoids Cloudflare
-blocks observed from the stock SDK bodyless create call. The generated file
-contains `POLYMARKET_API_KEY`, `POLYMARKET_API_SECRET`, and
-`POLYMARKET_API_PASSPHRASE`; keep it out of git. It also writes the nonce used
-to mint the credentials so the key can be derived again later if needed. If L2
-read endpoints start returning `401 Unauthorized/Invalid api key`, create fresh
-credentials with a new nonce before resuming live trading.
+The helper uses the same L1 EIP-712 auth as the monitor and sends an explicit
+empty JSON body on `POST /auth/api-key`. The generated file contains
+`POLYMARKET_API_KEY`, `POLYMARKET_API_SECRET`, `POLYMARKET_API_PASSPHRASE`, and
+the nonce used to mint the credentials.
 
 To test the configured credentials without placing orders, run:
 

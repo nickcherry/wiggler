@@ -1,4 +1,8 @@
 use std::{
+    collections::HashMap,
+    fs,
+    io::Write as _,
+    path::{Path, PathBuf},
     str::FromStr,
     sync::{
         Arc,
@@ -17,7 +21,7 @@ use alloy::{
 use anyhow::{Context, Result, bail};
 use polymarket_client_sdk_v2::{
     POLYGON,
-    auth::{Credentials, Uuid},
+    auth::{Credentials, ExposeSecret as _, Uuid},
     clob::{
         Client, Config,
         types::{
@@ -46,6 +50,7 @@ type AuthenticatedClient = Client<
 >;
 type ClientState = Arc<Mutex<AuthenticatedClient>>;
 type HeartbeatState = Arc<Mutex<Option<Uuid>>>;
+type CredentialRotationLock = Arc<Mutex<()>>;
 const INITIAL_CURSOR: &str = "MA==";
 static LAST_FRESH_API_NONCE: AtomicU32 = AtomicU32::new(0);
 
@@ -64,6 +69,7 @@ pub struct LiveTradeExecutor {
     auth_config: LiveAuthConfig,
     order_type: OrderType,
     heartbeat_state: HeartbeatState,
+    credential_rotation_lock: CredentialRotationLock,
     _heartbeat_task: JoinHandle<()>,
 }
 
@@ -115,38 +121,29 @@ impl LiveTradeExecutor {
             clob_api_url: config.clob_api_url.clone(),
             credentials: credentials_from_config(config)?,
             nonce: config.polymarket_api_nonce,
+            credential_file: config.polymarket_api_credential_file.clone(),
             signature_type: config.polymarket_signature_type,
             funder_address,
         };
+        let credential_rotation_lock = Arc::new(Mutex::new(()));
         let mut client = authenticate_client(&auth_config, &signer, CredentialSource::Configured)
             .await
             .context("authenticate CLOB client")?;
         let heartbeat_state = Arc::new(Mutex::new(None));
         if let Err(error) = refresh_heartbeat(&client, &heartbeat_state).await {
             if is_l2_auth_error_chain(&error) {
-                let nonce = fresh_api_nonce()?;
-                warn!(
-                    event = "live_api_key_rotate",
-                    endpoint = "startup/heartbeat",
-                    nonce,
-                    error = %format!("{error:#}"),
-                    "creating fresh Polymarket API credentials after startup heartbeat auth error"
-                );
-                client =
-                    authenticate_client(&auth_config, &signer, CredentialSource::FreshNonce(nonce))
-                        .await
-                        .context("authenticate CLOB client with fresh API credentials")?;
-                reset_heartbeat(&heartbeat_state).await;
-                refresh_heartbeat(&client, &heartbeat_state)
-                    .await
-                    .context("initialize CLOB heartbeat after API credential rotation")?;
-                info!(
-                    event = "live_api_key_rotated",
-                    endpoint = "startup/heartbeat",
-                    nonce,
-                    api_key = %redacted_uuid(client.credentials().key()),
-                    "fresh Polymarket API credentials installed"
-                );
+                client = recover_client_after_l2_auth_error(
+                    None,
+                    &heartbeat_state,
+                    &auth_config,
+                    &signer,
+                    &credential_rotation_lock,
+                    "startup/heartbeat",
+                    &format!("{error:#}"),
+                    None,
+                )
+                .await
+                .context("recover CLOB client after startup heartbeat auth error")?;
             } else {
                 return Err(error).context("initialize CLOB heartbeat");
             }
@@ -154,31 +151,21 @@ impl LiveTradeExecutor {
         let collateral = match validate_live_account(&client, &heartbeat_state).await {
             Ok(collateral) => collateral,
             Err(error) if is_l2_auth_error_chain(&error) => {
-                let nonce = fresh_api_nonce()?;
-                warn!(
-                    event = "live_api_key_rotate",
-                    nonce,
-                    error = %format!("{error:#}"),
-                    "creating fresh Polymarket API credentials after startup L2 auth error"
-                );
-                client =
-                    authenticate_client(&auth_config, &signer, CredentialSource::FreshNonce(nonce))
-                        .await
-                        .context("authenticate CLOB client with fresh API credentials")?;
-                reset_heartbeat(&heartbeat_state).await;
-                refresh_heartbeat(&client, &heartbeat_state)
+                client = recover_client_after_l2_auth_error(
+                    None,
+                    &heartbeat_state,
+                    &auth_config,
+                    &signer,
+                    &credential_rotation_lock,
+                    "startup/account",
+                    &format!("{error:#}"),
+                    None,
+                )
+                .await
+                .context("recover CLOB client after startup account auth error")?;
+                validate_live_account(&client, &heartbeat_state)
                     .await
-                    .context("initialize CLOB heartbeat after API credential rotation")?;
-                let collateral = validate_live_account(&client, &heartbeat_state)
-                    .await
-                    .context("validate live account after API credential rotation")?;
-                info!(
-                    event = "live_api_key_rotated",
-                    nonce,
-                    api_key = %redacted_uuid(client.credentials().key()),
-                    "fresh Polymarket API credentials installed"
-                );
-                collateral
+                    .context("validate live account after API credential rotation")?
             }
             Err(error) => return Err(error),
         };
@@ -212,6 +199,7 @@ impl LiveTradeExecutor {
                 Arc::clone(&heartbeat_state),
                 auth_config.clone(),
                 signer.clone(),
+                Arc::clone(&credential_rotation_lock),
                 telegram,
             ),
             client,
@@ -219,6 +207,7 @@ impl LiveTradeExecutor {
             auth_config,
             order_type: map_order_type(config.live_order_type),
             heartbeat_state,
+            credential_rotation_lock,
         })
     }
 
@@ -366,37 +355,18 @@ impl LiveTradeExecutor {
         endpoint: &'static str,
         error: &PolymarketError,
     ) -> Result<AuthenticatedClient> {
-        let nonce = fresh_api_nonce()?;
-        warn!(
-            event = "live_api_key_rotate",
-            endpoint,
-            nonce,
-            error = %error,
-            "creating fresh Polymarket API credentials after L2 auth error"
-        );
-        let client = authenticate_client(
+        recover_client_after_l2_auth_error(
+            Some(&self.client),
+            &self.heartbeat_state,
             &self.auth_config,
             &self.signer,
-            CredentialSource::FreshNonce(nonce),
+            &self.credential_rotation_lock,
+            endpoint,
+            &error.to_string(),
+            Some(self.current_client().await.credentials().key()),
         )
         .await
-        .context("authenticate CLOB client with fresh API credentials")?;
-        reset_heartbeat(&self.heartbeat_state).await;
-        refresh_heartbeat(&client, &self.heartbeat_state)
-            .await
-            .context("refresh CLOB heartbeat after API credential rotation")?;
-        {
-            let mut current = self.client.lock().await;
-            *current = client.clone();
-        }
-        info!(
-            event = "live_api_key_rotated",
-            endpoint,
-            nonce,
-            api_key = %redacted_uuid(client.credentials().key()),
-            "fresh Polymarket API credentials installed"
-        );
-        Ok(client)
+        .context("recover CLOB client after L2 auth error")
     }
 }
 
@@ -405,6 +375,7 @@ struct LiveAuthConfig {
     clob_api_url: String,
     credentials: Option<Credentials>,
     nonce: Option<u32>,
+    credential_file: PathBuf,
     signature_type: PolymarketSignatureType,
     funder_address: Option<Address>,
 }
@@ -412,6 +383,7 @@ struct LiveAuthConfig {
 #[derive(Clone, Copy, Debug)]
 enum CredentialSource {
     Configured,
+    DerivedNonce(u32),
     FreshNonce(u32),
 }
 
@@ -425,14 +397,7 @@ async fn authenticate_client(
         Config::builder().use_server_time(true).build(),
     )
     .with_context(|| format!("create CLOB client for {}", config.clob_api_url))?;
-    let fresh_credentials = match credential_source {
-        CredentialSource::FreshNonce(nonce) => Some(
-            create_fresh_api_key(config, signer, nonce)
-                .await
-                .context("create fresh CLOB API key")?,
-        ),
-        CredentialSource::Configured => None,
-    };
+    let credentials = credentials_for_source(config, signer, credential_source).await?;
     let mut auth = client
         .authentication_builder(signer)
         .signature_type(map_signature_type(config.signature_type));
@@ -441,19 +406,10 @@ async fn authenticate_client(
         auth = auth.funder(funder_address);
     }
 
-    match credential_source {
-        CredentialSource::Configured => {
-            if let Some(credentials) = config.credentials.clone() {
-                auth = auth.credentials(credentials);
-            } else if let Some(nonce) = config.nonce {
-                auth = auth.nonce(nonce);
-            }
-        }
-        CredentialSource::FreshNonce(nonce) => {
-            let credentials = fresh_credentials
-                .with_context(|| format!("missing fresh API key nonce {nonce}"))?;
-            auth = auth.credentials(credentials);
-        }
+    if let Some(credentials) = credentials {
+        auth = auth.credentials(credentials);
+    } else if let Some(nonce) = config.nonce {
+        auth = auth.nonce(nonce);
     }
 
     auth.authenticate()
@@ -461,10 +417,113 @@ async fn authenticate_client(
         .context("authenticate CLOB client")
 }
 
+async fn credentials_for_source(
+    config: &LiveAuthConfig,
+    signer: &PrivateKeySigner,
+    credential_source: CredentialSource,
+) -> Result<Option<Credentials>> {
+    match credential_source {
+        CredentialSource::Configured => {
+            if let Some(cached) = read_credentials_cache(&config.credential_file)? {
+                info!(
+                    event = "live_api_key_cache_loaded",
+                    nonce = ?cached.nonce,
+                    api_key = %redacted_uuid(cached.credentials.key()),
+                    path = %config.credential_file.display(),
+                    "loaded cached Polymarket API credentials"
+                );
+                return Ok(Some(cached.credentials));
+            }
+
+            if let Some(credentials) = &config.credentials {
+                return Ok(Some(credentials.clone()));
+            }
+
+            if let Some(nonce) = config.nonce {
+                match derive_api_key(config, signer, nonce).await {
+                    Ok(credentials) => {
+                        write_credentials_cache(&config.credential_file, &credentials, nonce)?;
+                        warn!(
+                            event = "live_api_key_derived",
+                            endpoint = "startup/configured-nonce",
+                            nonce,
+                            api_key = %redacted_uuid(credentials.key()),
+                            path = %config.credential_file.display(),
+                            "derived and cached Polymarket API credentials"
+                        );
+                        return Ok(Some(credentials));
+                    }
+                    Err(error) => {
+                        warn!(
+                            event = "live_api_key_derive_error",
+                            endpoint = "startup/configured-nonce",
+                            nonce,
+                            error = %format!("{error:#}"),
+                            "failed to derive Polymarket API credentials"
+                        );
+                    }
+                }
+            }
+
+            let nonce = fresh_api_nonce()?;
+            let credentials = create_fresh_api_key(config, signer, nonce)
+                .await
+                .context("create fresh CLOB API key")?;
+            write_credentials_cache(&config.credential_file, &credentials, nonce)?;
+            warn!(
+                event = "live_api_key_rotated",
+                endpoint = "startup/missing-credentials",
+                nonce,
+                api_key = %redacted_uuid(credentials.key()),
+                path = %config.credential_file.display(),
+                "fresh Polymarket API credentials created and cached"
+            );
+            Ok(Some(credentials))
+        }
+        CredentialSource::DerivedNonce(nonce) => {
+            let credentials = derive_api_key(config, signer, nonce)
+                .await
+                .with_context(|| format!("derive CLOB API key with nonce {nonce}"))?;
+            write_credentials_cache(&config.credential_file, &credentials, nonce)?;
+            Ok(Some(credentials))
+        }
+        CredentialSource::FreshNonce(nonce) => {
+            let credentials = create_fresh_api_key(config, signer, nonce)
+                .await
+                .context("create fresh CLOB API key")?;
+            write_credentials_cache(&config.credential_file, &credentials, nonce)?;
+            Ok(Some(credentials))
+        }
+    }
+}
+
+async fn derive_api_key(
+    config: &LiveAuthConfig,
+    signer: &PrivateKeySigner,
+    nonce: u32,
+) -> Result<Credentials> {
+    request_api_key(config, signer, nonce, ApiKeyRequestMode::Derive).await
+}
+
 async fn create_fresh_api_key(
     config: &LiveAuthConfig,
     signer: &PrivateKeySigner,
     nonce: u32,
+) -> Result<Credentials> {
+    request_api_key(config, signer, nonce, ApiKeyRequestMode::Create).await
+}
+
+#[derive(Clone, Copy)]
+enum ApiKeyRequestMode {
+    Create,
+    Derive,
+}
+
+async fn request_api_key(
+    config: &LiveAuthConfig,
+    signer: &PrivateKeySigner,
+    nonce: u32,
+    mode: ApiKeyRequestMode,
 ) -> Result<Credentials> {
     let http = reqwest::Client::builder()
         .user_agent("Mozilla/5.0 (compatible; wiggler-auth/1.0)")
@@ -524,16 +583,27 @@ async fn create_fresh_api_key(
     headers.insert("ACCEPT", HeaderValue::from_static("application/json"));
     headers.insert("CONTENT-TYPE", HeaderValue::from_static("application/json"));
 
-    let response = http
-        .post(format!(
-            "{}/auth/api-key",
+    let mode_text = match mode {
+        ApiKeyRequestMode::Create => "create",
+        ApiKeyRequestMode::Derive => "derive",
+    };
+    let url = match mode {
+        ApiKeyRequestMode::Create => {
+            format!("{}/auth/api-key", config.clob_api_url.trim_end_matches('/'))
+        }
+        ApiKeyRequestMode::Derive => format!(
+            "{}/auth/derive-api-key",
             config.clob_api_url.trim_end_matches('/')
-        ))
-        .headers(headers)
-        .body("{}")
+        ),
+    };
+    let request = match mode {
+        ApiKeyRequestMode::Create => http.post(url).headers(headers).body("{}"),
+        ApiKeyRequestMode::Derive => http.get(url).headers(headers),
+    };
+    let response = request
         .send()
         .await
-        .with_context(|| format!("create CLOB API key with nonce {nonce}"))?;
+        .with_context(|| format!("{mode_text} CLOB API key with nonce {nonce}"))?;
     let status = response.status();
     let text = response
         .text()
@@ -541,7 +611,8 @@ async fn create_fresh_api_key(
         .context("read CLOB API key response")?;
     if !status.is_success() {
         bail!(
-            "create CLOB API key failed status={} body_prefix={}",
+            "{} CLOB API key failed status={} body_prefix={}",
+            mode_text,
             status,
             &text[..text.len().min(300)]
         );
@@ -553,6 +624,97 @@ async fn create_fresh_api_key(
         credentials.secret,
         credentials.passphrase,
     ))
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn recover_client_after_l2_auth_error(
+    client_state: Option<&ClientState>,
+    heartbeat_state: &HeartbeatState,
+    auth_config: &LiveAuthConfig,
+    signer: &PrivateKeySigner,
+    credential_rotation_lock: &CredentialRotationLock,
+    endpoint: &'static str,
+    error: &str,
+    failed_api_key: Option<Uuid>,
+) -> Result<AuthenticatedClient> {
+    let _guard = credential_rotation_lock.lock().await;
+
+    if let Some(client_state) = client_state {
+        let current = client_state.lock().await.clone();
+        if failed_api_key.is_some_and(|failed| current.credentials().key() != failed) {
+            info!(
+                event = "live_api_key_recovery_reused",
+                endpoint,
+                api_key = %redacted_uuid(current.credentials().key()),
+                "Polymarket API credentials were already rotated by another task"
+            );
+            return Ok(current);
+        }
+    }
+
+    for nonce in credential_nonce_candidates(auth_config)? {
+        warn!(
+            event = "live_api_key_derive",
+            endpoint, nonce, error, "deriving Polymarket API credentials after L2 auth error"
+        );
+        match authenticate_client(auth_config, signer, CredentialSource::DerivedNonce(nonce)).await
+        {
+            Ok(client) => {
+                reset_heartbeat(heartbeat_state).await;
+                refresh_heartbeat(&client, heartbeat_state)
+                    .await
+                    .context("refresh CLOB heartbeat after API credential derivation")?;
+                if let Some(client_state) = client_state {
+                    let mut current = client_state.lock().await;
+                    *current = client.clone();
+                }
+                warn!(
+                    event = "live_api_key_derived",
+                    endpoint,
+                    nonce,
+                    api_key = %redacted_uuid(client.credentials().key()),
+                    path = %auth_config.credential_file.display(),
+                    "derived and cached Polymarket API credentials"
+                );
+                return Ok(client);
+            }
+            Err(derive_error) => {
+                warn!(
+                    event = "live_api_key_derive_error",
+                    endpoint,
+                    nonce,
+                    error = %format!("{derive_error:#}"),
+                    "failed to derive Polymarket API credentials"
+                );
+            }
+        }
+    }
+
+    let nonce = fresh_api_nonce()?;
+    warn!(
+        event = "live_api_key_rotate",
+        endpoint, nonce, error, "creating fresh Polymarket API credentials after L2 auth error"
+    );
+    let client = authenticate_client(auth_config, signer, CredentialSource::FreshNonce(nonce))
+        .await
+        .context("authenticate CLOB client with fresh API credentials")?;
+    reset_heartbeat(heartbeat_state).await;
+    refresh_heartbeat(&client, heartbeat_state)
+        .await
+        .context("refresh CLOB heartbeat after API credential rotation")?;
+    if let Some(client_state) = client_state {
+        let mut current = client_state.lock().await;
+        *current = client.clone();
+    }
+    warn!(
+        event = "live_api_key_rotated",
+        endpoint,
+        nonce,
+        api_key = %redacted_uuid(client.credentials().key()),
+        path = %auth_config.credential_file.display(),
+        "fresh Polymarket API credentials created and cached"
+    );
+    Ok(client)
 }
 
 async fn validate_live_account(
@@ -707,6 +869,7 @@ fn spawn_heartbeat_task(
     heartbeat_state: HeartbeatState,
     auth_config: LiveAuthConfig,
     signer: PrivateKeySigner,
+    credential_rotation_lock: CredentialRotationLock,
     telegram: TelegramClient,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
@@ -725,6 +888,7 @@ fn spawn_heartbeat_task(
                         &heartbeat_state,
                         &auth_config,
                         &signer,
+                        &credential_rotation_lock,
                         &error,
                     )
                     .await;
@@ -768,34 +932,21 @@ async fn rotate_client_after_heartbeat_auth_error(
     heartbeat_state: &HeartbeatState,
     auth_config: &LiveAuthConfig,
     signer: &PrivateKeySigner,
+    credential_rotation_lock: &CredentialRotationLock,
     error: &anyhow::Error,
 ) -> Result<()> {
-    let nonce = fresh_api_nonce()?;
-    warn!(
-        event = "live_api_key_rotate",
-        endpoint = "heartbeat",
-        nonce,
-        error = %format!("{error:#}"),
-        "creating fresh Polymarket API credentials after heartbeat auth error"
-    );
-    let client = authenticate_client(auth_config, signer, CredentialSource::FreshNonce(nonce))
-        .await
-        .context("authenticate CLOB client with fresh API credentials")?;
-    reset_heartbeat(heartbeat_state).await;
-    refresh_heartbeat(&client, heartbeat_state)
-        .await
-        .context("refresh CLOB heartbeat after heartbeat API credential rotation")?;
-    {
-        let mut current = client_state.lock().await;
-        *current = client.clone();
-    }
-    info!(
-        event = "live_api_key_rotated",
-        endpoint = "heartbeat",
-        nonce,
-        api_key = %redacted_uuid(client.credentials().key()),
-        "fresh Polymarket API credentials installed after heartbeat auth error"
-    );
+    let failed_api_key = client_state.lock().await.credentials().key();
+    recover_client_after_l2_auth_error(
+        Some(client_state),
+        heartbeat_state,
+        auth_config,
+        signer,
+        credential_rotation_lock,
+        "heartbeat",
+        &format!("{error:#}"),
+        Some(failed_api_key),
+    )
+    .await?;
     Ok(())
 }
 
@@ -862,6 +1013,117 @@ fn redacted_uuid(value: Uuid) -> String {
     let value = value.to_string();
     let suffix_start = value.len().saturating_sub(4);
     format!("{}...{}", &value[..8], &value[suffix_start..])
+}
+
+#[derive(Clone)]
+struct CachedCredentials {
+    credentials: Credentials,
+    nonce: Option<u32>,
+}
+
+fn read_credentials_cache(path: &Path) -> Result<Option<CachedCredentials>> {
+    let text = match fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error).with_context(|| format!("read {}", path.display())),
+    };
+    let values = parse_env_lines(&text);
+    let Some(api_key) = values.get("POLYMARKET_API_KEY") else {
+        return Ok(None);
+    };
+    let Some(secret) = values.get("POLYMARKET_API_SECRET") else {
+        return Ok(None);
+    };
+    let Some(passphrase) = values.get("POLYMARKET_API_PASSPHRASE") else {
+        return Ok(None);
+    };
+    let nonce = values
+        .get("POLYMARKET_API_NONCE")
+        .filter(|value| !value.is_empty())
+        .map(|value| value.parse::<u32>())
+        .transpose()
+        .with_context(|| format!("parse POLYMARKET_API_NONCE in {}", path.display()))?;
+
+    Ok(Some(CachedCredentials {
+        credentials: Credentials::new(
+            Uuid::parse_str(api_key)
+                .with_context(|| format!("parse POLYMARKET_API_KEY in {}", path.display()))?,
+            secret.clone(),
+            passphrase.clone(),
+        ),
+        nonce,
+    }))
+}
+
+fn write_credentials_cache(path: &Path, credentials: &Credentials, nonce: u32) -> Result<()> {
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("create credential cache dir {}", parent.display()))?;
+    }
+    let temp_path = path.with_extension("tmp");
+    let body = format!(
+        "POLYMARKET_API_KEY={}\nPOLYMARKET_API_SECRET={}\nPOLYMARKET_API_PASSPHRASE={}\nPOLYMARKET_API_NONCE={}\n",
+        credentials.key(),
+        credentials.secret().expose_secret(),
+        credentials.passphrase().expose_secret(),
+        nonce
+    );
+
+    let mut options = fs::OpenOptions::new();
+    options.create(true).truncate(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    {
+        let mut file = options
+            .open(&temp_path)
+            .with_context(|| format!("write {}", temp_path.display()))?;
+        file.write_all(body.as_bytes())
+            .with_context(|| format!("write {}", temp_path.display()))?;
+        file.sync_all()
+            .with_context(|| format!("sync {}", temp_path.display()))?;
+    }
+    fs::rename(&temp_path, path).with_context(|| {
+        format!(
+            "rename credential cache {} to {}",
+            temp_path.display(),
+            path.display()
+        )
+    })?;
+    Ok(())
+}
+
+fn parse_env_lines(text: &str) -> HashMap<String, String> {
+    text.lines()
+        .filter_map(|line| {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                return None;
+            }
+            let (key, value) = line.split_once('=')?;
+            Some((key.trim().to_string(), value.trim().to_string()))
+        })
+        .collect()
+}
+
+fn credential_nonce_candidates(config: &LiveAuthConfig) -> Result<Vec<u32>> {
+    let mut nonces = Vec::new();
+    if let Some(nonce) =
+        read_credentials_cache(&config.credential_file)?.and_then(|cache| cache.nonce)
+    {
+        nonces.push(nonce);
+    }
+    if let Some(nonce) = config.nonce
+        && !nonces.contains(&nonce)
+    {
+        nonces.push(nonce);
+    }
+    Ok(nonces)
 }
 
 fn is_l2_auth_error(error: &PolymarketError) -> bool {
@@ -977,14 +1239,16 @@ fn probability_decimal_truncated(name: &str, value: f64, scale: u32) -> Result<D
 mod tests {
     use std::sync::atomic::{AtomicU32, Ordering};
 
+    use polymarket_client_sdk_v2::auth::{Credentials, ExposeSecret as _, Uuid};
     use polymarket_client_sdk_v2::error::{
         Error as PolymarketError, Method, StatusCode as PolymarketStatusCode,
     };
     use polymarket_client_sdk_v2::types::address;
 
     use super::{
-        is_l2_auth_error, positive_decimal_truncated, probability_decimal_truncated,
-        reserve_fresh_api_nonce, validate_funder_address,
+        LiveAuthConfig, credential_nonce_candidates, is_l2_auth_error, parse_env_lines,
+        positive_decimal_truncated, probability_decimal_truncated, read_credentials_cache,
+        reserve_fresh_api_nonce, validate_funder_address, write_credentials_cache,
     };
     use crate::config::PolymarketSignatureType;
 
@@ -1062,6 +1326,95 @@ mod tests {
         let status = unauthorized_status(r#"{"error":"expired timestamp"}"#);
 
         assert!(!is_l2_auth_error(&status));
+    }
+
+    #[test]
+    fn env_line_parser_ignores_comments_and_blank_lines() {
+        let parsed = parse_env_lines(
+            r#"
+            # comment
+            POLYMARKET_API_KEY=abc
+
+            POLYMARKET_API_SECRET = secret
+            "#,
+        );
+
+        assert_eq!(
+            parsed.get("POLYMARKET_API_KEY").map(String::as_str),
+            Some("abc")
+        );
+        assert_eq!(
+            parsed.get("POLYMARKET_API_SECRET").map(String::as_str),
+            Some("secret")
+        );
+    }
+
+    #[test]
+    fn credential_cache_round_trips_with_private_permissions() {
+        let path = std::env::temp_dir().join(format!(
+            "wiggler-polymarket-api-test-{}.env",
+            uuid::Uuid::new_v4()
+        ));
+        let credentials = Credentials::new(
+            Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap(),
+            "secret".to_string(),
+            "passphrase".to_string(),
+        );
+
+        write_credentials_cache(&path, &credentials, 123).unwrap();
+        let cached = read_credentials_cache(&path).unwrap().unwrap();
+
+        assert_eq!(cached.credentials.key(), credentials.key());
+        assert_eq!(cached.credentials.secret().expose_secret(), "secret");
+        assert_eq!(
+            cached.credentials.passphrase().expose_secret(),
+            "passphrase"
+        );
+        assert_eq!(cached.nonce, Some(123));
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600);
+        }
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn nonce_candidates_prefer_cache_then_config_without_duplicates() {
+        let path = std::env::temp_dir().join(format!(
+            "wiggler-polymarket-nonce-test-{}.env",
+            uuid::Uuid::new_v4()
+        ));
+        let credentials = Credentials::new(
+            Uuid::parse_str("00000000-0000-0000-0000-000000000002").unwrap(),
+            "secret".to_string(),
+            "passphrase".to_string(),
+        );
+        write_credentials_cache(&path, &credentials, 123).unwrap();
+        let config = LiveAuthConfig {
+            clob_api_url: "https://clob.polymarket.com".to_string(),
+            credentials: None,
+            nonce: Some(456),
+            credential_file: path.clone(),
+            signature_type: PolymarketSignatureType::Eoa,
+            funder_address: None,
+        };
+
+        assert_eq!(
+            credential_nonce_candidates(&config).unwrap(),
+            vec![123, 456]
+        );
+
+        let duplicate = LiveAuthConfig {
+            nonce: Some(123),
+            ..config
+        };
+        assert_eq!(credential_nonce_candidates(&duplicate).unwrap(), vec![123]);
+
+        let _ = std::fs::remove_file(path);
     }
 
     fn unauthorized_status(message: &str) -> PolymarketError {

@@ -21,6 +21,7 @@ pub const DEFAULT_EVALUATION_INTERVAL_MS: u64 = 1_000;
 pub const DEFAULT_CANDLE_REST_SYNC_INTERVAL_MS: u64 = 60_000;
 pub const DEFAULT_LOG_EVALUATIONS: bool = false;
 pub const DEFAULT_TRADE_RECORD_DIR: &str = "trade-records";
+pub const DEFAULT_POLYMARKET_API_CREDENTIAL_FILE: &str = "tmp/polymarket-api.env";
 pub const DEFAULT_TELEGRAM_PNL_INTERVAL_SECS: u64 = 15 * 60;
 
 #[derive(Clone)]
@@ -47,6 +48,7 @@ pub struct RuntimeConfig {
     pub polymarket_api_secret: Option<String>,
     pub polymarket_api_passphrase: Option<String>,
     pub polymarket_api_nonce: Option<u32>,
+    pub polymarket_api_credential_file: PathBuf,
     pub polymarket_signature_type: PolymarketSignatureType,
     pub polymarket_user_address: Option<String>,
     pub polymarket_funder_address: Option<String>,
@@ -108,6 +110,10 @@ impl RuntimeConfig {
             polymarket_api_secret: non_empty_env("POLYMARKET_API_SECRET"),
             polymarket_api_passphrase: non_empty_env("POLYMARKET_API_PASSPHRASE"),
             polymarket_api_nonce: u32_env("POLYMARKET_API_NONCE")?,
+            polymarket_api_credential_file: PathBuf::from(env_or_default(
+                "POLYMARKET_API_CREDENTIAL_FILE",
+                DEFAULT_POLYMARKET_API_CREDENTIAL_FILE,
+            )),
             polymarket_signature_type: enum_env(
                 "POLYMARKET_SIGNATURE_TYPE",
                 PolymarketSignatureType::Eoa,
