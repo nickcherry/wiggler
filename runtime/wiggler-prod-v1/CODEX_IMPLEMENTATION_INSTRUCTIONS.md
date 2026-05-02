@@ -208,7 +208,8 @@ with zero maker fee.
 
 Use the best bid as the maker limit price only. Do not size from best-bid
 depth; size from the configured notional caps divided by the selected limit
-price.
+price. Truncate share size to Polymarket's two-decimal lot precision before
+signing.
 
 ## Order behavior
 

@@ -35,7 +35,7 @@ use crate::{
     runtime::{AssetRuntime, RuntimeBundle, RuntimeCell, SideLeading},
     telegram::TelegramClient,
     trade_analysis::{self, ApiTradePnlRow, TradeFeeRates},
-    trading::{LiveOrderRequest, LiveOrderResponse, LiveTradeExecutor},
+    trading::{LIVE_ORDER_SIZE_SCALE, LiveOrderRequest, LiveOrderResponse, LiveTradeExecutor},
 };
 
 mod settlement;
@@ -2468,7 +2468,6 @@ const RETRYABLE_NO_FILL_COOLDOWN_SECONDS: i64 = 10;
 const LIVE_SETTLEMENT_CHECK_INTERVAL_SECONDS: u64 = 30;
 const MOMENTUM_OVERLAY_VOL_LOOKBACK_MIN: u32 = 30;
 const MOMENTUM_OVERLAY_THRESHOLD_VOL_UNITS: f64 = 2.0;
-const ORDER_SHARE_SCALE: u32 = 6;
 const ORDER_NOTIONAL_SCALE: u32 = 6;
 // Monitor-only final-window experiment; the runtime bundle still has no <60s cells.
 const EXPERIMENTAL_MIN_REMAINING_SEC_TO_TRADE: i64 = 30;
@@ -2680,7 +2679,7 @@ fn summarize_maker_limit(
 
     let target_notional = Decimal::from_f64(runtime.max_position_usdc().min(order_cap_usdc))?;
     let size_shares = (target_notional / price)
-        .trunc_with_scale(ORDER_SHARE_SCALE)
+        .trunc_with_scale(LIVE_ORDER_SIZE_SCALE)
         .normalize();
     if size_shares <= Decimal::ZERO {
         return Some(summary);
@@ -2878,6 +2877,22 @@ mod tests {
         assert_eq!(summary.order_size_shares, Some(Decimal::new(125, 1)));
         assert_eq!(summary.order_notional_usdc, Some(Decimal::new(10, 0)));
         assert_eq!(summary.max_acceptable_price, Some(0.80));
+    }
+
+    #[test]
+    fn maker_limit_truncates_size_to_polymarket_lot_precision() {
+        let (runtime, cell) = btc_runtime_and_cell();
+        let summary = summarize_maker_limit(
+            runtime,
+            cell,
+            Decimal::new(19, 2),
+            runtime.min_edge_probability(),
+            25.0,
+        )
+        .unwrap();
+
+        assert_eq!(summary.order_size_shares, Some(Decimal::new(13157, 2)));
+        assert_eq!(summary.order_notional_usdc, Some(Decimal::new(249983, 4)));
     }
 
     #[test]

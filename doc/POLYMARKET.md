@@ -108,6 +108,7 @@ while live trading is enabled. It only submits buy-side maker orders with:
 - limit price at the current best bid
 - size derived from Wiggler's notional caps at that limit price, not from the
   displayed best-bid depth
+- share size truncated to Polymarket's two-decimal lot precision
 - no sell/flipping path
 - no repeated local or remote exposure in the same market
 

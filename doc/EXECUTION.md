@@ -37,6 +37,8 @@ Live trading must remain explicit and fail closed:
   moves through the limit
 - live order size is derived from the configured notional caps and selected
   limit price, not from current best-bid depth
+- share size is truncated to Polymarket's two-decimal lot precision before
+  signing
 - the evaluator reruns immediately before submit
 - any existing local or remote market exposure blocks another order
 - live order attempts and responses are logged and sent to Telegram when

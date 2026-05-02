@@ -43,7 +43,7 @@ use crate::{
     config::{PolymarketSignatureType, RuntimeConfig},
     polymarket::data::DataApiClient,
     telegram::TelegramClient,
-    trading::order::{LiveOrderRequest, LiveOrderResponse},
+    trading::order::{LIVE_ORDER_SIZE_SCALE, LiveOrderRequest, LiveOrderResponse},
 };
 
 type AuthenticatedClient = Client<
@@ -266,7 +266,11 @@ impl LiveTradeExecutor {
     pub async fn execute(&self, request: &LiveOrderRequest) -> Result<LiveOrderResponse> {
         let token_id = U256::from_str(&request.token_id).context("parse token id")?;
         let price = probability_decimal_truncated_decimal("limit_price", request.limit_price, 4)?;
-        let size = positive_decimal_truncated_decimal("size_shares", request.size_shares, 6)?;
+        let size = positive_decimal_truncated_decimal(
+            "size_shares",
+            request.size_shares,
+            LIVE_ORDER_SIZE_SCALE,
+        )?;
 
         let client = self.current_client().await;
         let response = match client
@@ -1218,7 +1222,7 @@ mod tests {
         read_credentials_cache, reserve_fresh_api_nonce, validate_funder_address,
         write_credentials_cache,
     };
-    use crate::config::PolymarketSignatureType;
+    use crate::{config::PolymarketSignatureType, trading::LIVE_ORDER_SIZE_SCALE};
 
     #[test]
     fn truncates_live_order_amount_without_rounding_up() {
@@ -1229,6 +1233,17 @@ mod tests {
         )
         .unwrap();
         assert_eq!(amount.to_string(), "25");
+    }
+
+    #[test]
+    fn truncates_live_order_size_to_polymarket_lot_precision() {
+        let size = positive_decimal_truncated_decimal(
+            "size_shares",
+            Decimal::from_f64(66.666666).unwrap(),
+            LIVE_ORDER_SIZE_SCALE,
+        )
+        .unwrap();
+        assert_eq!(size.to_string(), "66.66");
     }
 
     #[test]

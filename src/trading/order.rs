@@ -3,6 +3,8 @@ use rust_decimal::Decimal;
 
 use crate::domain::{asset::Asset, market::Outcome};
 
+pub const LIVE_ORDER_SIZE_SCALE: u32 = 2;
+
 #[derive(Clone, Debug)]
 pub struct LiveOrderRequest {
     pub asset: Asset,
