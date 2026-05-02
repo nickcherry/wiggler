@@ -1520,6 +1520,8 @@ impl MonitorState {
                 }
                 let message = if response.has_fill() {
                     Some(live_entry_filled_text(&prepared, &response))
+                } else if response.success {
+                    Some(live_entry_posted_text(&prepared, &response))
                 } else if !response.success {
                     Some(live_entry_rejected_text(
                         request.asset,
@@ -2351,6 +2353,22 @@ fn live_entry_filled_text(prepared: &PreparedTrade, response: &LiveOrderResponse
     )
 }
 
+fn live_entry_posted_text(prepared: &PreparedTrade, response: &LiveOrderResponse) -> String {
+    format!(
+        "Posted {} {} maker bid for {} ({} shares @ {:.4})\n\nOrder is resting, not filled yet.\n\nOrder ID: {}\nExpires: {}\n\nPrice line is {}\n\nCurrent price is {} {} the price line",
+        asset_ticker(prepared.asset),
+        outcome_arrow(&prepared.outcome),
+        format_usdc(prepared.amount_usdc),
+        format_shares(prepared.size_shares),
+        prepared.order_price,
+        response.order_id,
+        prepared.expires_at.format("%Y-%m-%d %H:%M:%S UTC"),
+        format_market_price(prepared.asset, prepared.line_price),
+        format_price_line_distance_percent(prepared.current_price, prepared.line_price),
+        price_line_position(prepared.current_price, prepared.line_price)
+    )
+}
+
 fn live_entry_rejected_text(asset: Asset, outcome: &Outcome, reason: &str) -> String {
     format!(
         "Rejected entry of {} {}: {}",
@@ -2760,8 +2778,8 @@ mod tests {
         asset_ids_for_markets, clean_failure_reason, closed_position_row_from_api_trade,
         closed_position_slot_start, closed_position_totals, distance_bps, effective_max_order_usdc,
         experimental_final_window_applies, format_market_price, format_signed_usdc, format_usdc,
-        is_retryable_no_fill_error, live_entry_filled_text, live_entry_rejected_text,
-        live_settlement_candidate_slots, live_settlement_lookback_slots,
+        is_retryable_no_fill_error, live_entry_filled_text, live_entry_posted_text,
+        live_entry_rejected_text, live_settlement_candidate_slots, live_settlement_lookback_slots,
         live_settlement_summary_text, momentum_overlay_side_for_value, monitor_remaining_bucket,
         pre_submit_matches_initial, required_edge_probability, slot_start_from_market_slug,
         summarize_maker_limit, target_order_notional_usdc, telegram_settlement_interval_duration,
@@ -3466,6 +3484,32 @@ mod tests {
         assert_eq!(
             live_entry_filled_text(&prepared, &response),
             "Entered BTC ↑ for $50.00 @ $77,900.00\n\nPrice line is $77,972.55\n\nCurrent price is 0.09% below the price line"
+        );
+    }
+
+    #[test]
+    fn live_posted_message_identifies_resting_maker_order() {
+        let mut prepared = prepared_trade(Outcome::Down, "down-token");
+        prepared.asset = Asset::Xrp;
+        prepared.line_price = 2.4123;
+        prepared.current_price = 2.3999;
+        prepared.amount_usdc = 50.0;
+        prepared.size_shares = 138.88;
+        prepared.order_price = 0.36;
+        prepared.expires_at = Utc.with_ymd_and_hms(2026, 5, 2, 5, 5, 0).unwrap();
+        let response = LiveOrderResponse {
+            order_id: "0xorder".to_string(),
+            status: "live".to_string(),
+            success: true,
+            error_msg: None,
+            making_amount: "0".to_string(),
+            taking_amount: "0".to_string(),
+            trade_ids: vec![],
+        };
+
+        assert_eq!(
+            live_entry_posted_text(&prepared, &response),
+            "Posted XRP ↓ maker bid for $50.00 (138.88 shares @ 0.3600)\n\nOrder is resting, not filled yet.\n\nOrder ID: 0xorder\nExpires: 2026-05-02 05:05:00 UTC\n\nPrice line is $2.412300\n\nCurrent price is 0.51% below the price line"
         );
     }
 
