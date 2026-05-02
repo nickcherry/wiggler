@@ -74,7 +74,7 @@ pub struct TrainingSyncArgs {
     pub sources: Vec<TrainingSourceArg>,
 
     /// Lookback window in days when --from-iso is not provided.
-    #[arg(long, default_value_t = 365)]
+    #[arg(long, default_value_t = 730)]
     pub since_days: i64,
 
     /// Inclusive UTC start time for the sync window.
@@ -123,7 +123,7 @@ pub struct TrainingVwapArgs {
     pub assets: Vec<Asset>,
 
     /// Recompute window in days when --from-iso is not provided.
-    #[arg(long, default_value_t = 365)]
+    #[arg(long, default_value_t = 730)]
     pub since_days: i64,
 
     /// Inclusive UTC start time for the recompute window.
@@ -152,7 +152,7 @@ pub struct TrainingFillGapsArgs {
     pub assets: Vec<Asset>,
 
     /// Gap-fill window in days when --from-iso is not provided.
-    #[arg(long, default_value_t = 365)]
+    #[arg(long, default_value_t = 730)]
     pub since_days: i64,
 
     /// Inclusive UTC start time for gap-fill.
@@ -189,7 +189,7 @@ pub struct TrainingBuildRuntimeArgs {
     pub output_dir: PathBuf,
 
     /// Training window in days when --from-iso is not provided.
-    #[arg(long, default_value_t = 365)]
+    #[arg(long, default_value_t = 730)]
     pub since_days: i64,
 
     /// Inclusive UTC start time for training.
@@ -242,7 +242,7 @@ pub struct TrainingRefreshRuntimeArgs {
     pub output_dir: PathBuf,
 
     /// Lookback/training window in days.
-    #[arg(long, default_value_t = 365)]
+    #[arg(long, default_value_t = 730)]
     pub since_days: i64,
 
     /// Exclusive UTC end time for sync/training. Defaults to now.

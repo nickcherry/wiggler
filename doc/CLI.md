@@ -101,10 +101,10 @@ Stepwise flow:
 
 ```bash
 cargo run -- training migrate
-cargo run -- training sync --since-days 365
-cargo run -- training fill-gaps --since-days 365
-cargo run -- training vwap --since-days 365
-cargo run -- training build-runtime --since-days 365 --output-dir runtime/wiggler-prod-v1
+cargo run -- training sync --since-days 730
+cargo run -- training fill-gaps --since-days 730
+cargo run -- training vwap --since-days 730
+cargo run -- training build-runtime --since-days 730 --output-dir runtime/wiggler-prod-v1
 ```
 
 Default behavior:

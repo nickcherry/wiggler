@@ -22,7 +22,7 @@ Defaults:
 - database: `postgres://localhost:5432/wiggler`
 - assets: `btc,eth,sol,xrp,doge`
 - sources: Coinbase spot and Binance spot
-- lookback/training window: `365` days
+- lookback/training window: `730` days
 - output bundle: `runtime/wiggler-prod-v1`
 - interval: 300 seconds, boundary-aligned only
 - fee rate: `0.072`
@@ -44,10 +44,10 @@ Use the stepwise flow when debugging coverage, API behavior, or model output:
 
 ```bash
 cargo run -- training migrate
-cargo run -- training sync --since-days 365
-cargo run -- training fill-gaps --since-days 365
-cargo run -- training vwap --since-days 365
-cargo run -- training build-runtime --since-days 365 --output-dir runtime/wiggler-prod-v1
+cargo run -- training sync --since-days 730
+cargo run -- training fill-gaps --since-days 730
+cargo run -- training vwap --since-days 730
+cargo run -- training build-runtime --since-days 730 --output-dir runtime/wiggler-prod-v1
 ```
 
 To destroy all local offline-training rows and recreate the schema:
