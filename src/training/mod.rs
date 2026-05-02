@@ -7,13 +7,15 @@ use tracing::info;
 use crate::{
     domain::asset::{format_assets, normalize_assets},
     training::cli::{
-        TrainingBuildRuntimeArgs, TrainingCommand, TrainingDbArgs, TrainingRefreshRuntimeArgs,
-        TrainingResetArgs, TrainingSourceArg, TrainingSyncArgs, TrainingVwapArgs,
+        TrainingBuildRuntimeArgs, TrainingCommand, TrainingDbArgs, TrainingFillGapsArgs,
+        TrainingRefreshRuntimeArgs, TrainingResetArgs, TrainingSourceArg, TrainingSyncArgs,
+        TrainingVwapArgs,
     },
 };
 
 pub mod cli;
 mod db;
+mod gap_fill;
 mod grid;
 mod runtime_bundle;
 mod sync;
@@ -25,6 +27,7 @@ pub async fn run(command: TrainingCommand) -> Result<()> {
         TrainingCommand::Reset(args) => reset(args).await,
         TrainingCommand::Sync(args) => sync(args).await,
         TrainingCommand::Vwap(args) => vwap(args).await,
+        TrainingCommand::FillGaps(args) => fill_gaps(args).await,
         TrainingCommand::BuildRuntime(args) => build_runtime(args).await,
         TrainingCommand::RefreshRuntime(args) => refresh_runtime(args).await,
     }
@@ -101,6 +104,21 @@ async fn vwap(args: TrainingVwapArgs) -> Result<()> {
     Ok(())
 }
 
+async fn fill_gaps(args: TrainingFillGapsArgs) -> Result<()> {
+    let assets = normalize_assets(args.assets);
+    let window = training_window(
+        args.from_iso.as_deref(),
+        args.to_iso.as_deref(),
+        args.since_days,
+    )?;
+    let pool = db::connect(&args.database_url).await?;
+    db::ensure_schema(&pool).await?;
+    let results =
+        gap_fill::fill_coinbase_from_binance(&pool, &assets, window.from, window.to).await?;
+    print_gap_fill_summary(&results);
+    Ok(())
+}
+
 async fn build_runtime(args: TrainingBuildRuntimeArgs) -> Result<()> {
     let assets = normalize_assets(args.assets);
     let window = training_window(
@@ -163,6 +181,9 @@ async fn refresh_runtime(args: TrainingRefreshRuntimeArgs) -> Result<()> {
     {
         bail!("one or more candle sync series failed; refusing to build runtime bundle");
     }
+
+    let gap_fill_results = gap_fill::fill_coinbase_from_binance(&pool, &assets, from, to).await?;
+    print_gap_fill_summary(&gap_fill_results);
 
     let vwap_results = vwap::recompute_vwap(&pool, &assets, from, to).await?;
     print_vwap_summary(&vwap_results);
@@ -262,6 +283,13 @@ fn print_vwap_summary(results: &[vwap::VwapResult]) {
     println!("asset  vwap_rows");
     for result in results {
         println!("{:<5} {:>9}", result.asset, result.rows_written);
+    }
+}
+
+fn print_gap_fill_summary(results: &[gap_fill::GapFillResult]) {
+    println!("asset  synthetic_rows");
+    for result in results {
+        println!("{:<5} {:>14}", result.asset, result.rows_written);
     }
 }
 

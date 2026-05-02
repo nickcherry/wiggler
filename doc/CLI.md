@@ -97,6 +97,7 @@ Stepwise flow:
 ```bash
 cargo run -- training migrate
 cargo run -- training sync --since-days 365
+cargo run -- training fill-gaps --since-days 365
 cargo run -- training vwap --since-days 365
 cargo run -- training build-runtime --since-days 365 --output-dir runtime/wiggler-prod-v1
 ```
@@ -118,9 +119,10 @@ Subcommands:
 - `training migrate`: create/update offline training tables.
 - `training reset --yes`: drop and recreate Wiggler-managed offline training tables.
 - `training sync`: sync Coinbase/Binance spot candles into Postgres.
+- `training fill-gaps`: fill missing Coinbase minutes from Binance as synthetic/auditable rows.
 - `training vwap`: recompute cross-source VWAP rows from stored candles.
 - `training build-runtime`: generate the runtime probability-table bundle.
-- `training refresh-runtime`: run sync, VWAP, and runtime generation.
+- `training refresh-runtime`: run sync, gap-fill, VWAP, and runtime generation.
 
 Side effects:
 

@@ -51,8 +51,23 @@ CREATE TABLE IF NOT EXISTS candles (
     volume_e8 BIGINT,
     trades INTEGER,
     fetched_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    is_synthetic BOOLEAN NOT NULL DEFAULT false,
+    filled_from_source TEXT,
+    fill_reason TEXT,
     PRIMARY KEY (source, asset, timeframe, open_time)
 )
+"#,
+    r#"
+ALTER TABLE candles
+    ADD COLUMN IF NOT EXISTS is_synthetic BOOLEAN NOT NULL DEFAULT false
+"#,
+    r#"
+ALTER TABLE candles
+    ADD COLUMN IF NOT EXISTS filled_from_source TEXT
+"#,
+    r#"
+ALTER TABLE candles
+    ADD COLUMN IF NOT EXISTS fill_reason TEXT
 "#,
     r#"
 CREATE INDEX IF NOT EXISTS candles_asset_time_idx

@@ -122,7 +122,8 @@ pub(super) async fn upsert_candles(pool: &PgPool, candles: &[TrainingCandle]) ->
         r#"
 INSERT INTO candles (
     source, asset, exchange_pair, timeframe, open_time, open_time_ms,
-    open_e8, high_e8, low_e8, close_e8, volume_e8, trades, fetched_at
+    open_e8, high_e8, low_e8, close_e8, volume_e8, trades, fetched_at,
+    is_synthetic, filled_from_source, fill_reason
 )
 "#,
     );
@@ -139,7 +140,10 @@ INSERT INTO candles (
             .push_bind(candle.close_e8)
             .push_bind(candle.volume_e8)
             .push_bind(candle.trades)
-            .push_bind(Utc::now());
+            .push_bind(Utc::now())
+            .push_bind(false)
+            .push_bind(Option::<&str>::None)
+            .push_bind(Option::<&str>::None);
     });
     builder.push(
         r#"
@@ -152,7 +156,10 @@ ON CONFLICT (source, asset, timeframe, open_time) DO UPDATE SET
     close_e8 = EXCLUDED.close_e8,
     volume_e8 = EXCLUDED.volume_e8,
     trades = EXCLUDED.trades,
-    fetched_at = EXCLUDED.fetched_at
+    fetched_at = EXCLUDED.fetched_at,
+    is_synthetic = EXCLUDED.is_synthetic,
+    filled_from_source = EXCLUDED.filled_from_source,
+    fill_reason = EXCLUDED.fill_reason
 "#,
     );
     let result = builder

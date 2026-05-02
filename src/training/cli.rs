@@ -27,6 +27,8 @@ pub enum TrainingCommand {
     Sync(TrainingSyncArgs),
     /// Recompute cross-source VWAP rows from stored candles.
     Vwap(TrainingVwapArgs),
+    /// Fill missing Coinbase minutes from matching Binance candles as synthetic rows.
+    FillGaps(TrainingFillGapsArgs),
     /// Generate the runtime probability-table bundle consumed by monitor.
     BuildRuntime(TrainingBuildRuntimeArgs),
     /// Run sync, VWAP recomputation, and runtime-bundle generation in one flow.
@@ -129,6 +131,35 @@ pub struct TrainingVwapArgs {
     pub from_iso: Option<String>,
 
     /// Exclusive UTC end time for the recompute window. Defaults to now.
+    #[arg(long)]
+    pub to_iso: Option<String>,
+}
+
+#[derive(Clone, Debug, Parser)]
+pub struct TrainingFillGapsArgs {
+    /// Postgres connection URL for local offline training data.
+    #[arg(long, env = "DATABASE_URL", default_value = DEFAULT_DATABASE_URL)]
+    pub database_url: String,
+
+    /// Comma-separated asset whitelist to gap-fill.
+    #[arg(
+        long,
+        alias = "asset",
+        value_delimiter = ',',
+        env = "WIGGLER_ASSETS",
+        default_value = DEFAULT_ASSET_WHITELIST
+    )]
+    pub assets: Vec<Asset>,
+
+    /// Gap-fill window in days when --from-iso is not provided.
+    #[arg(long, default_value_t = 365)]
+    pub since_days: i64,
+
+    /// Inclusive UTC start time for gap-fill.
+    #[arg(long)]
+    pub from_iso: Option<String>,
+
+    /// Exclusive UTC end time for gap-fill. Defaults to now.
     #[arg(long)]
     pub to_iso: Option<String>,
 }

@@ -71,6 +71,7 @@ WHERE asset = $1
   AND timeframe = $2
   AND open_time >= $3
   AND open_time < $4
+  AND NOT is_synthetic
 GROUP BY asset, timeframe, open_time, open_time_ms
 "#,
         )

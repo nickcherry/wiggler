@@ -45,6 +45,7 @@ Use the stepwise flow when debugging coverage, API behavior, or model output:
 ```bash
 cargo run -- training migrate
 cargo run -- training sync --since-days 365
+cargo run -- training fill-gaps --since-days 365
 cargo run -- training vwap --since-days 365
 cargo run -- training build-runtime --since-days 365 --output-dir runtime/wiggler-prod-v1
 ```
@@ -69,7 +70,8 @@ OHLCV values are scaled integers in `1e8` units:
 source, asset, exchange_pair, timeframe,
 open_time, open_time_ms,
 open_e8, high_e8, low_e8, close_e8, volume_e8,
-trades, fetched_at
+trades, fetched_at,
+is_synthetic, filled_from_source, fill_reason
 ```
 
 Indexes:
@@ -90,6 +92,14 @@ If every source reports zero/null volume for a minute, the command falls back
 to the unweighted mean of typical prices so the training series stays dense;
 `total_volume_e8 = 0` marks that fallback. Only Coinbase and Binance spot
 candles contribute to this VWAP.
+
+`training fill-gaps` makes the raw `candles` table dense when Coinbase omits
+historical 1-minute candles. It inserts synthetic Coinbase rows copied from the
+matching Binance minute and marks them with `is_synthetic = true`,
+`filled_from_source = "binance"`, and
+`fill_reason = "coinbase_source_missing"`. `training vwap` excludes synthetic
+rows, so these gap fills make coverage/auditing dense without double-counting
+Binance as real Coinbase liquidity.
 
 ## Sync Semantics
 
