@@ -9,6 +9,7 @@ use crate::{
 
 pub const DEFAULT_DATABASE_URL: &str = "postgres://localhost:5432/wiggler";
 pub const DEFAULT_TRAINING_SOURCES: &str = "coinbase,binance";
+pub const DEFAULT_REQUEST_DELAY_MS: u64 = 0;
 
 #[derive(Clone, Debug, Parser)]
 pub struct TrainingArgs {
@@ -91,7 +92,7 @@ pub struct TrainingSyncArgs {
     pub concurrency_per_source: usize,
 
     /// Delay between requests inside one series.
-    #[arg(long, default_value_t = 200)]
+    #[arg(long, default_value_t = DEFAULT_REQUEST_DELAY_MS)]
     pub request_delay_ms: u64,
 
     /// Coinbase API base URL.
@@ -226,7 +227,7 @@ pub struct TrainingRefreshRuntimeArgs {
     pub concurrency_per_source: usize,
 
     /// Delay between requests inside one series.
-    #[arg(long, default_value_t = 200)]
+    #[arg(long, default_value_t = DEFAULT_REQUEST_DELAY_MS)]
     pub request_delay_ms: u64,
 
     /// Coinbase API base URL.

@@ -102,7 +102,8 @@ the latest stored minute. If coverage is incomplete, it re-fetches the requested
 window and relies on the primary key upsert to repair rows idempotently.
 
 Coinbase and Binance use independent source-level concurrency. The default is
-two concurrent series per source with a 200 ms delay inside each series.
+two concurrent series per source with no artificial per-request delay. Add
+`--request-delay-ms` only if a provider starts rate-limiting local backfills.
 
 ## Runtime Generation
 
