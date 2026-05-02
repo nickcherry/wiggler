@@ -24,4 +24,19 @@ export const env = {
 
     return value;
   },
+  get telegramBotToken(): string | undefined {
+    return optionalEnv("TELEGRAM_BOT_TOKEN");
+  },
+  get telegramChatId(): string | undefined {
+    return optionalEnv("TELEGRAM_CHAT_ID");
+  },
 };
+
+function optionalEnv(name: string): string | undefined {
+  const raw = process.env[name];
+  if (raw === undefined) {
+    return undefined;
+  }
+  const trimmed = raw.trim();
+  return trimmed.length === 0 ? undefined : trimmed;
+}

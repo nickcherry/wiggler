@@ -25,6 +25,8 @@ Everything that matters is reachable through one non-interactive entrypoint:
   `db:migrate`
 - `candles:*`
   `candles:sync`
+- `telegram:*`
+  `telegram:test`
 - `help`
   Built-in. `wiggler help <command>` prints detailed help; `wiggler help` is equivalent to `wiggler` with no arguments.
 
