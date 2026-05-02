@@ -1112,6 +1112,7 @@ fn test_config(live_trading: bool) -> RuntimeConfig {
         price_stale_after: Duration::from_millis(20_000),
         orderbook_stale_after: Duration::from_millis(10_000),
         min_abs_d_bps: 0.01,
+        min_p_win_lower: 0.0,
         trade_record_dir: std::path::PathBuf::from("trade-records"),
         telegram_enabled: true,
         telegram_bot_token: None,

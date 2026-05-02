@@ -115,6 +115,9 @@ impl MonitorState {
         if cell.is_none() {
             return Some("no_matching_config_cell");
         }
+        if cell.is_some_and(|cell| cell.p_win_lower < config.min_p_win_lower) {
+            return Some("p_win_lower_below_min");
+        }
         let Some(path_state) = path_state else {
             return Some("insufficient_path_history");
         };

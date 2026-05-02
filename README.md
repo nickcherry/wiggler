@@ -91,7 +91,8 @@ cargo run -- monitor --runtime-bundle-dir runtime/wiggler-prod-v1
 | `WIGGLER_TRADE_RECORD_DIR` | `trade-records` | Ignored JSON record directory for shadow/live entry attempts |
 | `WIGGLER_PRICE_STALE_AFTER_MS` | `5000` | Max current-price age for an eligible evaluation |
 | `WIGGLER_ORDERBOOK_STALE_AFTER_MS` | `5000` | Max orderbook age for an eligible evaluation |
-| `WIGGLER_MIN_ABS_D_BPS` | `0.01` | Dust threshold around the market line |
+| `WIGGLER_MIN_ABS_D_BPS` | `2.0` | Minimum entry distance from start line, in bps. Sub-bps entries are uniformly miscalibrated; ≥2 bps is where the model has a real edge. |
+| `WIGGLER_MIN_P_WIN_LOWER` | `0.60` | Minimum runtime-cell `p_win_lower` required to take a trade. Below ~0.60 the model is overconfident and net-negative. |
 | `WIGGLER_TELEGRAM_PNL_INTERVAL_SECS` | `900` | Telegram summary lookback control; summaries check every 30s, `0` disables summaries |
 | `DATABASE_URL` | `postgres://localhost:5432/wiggler` | Offline training database; not used by `monitor` |
 | `POLYMARKET_GAMMA_BASE_URL` | `https://gamma-api.polymarket.com` | Market discovery |

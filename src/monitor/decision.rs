@@ -295,6 +295,8 @@ impl MonitorState {
                 maker_fee_rate = 0.0,
                 taker_fee_rate = ?runtime.map(AssetRuntime::fee_rate),
                 min_edge_probability = ?runtime.map(AssetRuntime::min_edge_probability),
+                min_p_win_lower = config.min_p_win_lower,
+                min_abs_d_bps = config.min_abs_d_bps,
                 required_edge = ?required_edge,
                 final_window_extra_edge_probability = ?final_window_experimental.then_some(EXPERIMENTAL_FINAL_WINDOW_EXTRA_EDGE_PROBABILITY),
                 min_order_usdc = config.min_order_usdc,

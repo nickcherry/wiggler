@@ -14,7 +14,8 @@ pub const DEFAULT_BINANCE_API_BASE_URL: &str = "https://data-api.binance.vision"
 pub const DEFAULT_BINANCE_MARKET_WS_URL: &str = "wss://stream.binance.com:9443";
 pub const DEFAULT_PRICE_STALE_AFTER_MS: u64 = 5_000;
 pub const DEFAULT_ORDERBOOK_STALE_AFTER_MS: u64 = 5_000;
-pub const DEFAULT_MIN_ABS_D_BPS: f64 = 0.01;
+pub const DEFAULT_MIN_ABS_D_BPS: f64 = 2.0;
+pub const DEFAULT_MIN_P_WIN_LOWER: f64 = 0.60;
 pub const DEFAULT_MIN_ORDER_USDC: f64 = 1.0;
 pub const DEFAULT_MAX_ORDER_USDC: f64 = 25.0;
 pub const DEFAULT_EVALUATION_INTERVAL_MS: u64 = 250;
@@ -54,6 +55,7 @@ pub struct RuntimeConfig {
     pub price_stale_after: Duration,
     pub orderbook_stale_after: Duration,
     pub min_abs_d_bps: f64,
+    pub min_p_win_lower: f64,
     pub telegram_enabled: bool,
     pub telegram_bot_token: Option<String>,
     pub telegram_chat_id: Option<String>,
@@ -127,6 +129,7 @@ impl RuntimeConfig {
                 DEFAULT_ORDERBOOK_STALE_AFTER_MS,
             )?),
             min_abs_d_bps: f64_env("WIGGLER_MIN_ABS_D_BPS", DEFAULT_MIN_ABS_D_BPS)?,
+            min_p_win_lower: f64_env("WIGGLER_MIN_P_WIN_LOWER", DEFAULT_MIN_P_WIN_LOWER)?,
             telegram_enabled: bool_env("WIGGLER_TELEGRAM_ENABLED", true)?,
             telegram_bot_token: non_empty_env("TELEGRAM_BOT_TOKEN"),
             telegram_chat_id: non_empty_env("TELEGRAM_CHAT_ID"),
@@ -152,6 +155,11 @@ impl RuntimeConfig {
             bail!("WIGGLER_MAX_ORDER_USDC must be >= WIGGLER_MIN_ORDER_USDC");
         }
         require_non_negative("WIGGLER_MIN_ABS_D_BPS", self.min_abs_d_bps)?;
+        if !self.min_p_win_lower.is_finite()
+            || !(0.0..=1.0).contains(&self.min_p_win_lower)
+        {
+            bail!("WIGGLER_MIN_P_WIN_LOWER must be a finite value between 0 and 1");
+        }
         if self.price_stale_after.is_zero() {
             bail!("WIGGLER_PRICE_STALE_AFTER_MS must be positive");
         }
