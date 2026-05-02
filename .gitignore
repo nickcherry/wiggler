@@ -1,6 +1,7 @@
 /target/
 /tmp/
 /trade-records/
+/.claude/
 
 .env
 .env.*
