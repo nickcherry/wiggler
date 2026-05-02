@@ -9,7 +9,10 @@ use alloy::signers::local::PrivateKeySigner;
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, TimeDelta, Utc};
 use futures_util::{StreamExt, stream};
-use polymarket_client_sdk_v2::{data::types::response::Trade, types::Address};
+use polymarket_client_sdk_v2::{
+    data::types::response::{ClosedPosition, Trade},
+    types::Address,
+};
 use rust_decimal::prelude::ToPrimitive;
 
 use crate::{
@@ -116,6 +119,22 @@ pub struct ApiTradePnlRow {
     pub outcome: String,
 }
 
+#[derive(Clone, Debug)]
+pub struct ApiClosedPositionPnlRows {
+    pub rows: Vec<ApiClosedPositionPnlRow>,
+    pub positions_fetched: usize,
+    pub positions_considered: usize,
+}
+
+#[derive(Clone, Debug)]
+pub struct ApiClosedPositionPnlRow {
+    pub realized_pnl: f64,
+    pub slug: String,
+    pub event_slug: String,
+    pub title: String,
+    pub outcome: String,
+}
+
 pub async fn fetch_api_trade_pnl_rows(
     data_api: &DataApiClient,
     gamma: &GammaClient,
@@ -139,6 +158,37 @@ pub async fn fetch_api_trade_pnl_rows(
     })
 }
 
+pub async fn fetch_api_closed_position_pnl_rows(
+    data_api: &DataApiClient,
+    user: Address,
+    assets: &[Asset],
+    max_positions: usize,
+) -> Result<ApiClosedPositionPnlRows> {
+    let positions = data_api.fetch_closed_positions(user, max_positions).await?;
+    let asset_filter = assets.iter().copied().collect::<HashSet<_>>();
+    let mut rows = Vec::new();
+    let mut positions_considered = 0;
+
+    for position in &positions {
+        let Some(asset) =
+            asset_from_market_text(&position.slug, &position.event_slug, &position.title)
+        else {
+            continue;
+        };
+        if !asset_filter.contains(&asset) {
+            continue;
+        }
+        positions_considered += 1;
+        rows.push(ApiClosedPositionPnlRow::from_closed_position(position)?);
+    }
+
+    Ok(ApiClosedPositionPnlRows {
+        rows,
+        positions_fetched: positions.len(),
+        positions_considered,
+    })
+}
+
 impl ApiTradePnlRow {
     fn from_analyzed_trade(trade: &AnalyzedTrade) -> Self {
         Self {
@@ -148,6 +198,18 @@ impl ApiTradePnlRow {
             title: trade.title.clone(),
             outcome: trade.outcome.clone(),
         }
+    }
+}
+
+impl ApiClosedPositionPnlRow {
+    fn from_closed_position(position: &ClosedPosition) -> Result<Self> {
+        Ok(Self {
+            realized_pnl: decimal_to_f64(position.realized_pnl, "realizedPnl")?,
+            slug: position.slug.clone(),
+            event_slug: position.event_slug.clone(),
+            title: position.title.clone(),
+            outcome: position.outcome.clone(),
+        })
     }
 }
 
@@ -1142,11 +1204,14 @@ fn add_digit_grouping(digits: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        AnalyzedTrade, EntryOddsBucket, PerformanceReport, RemainingBucket, ReportInput,
-        SummaryStats, asset_from_market_text, buy_trade_pnl, format_signed_usdc, trade_fee,
+        AnalyzedTrade, ApiClosedPositionPnlRow, EntryOddsBucket, PerformanceReport,
+        RemainingBucket, ReportInput, SummaryStats, asset_from_market_text, buy_trade_pnl,
+        format_signed_usdc, trade_fee,
     };
     use crate::domain::asset::Asset;
+    use polymarket_client_sdk_v2::data::types::response::ClosedPosition;
     use polymarket_client_sdk_v2::types::address;
+    use serde_json::json;
 
     #[test]
     fn remaining_buckets_sort_from_largest_to_smallest_then_unknowns() {
@@ -1210,6 +1275,36 @@ mod tests {
         assert!((entry_fee - 1.75392).abs() < 0.000001);
         assert!((buy_trade_pnl(100.0, 0.42, 1.0, entry_fee) - 56.24608).abs() < 0.000001);
         assert!((buy_trade_pnl(100.0, 0.42, 0.0, entry_fee) + 43.75392).abs() < 0.000001);
+    }
+
+    #[test]
+    fn api_closed_position_row_uses_polymarket_realized_pnl() {
+        let position: ClosedPosition = serde_json::from_value(json!({
+            "proxyWallet": "0x1234567890abcdef1234567890abcdef12345678",
+            "asset": "1",
+            "conditionId": "0x0000000000000000000000000000000000000000000000000000000000000001",
+            "avgPrice": "0.42",
+            "totalBought": "42",
+            "realizedPnl": "-2.375",
+            "curPrice": "0",
+            "timestamp": 1777648800,
+            "title": "Bitcoin Up or Down - May 1, 11:20AM-11:25AM ET",
+            "slug": "btc-updown-5m-1777648800",
+            "icon": "",
+            "eventSlug": "btc-updown-5m-1777648800",
+            "outcome": "Down",
+            "outcomeIndex": 1,
+            "oppositeOutcome": "Up",
+            "oppositeAsset": "2",
+            "endDate": "2026-05-01T15:25:00Z"
+        }))
+        .unwrap();
+
+        let row = ApiClosedPositionPnlRow::from_closed_position(&position).unwrap();
+
+        assert_eq!(row.realized_pnl, -2.375);
+        assert_eq!(row.slug, "btc-updown-5m-1777648800");
+        assert_eq!(row.outcome, "Down");
     }
 
     #[test]

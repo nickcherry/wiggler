@@ -2,13 +2,19 @@ use anyhow::{Context, Result};
 use polymarket_client_sdk_v2::{
     data::{
         Client,
-        types::{MarketFilter, Side, request::TradesRequest, response::Trade},
+        types::{
+            ClosedPositionSortBy, MarketFilter, Side, SortDirection,
+            request::{ClosedPositionsRequest, TradesRequest},
+            response::{ClosedPosition, Trade},
+        },
     },
     types::{Address, B256},
 };
 
 const TRADES_PAGE_LIMIT: i32 = 10_000;
 const TRADES_MAX_OFFSET: i32 = 10_000;
+const CLOSED_POSITIONS_PAGE_LIMIT: i32 = 50;
+const CLOSED_POSITIONS_MAX_OFFSET: i32 = 100_000;
 
 #[derive(Clone, Debug)]
 pub struct DataApiClient {
@@ -46,6 +52,47 @@ impl DataApiClient {
                 .trades(&request)
                 .await
                 .with_context(|| format!("fetch trades at offset {offset}"))?;
+            let count = page.len();
+
+            rows.extend(page);
+            if count < limit as usize {
+                break;
+            }
+            offset = offset.saturating_add(count as i32);
+        }
+
+        Ok(rows)
+    }
+
+    pub async fn fetch_closed_positions(
+        &self,
+        user: Address,
+        max_positions: usize,
+    ) -> Result<Vec<ClosedPosition>> {
+        let mut rows = Vec::new();
+        let mut offset = 0_i32;
+
+        while rows.len() < max_positions && offset <= CLOSED_POSITIONS_MAX_OFFSET {
+            let remaining = max_positions.saturating_sub(rows.len());
+            let limit = remaining.min(CLOSED_POSITIONS_PAGE_LIMIT as usize) as i32;
+            if limit == 0 {
+                break;
+            }
+
+            let request = ClosedPositionsRequest::builder()
+                .user(user)
+                .limit(limit)
+                .context("set closed positions page limit")?
+                .offset(offset)
+                .context("set closed positions page offset")?
+                .sort_by(ClosedPositionSortBy::Timestamp)
+                .sort_direction(SortDirection::Desc)
+                .build();
+            let page = self
+                .inner
+                .closed_positions(&request)
+                .await
+                .with_context(|| format!("fetch closed positions at offset {offset}"))?;
             let count = page.len();
 
             rows.extend(page);

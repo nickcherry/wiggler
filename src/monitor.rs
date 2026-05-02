@@ -34,13 +34,13 @@ use crate::{
     },
     runtime::{AssetRuntime, RuntimeBundle, RuntimeCell, SideLeading},
     telegram::TelegramClient,
-    trade_analysis::{self, ApiTradePnlRow, TradeFeeRates},
+    trade_analysis::{self, ApiClosedPositionPnlRow},
     trading::{LIVE_ORDER_SIZE_SCALE, LiveOrderRequest, LiveOrderResponse, LiveTradeExecutor},
 };
 
 mod settlement;
 
-const TELEGRAM_SETTLEMENT_MAX_TRADES: usize = 10_000;
+const TELEGRAM_SETTLEMENT_MAX_POSITIONS: usize = 10_000;
 
 #[cfg(test)]
 use settlement::slot_start_from_market_slug;
@@ -65,7 +65,6 @@ pub async fn run(args: MonitorArgs, config: RuntimeConfig) -> Result<()> {
             args.runtime_bundle_dir.display()
         )
     })?;
-    let trade_fee_rates = TradeFeeRates::maker_for_assets(&assets);
     let runtime_vol_lookback_min = max_vol_lookback_min(&runtime_bundle, &assets);
     let candle_lookback_min = if runtime_vol_lookback_min > 0 {
         runtime_vol_lookback_min.max(MOMENTUM_OVERLAY_VOL_LOOKBACK_MIN)
@@ -245,13 +244,11 @@ pub async fn run(args: MonitorArgs, config: RuntimeConfig) -> Result<()> {
                         duration,
                         pnl_interval: config.telegram_pnl_interval,
                         data_api: &data_api,
-                        gamma: &gamma,
                         user: settlement_user
                             .as_ref()
                             .cloned()
                             .expect("settlement interval requires user address"),
                         assets: &assets,
-                        fee_rates: &trade_fee_rates,
                     })
                     .await;
             }
@@ -437,7 +434,7 @@ fn closed_rows_for_slot(
         .collect()
 }
 
-fn closed_position_row_from_api_trade(row: ApiTradePnlRow) -> ClosedPositionPnlRow {
+fn closed_position_row_from_api_position(row: ApiClosedPositionPnlRow) -> ClosedPositionPnlRow {
     ClosedPositionPnlRow {
         realized_pnl: Some(row.realized_pnl),
         slug: Some(row.slug),
@@ -466,10 +463,8 @@ struct LiveSettlementSummaryContext<'a> {
     duration: TimeDelta,
     pnl_interval: Duration,
     data_api: &'a DataApiClient,
-    gamma: &'a GammaClient,
     user: Address,
     assets: &'a [Asset],
-    fee_rates: &'a TradeFeeRates,
 }
 
 #[derive(Default)]
@@ -522,17 +517,14 @@ impl MonitorState {
         info!(
             event = "live_settlement_summary_check",
             unsent_slot_count = unsent_slots.len(),
-            "checking Polymarket API trades for Telegram summaries"
+            "checking Polymarket API closed positions for Telegram summaries"
         );
 
-        let api_rows = match trade_analysis::fetch_api_trade_pnl_rows(
+        let api_rows = match trade_analysis::fetch_api_closed_position_pnl_rows(
             context.data_api,
-            context.gamma,
             context.user,
             context.assets,
-            context.duration,
-            TELEGRAM_SETTLEMENT_MAX_TRADES,
-            context.fee_rates,
+            TELEGRAM_SETTLEMENT_MAX_POSITIONS,
         )
         .await
         {
@@ -540,23 +532,17 @@ impl MonitorState {
             Err(error) => {
                 warn!(
                     error = %error,
-                    "failed to load Polymarket API trade rows for Telegram summary"
+                    "failed to load Polymarket API closed positions for Telegram summary"
                 );
                 return;
             }
         };
-        if api_rows.unresolved_trades > 0 {
-            info!(
-                event = "live_settlement_summary_unresolved",
-                unresolved_trades = api_rows.unresolved_trades,
-                buy_trades_considered = api_rows.buy_trades_considered,
-                "some Polymarket API trades are not resolved yet"
-            );
-        }
+        let positions_fetched = api_rows.positions_fetched;
+        let positions_considered = api_rows.positions_considered;
         let api_rows = api_rows
             .rows
             .into_iter()
-            .map(closed_position_row_from_api_trade)
+            .map(closed_position_row_from_api_position)
             .collect::<Vec<_>>();
 
         let mut summaries = Vec::new();
@@ -566,7 +552,9 @@ impl MonitorState {
                 info!(
                     event = "live_settlement_summary_empty",
                     slot_start = %slot_start,
-                    "no closed live trades available for Telegram summary"
+                    positions_fetched,
+                    positions_considered,
+                    "no closed positions available for Telegram summary"
                 );
                 continue;
             }
@@ -2782,7 +2770,7 @@ mod tests {
         polymarket::rtds::{PriceFeedSource, PriceTick},
         runtime::{RuntimeBundle, SideLeading, VolBin},
         telegram::TelegramClient,
-        trade_analysis::ApiTradePnlRow,
+        trade_analysis::ApiClosedPositionPnlRow,
         trading::LiveOrderResponse,
     };
 
@@ -2790,7 +2778,7 @@ mod tests {
         ClosedPositionPnlRow, LIVE_SETTLEMENT_CHECK_INTERVAL_SECONDS,
         MOMENTUM_OVERLAY_THRESHOLD_VOL_UNITS, MOMENTUM_OVERLAY_VOL_LOOKBACK_MIN, MarketPricePath,
         MonitorState, PathState, PreparedTrade, SlotLine, adjusted_required_edge_probability,
-        asset_ids_for_markets, clean_failure_reason, closed_position_row_from_api_trade,
+        asset_ids_for_markets, clean_failure_reason, closed_position_row_from_api_position,
         closed_position_slot_start, closed_position_totals, distance_bps, effective_max_order_usdc,
         experimental_final_window_applies, format_market_price, format_signed_usdc, format_usdc,
         is_retryable_no_fill_error, live_entry_filled_text, live_entry_posted_text,
@@ -3577,8 +3565,8 @@ mod tests {
     }
 
     #[test]
-    fn api_trade_rows_map_to_settlement_rows() {
-        let row = closed_position_row_from_api_trade(ApiTradePnlRow {
+    fn api_closed_position_rows_map_to_settlement_rows() {
+        let row = closed_position_row_from_api_position(ApiClosedPositionPnlRow {
             realized_pnl: -7.25,
             slug: "btc-updown-5m-1777648800".to_string(),
             event_slug: "btc-updown-5m-1777648800".to_string(),

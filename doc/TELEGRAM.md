@@ -28,12 +28,11 @@ Live entry attempts are not messaged. Retryable post-only rejections are sent
 as concise rejection messages, logged, and recorded, but they do not block the
 monitor from looking for another entry in the same market.
 
-Live settlement Telegram win/loss/PnL values use Polymarket Data API trade
-rows plus Gamma's resolved outcome prices. Local trade records are not used for
-PnL or win/loss summaries. Totals are account-wide for the configured wallet
-and asset whitelist, using resolved buy fills available from Polymarket APIs.
-PnL uses the live maker-entry fee model, so Polymarket entry fees are treated as
-zero for monitor settlement summaries.
+Live settlement Telegram win/loss/PnL values use Polymarket Data API closed
+positions and Polymarket's `realizedPnl` field. Local trade records are not
+used for PnL or win/loss summaries. Totals are account-wide for the configured
+wallet and asset whitelist, using closed positions available from Polymarket
+APIs.
 The wallet comes from `POLYMARKET_USER_ADDRESS` or `POLYMARKET_FUNDER_ADDRESS`
 in `.env`, with EOA configs falling back to `POLYMARKET_PRIVATE_KEY`.
 
