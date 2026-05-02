@@ -7,13 +7,13 @@ Current scope: shadow monitoring plus gated live execution for whitelisted
 event for each whitelisted asset, subscribes to every outcome token over the
 CLOB market websocket, streams the matching Chainlink price from Polymarket
 RTDS, loads the production probability-table bundle, and evaluates executable
-ask depth against EV/risk/staleness gates.
+maker bids against EV/risk/staleness gates.
 
 Live trading is off by default. With `WIGGLER_LIVE_TRADING=false`, eligible
 decisions are logged as would-trades and no orders are submitted. With
 `WIGGLER_LIVE_TRADING=true`, the monitor uses the official Polymarket Rust CLOB
-SDK to sign and post taker-only FAK/FOK marketable limit orders with explicit
-price limits after a second pre-submit evaluation.
+SDK to sign and post buy-only, post-only GTD limit orders after a second
+pre-submit evaluation.
 
 ## Docs
 
@@ -29,6 +29,12 @@ price limits after a second pre-submit evaluation.
 - [Documentation](./doc/DOCUMENTATION.md): what to document and where.
 - [Execution](./doc/EXECUTION.md): validation and completion discipline.
 - [How To Work With Nick](./doc/HOW_TO_WORK_WITH_NICK.md): collaboration expectations.
+
+## Production Host
+
+When this repo says "prod" or "production server", it means the server reached
+with the local `wiggler_prod` shell alias. See [Operations](./doc/OPERATIONS.md)
+for the exact SSH target and the commands to verify or disable the prod service.
 
 ## Setup
 
@@ -76,7 +82,7 @@ cargo run -- monitor --runtime-bundle-dir runtime/wiggler-prod-v1
 | `WIGGLER_TRADABLE_ASSETS` | `btc,eth,sol,xrp,doge` | Comma-separated shadow/live eligibility whitelist |
 | `WIGGLER_RUNTIME_BUNDLE_DIR` | `runtime/wiggler-prod-v1` | Runtime probability-table bundle |
 | `WIGGLER_LIVE_TRADING` | `false` | Global live-trading flag |
-| `WIGGLER_LIVE_ORDER_TYPE` | `fak` | Live taker order type: `fak` or `fok` |
+| `WIGGLER_LIVE_ORDER_TYPE` | `maker` | Deprecated compatibility knob; live entries are always post-only maker GTD orders |
 | `WIGGLER_MIN_ORDER_USDC` | `1` | Minimum live/shadow decision notional |
 | `WIGGLER_MAX_ORDER_USDC` | `25` | Production cap applied below bundle position caps |
 | `WIGGLER_EVALUATION_INTERVAL_MS` | `1000` | Decision/evaluation cadence |

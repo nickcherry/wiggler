@@ -1,4 +1,5 @@
 use polymarket_client_sdk_v2::clob::types::response::PostOrderResponse;
+use rust_decimal::Decimal;
 
 use crate::domain::{asset::Asset, market::Outcome};
 
@@ -10,7 +11,9 @@ pub struct LiveOrderRequest {
     pub token_id: String,
     pub outcome: Outcome,
     pub amount_usdc: f64,
-    pub max_price: f64,
+    pub limit_price: Decimal,
+    pub size_shares: Decimal,
+    pub expires_at: chrono::DateTime<chrono::Utc>,
 }
 
 impl LiveOrderRequest {

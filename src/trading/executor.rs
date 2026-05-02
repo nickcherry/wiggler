@@ -25,7 +25,7 @@ use polymarket_client_sdk_v2::{
     clob::{
         Client, Config,
         types::{
-            Amount, AssetType, OrderType, Side, SignatureType,
+            AssetType, OrderType, Side, SignatureType,
             request::{BalanceAllowanceRequest, OrdersRequest},
             response::{BalanceAllowanceResponse, HeartbeatResponse},
         },
@@ -40,7 +40,7 @@ use tokio::{sync::Mutex, task::JoinHandle};
 use tracing::{info, warn};
 
 use crate::{
-    config::{LiveOrderType, PolymarketSignatureType, RuntimeConfig},
+    config::{PolymarketSignatureType, RuntimeConfig},
     polymarket::data::DataApiClient,
     telegram::TelegramClient,
     trading::order::{LiveOrderRequest, LiveOrderResponse},
@@ -69,7 +69,6 @@ pub struct LiveTradeExecutor {
     auth_config: LiveAuthConfig,
     data_api: DataApiClient,
     data_api_user: Address,
-    order_type: OrderType,
     heartbeat_state: HeartbeatState,
     credential_rotation_lock: CredentialRotationLock,
     _heartbeat_task: JoinHandle<()>,
@@ -211,7 +210,6 @@ impl LiveTradeExecutor {
             auth_config,
             data_api,
             data_api_user,
-            order_type: map_order_type(config.live_order_type),
             heartbeat_state,
             credential_rotation_lock,
         })
@@ -267,17 +265,19 @@ impl LiveTradeExecutor {
 
     pub async fn execute(&self, request: &LiveOrderRequest) -> Result<LiveOrderResponse> {
         let token_id = U256::from_str(&request.token_id).context("parse token id")?;
-        let amount = positive_decimal_truncated("amount_usdc", request.amount_usdc, 2)?;
-        let price = probability_decimal_truncated("max_price", request.max_price, 2)?;
+        let price = probability_decimal_truncated_decimal("limit_price", request.limit_price, 4)?;
+        let size = positive_decimal_truncated_decimal("size_shares", request.size_shares, 6)?;
 
         let client = self.current_client().await;
         let response = match client
-            .market_order()
+            .limit_order()
             .token_id(token_id)
             .side(Side::Buy)
-            .amount(Amount::usdc(amount).context("build USDC order amount")?)
             .price(price)
-            .order_type(self.order_type.clone())
+            .size(size)
+            .expiration(request.expires_at)
+            .order_type(OrderType::GTD)
+            .post_only(true)
             .build_sign_and_post(&self.signer)
             .await
         {
@@ -293,9 +293,9 @@ impl LiveTradeExecutor {
                         "failed to rotate Polymarket API credentials after order auth error"
                     );
                 }
-                return Err(error).context("post live Polymarket order");
+                return Err(error).context("post live Polymarket maker order");
             }
-            Err(error) => return Err(error).context("post live Polymarket order"),
+            Err(error) => return Err(error).context("post live Polymarket maker order"),
         };
 
         Ok(LiveOrderResponse::from(response))
@@ -1135,13 +1135,6 @@ fn credentials_from_config(config: &RuntimeConfig) -> Result<Option<Credentials>
     }
 }
 
-fn map_order_type(value: LiveOrderType) -> OrderType {
-    match value {
-        LiveOrderType::Fak => OrderType::FAK,
-        LiveOrderType::Fok => OrderType::FOK,
-    }
-}
-
 fn map_signature_type(value: PolymarketSignatureType) -> SignatureType {
     match value {
         PolymarketSignatureType::Eoa => SignatureType::Eoa,
@@ -1182,10 +1175,8 @@ fn data_api_user_address(
     Ok(funder_address.unwrap_or(signer_address))
 }
 
-fn positive_decimal_truncated(name: &str, value: f64, scale: u32) -> Result<Decimal> {
-    let decimal = Decimal::from_f64(value)
-        .with_context(|| format!("convert {name} to decimal"))?
-        .trunc_with_scale(scale);
+fn positive_decimal_truncated_decimal(name: &str, value: Decimal, scale: u32) -> Result<Decimal> {
+    let decimal = value.trunc_with_scale(scale).normalize();
     if decimal <= Decimal::ZERO {
         bail!("{name} must be positive after truncation");
     }
@@ -1193,8 +1184,16 @@ fn positive_decimal_truncated(name: &str, value: f64, scale: u32) -> Result<Deci
     Ok(decimal)
 }
 
-fn probability_decimal_truncated(name: &str, value: f64, scale: u32) -> Result<Decimal> {
-    let decimal = positive_decimal_truncated(name, value, scale)?;
+fn probability_decimal_truncated_decimal(
+    name: &str,
+    value: Decimal,
+    scale: u32,
+) -> Result<Decimal> {
+    let decimal = positive_decimal_truncated_decimal(name, value, scale)?;
+    validate_probability_decimal(name, decimal)
+}
+
+fn validate_probability_decimal(name: &str, decimal: Decimal) -> Result<Decimal> {
     if decimal >= Decimal::ONE {
         bail!("{name} must be below 1.0 after truncation");
     }
@@ -1210,25 +1209,37 @@ mod tests {
     use polymarket_client_sdk_v2::error::{
         Error as PolymarketError, Method, StatusCode as PolymarketStatusCode,
     };
-    use polymarket_client_sdk_v2::types::address;
+    use polymarket_client_sdk_v2::types::{Decimal, address};
+    use rust_decimal::prelude::FromPrimitive;
 
     use super::{
         LiveAuthConfig, credential_nonce_candidates, is_l2_auth_error, parse_env_lines,
-        positive_decimal_truncated, probability_decimal_truncated, read_credentials_cache,
-        reserve_fresh_api_nonce, validate_funder_address, write_credentials_cache,
+        positive_decimal_truncated_decimal, probability_decimal_truncated_decimal,
+        read_credentials_cache, reserve_fresh_api_nonce, validate_funder_address,
+        write_credentials_cache,
     };
     use crate::config::PolymarketSignatureType;
 
     #[test]
     fn truncates_live_order_amount_without_rounding_up() {
-        let amount = positive_decimal_truncated("amount_usdc", 25.009, 2).unwrap();
-        assert_eq!(amount.to_string(), "25.00");
+        let amount = positive_decimal_truncated_decimal(
+            "amount_usdc",
+            Decimal::from_f64(25.009).unwrap(),
+            2,
+        )
+        .unwrap();
+        assert_eq!(amount.to_string(), "25");
     }
 
     #[test]
-    fn truncates_max_price_without_crossing_above_limit() {
-        let price = probability_decimal_truncated("max_price", 0.849, 2).unwrap();
-        assert_eq!(price.to_string(), "0.84");
+    fn truncates_limit_price_without_crossing_above_limit() {
+        let price = probability_decimal_truncated_decimal(
+            "limit_price",
+            Decimal::from_f64(0.84919).unwrap(),
+            4,
+        )
+        .unwrap();
+        assert_eq!(price.to_string(), "0.8491");
     }
 
     #[test]

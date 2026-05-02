@@ -179,7 +179,7 @@ pub async fn build_runtime_bundle(
             resolution_source: "Chainlink Data Streams intended; historical labels are Coinbase/Binance VWAP proxy",
             basis_risk: "unmeasured",
             final_0_to_59_sec_window: "not modeled by 1-minute candles; production applies stricter experimental gates if enabled",
-            order_book_history: "not included; production must use live executable asks and depth",
+            order_book_history: "not included; production must use live maker bids and depth",
             live_trading_control: "not encoded here; production app must use a separate operator-controlled live-trading flag",
         },
         operator_asset_whitelist: options

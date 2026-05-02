@@ -8,7 +8,10 @@ use std::{
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, TimeDelta, Utc};
 use polymarket_client_sdk_v2::types::Address;
-use rust_decimal::{Decimal, prelude::ToPrimitive};
+use rust_decimal::{
+    Decimal,
+    prelude::{FromPrimitive, ToPrimitive},
+};
 use serde_json::{Value, json};
 use tokio::{sync::mpsc, task::JoinHandle, time};
 use tracing::{debug, info, warn};
@@ -62,7 +65,7 @@ pub async fn run(args: MonitorArgs, config: RuntimeConfig) -> Result<()> {
             args.runtime_bundle_dir.display()
         )
     })?;
-    let trade_fee_rates = TradeFeeRates::from_runtime_bundle(&runtime_bundle, &assets)?;
+    let trade_fee_rates = TradeFeeRates::maker_for_assets(&assets);
     let runtime_vol_lookback_min = max_vol_lookback_min(&runtime_bundle, &assets);
     let candle_lookback_min = if runtime_vol_lookback_min > 0 {
         runtime_vol_lookback_min.max(MOMENTUM_OVERLAY_VOL_LOOKBACK_MIN)
@@ -992,6 +995,7 @@ impl MonitorState {
             .clone()
             .and_then(|outcome| self.token_for_outcome(market, outcome));
         let book = token.and_then(|token| self.books.book(&token.asset_id));
+        let best_bid = book.and_then(TokenBook::best_bid);
         let best_ask = book.and_then(TokenBook::best_ask);
         let price_age_ms = latest_tick.map(|tick| age_ms(now, tick.received_at));
         let price_exchange_age_ms = latest_tick.map(|tick| age_ms(now, tick.exchange_timestamp));
@@ -1062,11 +1066,13 @@ impl MonitorState {
                 adjusted_required_edge_probability(runtime, state, final_window_experimental)
             });
         let order_cap_usdc = effective_max_order_usdc(config, final_window_experimental);
-        let edge_summary = runtime.zip(cell).zip(book).zip(required_edge).map(
-            |(((runtime, cell), book), required_edge)| {
-                summarize_asks(runtime, cell, &book.asks(), required_edge)
-            },
-        );
+        let edge_summary = runtime
+            .zip(cell)
+            .zip(best_bid.as_ref())
+            .zip(required_edge)
+            .and_then(|(((runtime, cell), best_bid), required_edge)| {
+                summarize_maker_bid(runtime, cell, best_bid, required_edge, order_cap_usdc)
+            });
         let already_positioned = self.positioned_markets.contains(&market.condition_id)
             || self.pending_markets.contains(&market.condition_id);
         let market_resolved = self.resolved_markets.contains(&market.condition_id);
@@ -1092,6 +1098,7 @@ impl MonitorState {
                 cell,
                 path_state.as_ref(),
                 required_edge,
+                best_bid.as_ref(),
                 best_ask.as_ref(),
                 edge_summary.as_ref(),
                 already_positioned,
@@ -1161,11 +1168,15 @@ impl MonitorState {
                 max_abs_d_bps_so_far = ?path_state.as_ref().map(|state| state.max_abs_d_bps_so_far),
                 lead_decay_ratio = ?path_state.as_ref().map(|state| state.lead_decay_ratio),
                 edge_penalty_applied,
+                best_bid = ?best_bid.as_ref().map(|level| level.price.to_string()),
+                best_bid_size = ?best_bid.as_ref().map(|level| level.size.to_string()),
                 best_ask = ?best_ask.as_ref().map(|level| level.price.to_string()),
                 best_ask_size = ?best_ask.as_ref().map(|level| level.size.to_string()),
-                best_ask_fee = ?edge_summary.as_ref().and_then(|summary| summary.best_fee),
-                best_ask_edge = ?edge_summary.as_ref().and_then(|summary| summary.best_edge),
-                selected_size = ?edge_summary.as_ref().map(|summary| summary.positive_ev_depth_shares),
+                maker_fee = ?edge_summary.as_ref().and_then(|summary| summary.best_fee),
+                maker_edge = ?edge_summary.as_ref().and_then(|summary| summary.best_edge),
+                maker_order_price = ?edge_summary.as_ref().and_then(|summary| summary.order_price).map(|price| price.to_string()),
+                maker_order_size_shares = ?edge_summary.as_ref().and_then(|summary| summary.order_size_shares).map(|size| size.to_string()),
+                maker_order_notional_usdc = ?edge_summary.as_ref().and_then(|summary| summary.order_notional_usdc).map(|amount| amount.to_string()),
                 weighted_avg_price = ?edge_summary.as_ref().and_then(|summary| summary.weighted_avg_price),
                 all_in_cost = ?edge_summary.as_ref().and_then(|summary| summary.best_all_in_cost),
                 edge = ?edge_summary.as_ref().and_then(|summary| summary.best_edge),
@@ -1173,7 +1184,8 @@ impl MonitorState {
                 positive_ev_depth_usdc = ?edge_summary.as_ref().map(|summary| summary.positive_ev_depth_usdc),
                 positive_ev_depth = ?edge_summary.as_ref().map(|summary| summary.positive_ev_depth_shares),
                 max_acceptable_price = ?edge_summary.as_ref().and_then(|summary| summary.max_acceptable_price),
-                fee_rate = ?runtime.map(AssetRuntime::fee_rate),
+                maker_fee_rate = 0.0,
+                taker_fee_rate = ?runtime.map(AssetRuntime::fee_rate),
                 min_edge_probability = ?runtime.map(AssetRuntime::min_edge_probability),
                 required_edge = ?required_edge,
                 final_window_extra_edge_probability = ?final_window_experimental.then_some(EXPERIMENTAL_FINAL_WINDOW_EXTRA_EDGE_PROBABILITY),
@@ -1203,20 +1215,22 @@ impl MonitorState {
         let line = line?;
         let latest_tick = latest_tick?;
         let edge_summary = edge_summary.as_ref()?;
-        let max_price = edge_summary.max_acceptable_price?;
-        let amount_usdc = edge_summary
-            .positive_ev_depth_usdc
-            .min(runtime.max_position_usdc())
-            .min(order_cap_usdc);
+        let order_price = edge_summary.order_price?;
+        let order_size_shares = edge_summary.order_size_shares?;
+        let amount_usdc_decimal = edge_summary.order_notional_usdc?;
+        let amount_usdc = amount_usdc_decimal.to_f64()?;
         if amount_usdc < config.min_order_usdc {
             return None;
         }
+        let order_price_f64 = order_price.to_f64()?;
+        let order_size_shares_f64 = order_size_shares.to_f64()?;
+        let expires_at = maker_order_expires_at(market.slot.end());
+        let best_bid_price = best_bid.as_ref().and_then(|level| level.price.to_f64());
+        let best_bid_size = best_bid.as_ref().and_then(|level| level.size.to_f64());
         let best_ask_price = best_ask.as_ref().and_then(|level| level.price.to_f64());
         let best_ask_size = best_ask.as_ref().and_then(|level| level.size.to_f64());
-        let expected_fill_price = edge_summary.weighted_avg_price.or(best_ask_price);
-        let estimated_payout_usdc = expected_fill_price
-            .filter(|price| *price > 0.0)
-            .map(|price| amount_usdc / price);
+        let expected_fill_price = Some(order_price_f64);
+        let estimated_payout_usdc = Some(order_size_shares_f64);
         let estimated_profit_usdc = estimated_payout_usdc.map(|payout| payout - amount_usdc);
 
         Some(PreparedTrade {
@@ -1226,7 +1240,11 @@ impl MonitorState {
             token_id: token.asset_id.clone(),
             outcome: token.outcome.clone(),
             amount_usdc,
-            max_price,
+            order_price: order_price_f64,
+            size_shares: order_size_shares_f64,
+            order_price_decimal: order_price,
+            order_size_shares_decimal: order_size_shares,
+            expires_at,
             line_price: line.price.to_f64()?,
             current_price: latest_tick.value.to_f64()?,
             line_observed_at: line.observed_at,
@@ -1239,6 +1257,8 @@ impl MonitorState {
             p_win: cell.map(|cell| cell.p_win),
             p_win_lower: cell.map(|cell| cell.p_win_lower),
             best_edge: edge_summary.best_edge,
+            best_bid: best_bid_price,
+            best_bid_size,
             best_ask: best_ask_price,
             best_ask_size,
             weighted_avg_price: edge_summary.weighted_avg_price,
@@ -1393,7 +1413,9 @@ impl MonitorState {
             token_id: prepared.token_id.clone(),
             outcome: prepared.outcome.clone(),
             amount_usdc: prepared.amount_usdc,
-            max_price: prepared.max_price,
+            limit_price: prepared.order_price_decimal,
+            size_shares: prepared.order_size_shares_decimal,
+            expires_at: prepared.expires_at,
         };
         info!(
             event = "live_order_submit",
@@ -1405,9 +1427,13 @@ impl MonitorState {
             token_id = request.token_id.as_str(),
             outcome = ?request.outcome,
             amount_usdc = request.amount_usdc,
-            max_price = request.max_price,
+            limit_price = %request.limit_price,
+            size_shares = %request.size_shares,
+            expires_at = %request.expires_at,
+            order_type = "GTD",
+            post_only = true,
             decision = "submitted",
-            "submitting live order"
+            "submitting live maker order"
         );
         let result = executor.execute(&request).await;
         self.pending_markets.remove(&market.condition_id);
@@ -1416,6 +1442,9 @@ impl MonitorState {
             Ok(response) => {
                 let retryable_no_fill = is_retryable_no_fill_response(&response);
                 if response.has_fill() {
+                    self.positioned_markets.insert(market.condition_id.clone());
+                    self.retryable_no_fill_cooldown_until.remove(&no_fill_key);
+                } else if response.success {
                     self.positioned_markets.insert(market.condition_id.clone());
                     self.retryable_no_fill_cooldown_until.remove(&no_fill_key);
                 } else if retryable_no_fill {
@@ -1431,7 +1460,7 @@ impl MonitorState {
                 let decision = if response.has_fill() {
                     "filled"
                 } else if response.success {
-                    "submitted"
+                    "posted"
                 } else {
                     "rejected"
                 };
@@ -1444,7 +1473,11 @@ impl MonitorState {
                     token_id = request.token_id.as_str(),
                     outcome = ?request.outcome,
                     amount_usdc = request.amount_usdc,
-                    max_price = request.max_price,
+                    limit_price = %request.limit_price,
+                    size_shares = %request.size_shares,
+                    expires_at = %request.expires_at,
+                    order_type = "GTD",
+                    post_only = true,
                     order_id = response.order_id.as_str(),
                     status = response.status.as_str(),
                     success = response.success,
@@ -1465,7 +1498,11 @@ impl MonitorState {
                         token_id = request.token_id.as_str(),
                         outcome = ?request.outcome,
                         amount_usdc = request.amount_usdc,
-                        max_price = request.max_price,
+                        limit_price = %request.limit_price,
+                        size_shares = %request.size_shares,
+                        expires_at = %request.expires_at,
+                        order_type = "GTD",
+                        post_only = true,
                         order_id = response.order_id.as_str(),
                         status = response.status.as_str(),
                         error_msg = ?response.error_msg,
@@ -1553,6 +1590,7 @@ impl MonitorState {
         cell: Option<&RuntimeCell>,
         path_state: Option<&PathState>,
         required_edge: Option<f64>,
+        best_bid: Option<&PriceLevel>,
         best_ask: Option<&PriceLevel>,
         edge_summary: Option<&EdgeSummary>,
         already_positioned: bool,
@@ -1636,8 +1674,17 @@ impl MonitorState {
         if path_state.retracing_60s {
             return Some("retracing_60s");
         }
+        if best_bid.is_none() {
+            return Some("order_book_missing_bids");
+        }
         if best_ask.is_none() {
             return Some("order_book_missing_asks");
+        }
+        if best_bid
+            .zip(best_ask)
+            .is_some_and(|(bid, ask)| bid.price >= ask.price)
+        {
+            return Some("order_book_crossed_or_locked");
         }
         if edge_summary.is_none_or(|summary| summary.positive_ev_depth_shares <= 0.0) {
             return Some("no_positive_ev_depth");
@@ -1751,7 +1798,7 @@ impl MonitorState {
         entry.record["state"] = json!(if response.has_fill() {
             "filled"
         } else if response.success {
-            "submitted"
+            "posted"
         } else {
             "rejected"
         });
@@ -1954,9 +2001,13 @@ fn trade_entry_record_json(
         "entry": {
             "outcome": outcome_label(&prepared.outcome),
             "token_id": prepared.token_id.as_str(),
+            "order_type": "GTD",
+            "post_only": true,
             "amount_usdc": prepared.amount_usdc,
+            "size_shares": prepared.size_shares,
             "order_cap_usdc": prepared.order_cap_usdc,
-            "max_order_price": prepared.max_price,
+            "order_price": prepared.order_price,
+            "expires_at": prepared.expires_at,
             "expected_fill_price": prepared.expected_fill_price,
             "estimated_payout_usdc": prepared.estimated_payout_usdc,
             "estimated_profit_usdc": prepared.estimated_profit_usdc,
@@ -1976,6 +2027,8 @@ fn trade_entry_record_json(
             "p_win": prepared.p_win,
             "p_win_lower": prepared.p_win_lower,
             "best_edge": prepared.best_edge,
+            "best_bid": prepared.best_bid,
+            "best_bid_size": prepared.best_bid_size,
             "best_ask": prepared.best_ask,
             "best_ask_size": prepared.best_ask_size,
             "best_fee": prepared.best_fee,
@@ -2051,7 +2104,11 @@ struct PreparedTrade {
     token_id: String,
     outcome: Outcome,
     amount_usdc: f64,
-    max_price: f64,
+    order_price: f64,
+    size_shares: f64,
+    order_price_decimal: Decimal,
+    order_size_shares_decimal: Decimal,
+    expires_at: DateTime<Utc>,
     line_price: f64,
     current_price: f64,
     line_observed_at: DateTime<Utc>,
@@ -2064,6 +2121,8 @@ struct PreparedTrade {
     p_win: Option<f64>,
     p_win_lower: Option<f64>,
     best_edge: Option<f64>,
+    best_bid: Option<f64>,
+    best_bid_size: Option<f64>,
     best_ask: Option<f64>,
     best_ask_size: Option<f64>,
     weighted_avg_price: Option<f64>,
@@ -2125,12 +2184,13 @@ impl PreparedTrade {
             })
             .unwrap_or_else(|| "If it wins: payout estimate unavailable".to_string());
         format!(
-            "{}\nTarget: {}\nCurrent: {}\nBet: {} at up to {:.2}\nTime left: {}\n{}",
+            "{}\nTarget: {}\nCurrent: {}\nMaker bid: {} for {} shares @ {:.4}\nTime left: {}\n{}",
             heading,
             format_market_price(self.asset, self.line_price),
             format_market_price(self.asset, self.current_price),
             format_usdc(self.amount_usdc),
-            self.max_price,
+            format_shares(self.size_shares),
+            self.order_price,
             format_remaining(self.remaining_sec),
             win_text
         )
@@ -2147,6 +2207,13 @@ fn outcome_label(outcome: &Outcome) -> &'static str {
 
 fn format_usdc(value: f64) -> String {
     format_currency(value, 2)
+}
+
+fn format_shares(value: f64) -> String {
+    format!("{value:.4}")
+        .trim_end_matches('0')
+        .trim_end_matches('.')
+        .to_string()
 }
 
 fn format_signed_usdc(value: f64) -> String {
@@ -2329,17 +2396,20 @@ fn extract_error_json_value(reason: &str) -> Option<String> {
 
 fn is_retryable_no_fill_response(response: &LiveOrderResponse) -> bool {
     !response.has_fill()
-        && (response.success
-            || response
-                .error_msg
-                .as_deref()
-                .is_some_and(is_retryable_no_fill_error))
+        && !response.success
+        && response
+            .error_msg
+            .as_deref()
+            .is_some_and(is_retryable_no_fill_error)
 }
 
 fn is_retryable_no_fill_error(error: &str) -> bool {
     let normalized = error.to_ascii_lowercase();
-    normalized.contains("no orders found to match")
-        && (normalized.contains("fak") || normalized.contains("fok"))
+    (normalized.contains("no orders found to match")
+        && (normalized.contains("fak") || normalized.contains("fok")))
+        || (normalized.contains("invalid_post_only_order")
+            && !normalized.contains("invalid_post_only_order_type"))
+        || (normalized.contains("post-only") && normalized.contains("would cross"))
 }
 
 fn retryable_no_fill_key(condition_id: &str, token_id: &str) -> String {
@@ -2406,6 +2476,8 @@ const RETRYABLE_NO_FILL_COOLDOWN_SECONDS: i64 = 10;
 const LIVE_SETTLEMENT_CHECK_INTERVAL_SECONDS: u64 = 30;
 const MOMENTUM_OVERLAY_VOL_LOOKBACK_MIN: u32 = 30;
 const MOMENTUM_OVERLAY_THRESHOLD_VOL_UNITS: f64 = 2.0;
+const ORDER_SHARE_SCALE: u32 = 6;
+const ORDER_NOTIONAL_SCALE: u32 = 6;
 // Monitor-only final-window experiment; the runtime bundle still has no <60s cells.
 const EXPERIMENTAL_MIN_REMAINING_SEC_TO_TRADE: i64 = 30;
 const EXPERIMENTAL_FINAL_WINDOW_MIN_ABS_D_BPS: f64 = 10.0;
@@ -2453,6 +2525,10 @@ fn effective_max_order_usdc(config: &RuntimeConfig, final_window_experimental: b
     } else {
         config.max_order_usdc
     }
+}
+
+fn maker_order_expires_at(slot_end: DateTime<Utc>) -> DateTime<Utc> {
+    slot_end + TimeDelta::seconds(60)
 }
 
 #[derive(Clone, Debug, Default)]
@@ -2585,45 +2661,55 @@ struct EdgeSummary {
     positive_ev_depth_usdc: f64,
     weighted_avg_price: Option<f64>,
     max_acceptable_price: Option<f64>,
+    order_price: Option<Decimal>,
+    order_size_shares: Option<Decimal>,
+    order_notional_usdc: Option<Decimal>,
 }
 
-fn summarize_asks(
+fn summarize_maker_bid(
     runtime: &AssetRuntime,
     cell: &RuntimeCell,
-    asks: &[PriceLevel],
+    best_bid: &PriceLevel,
     required_edge: f64,
-) -> EdgeSummary {
+    order_cap_usdc: f64,
+) -> Option<EdgeSummary> {
     let mut summary = EdgeSummary::default();
 
-    for (index, level) in asks.iter().enumerate() {
-        let Some(ask) = level.price.to_f64() else {
-            break;
-        };
-        let Some(size) = level.size.to_f64() else {
-            break;
-        };
+    let price = best_bid.price.normalize();
+    let price_f64 = price.to_f64()?;
+    let fee = 0.0;
+    let all_in_cost = price_f64;
+    let edge = cell.p_win_lower - all_in_cost;
+    summary.best_fee = Some(fee);
+    summary.best_all_in_cost = Some(all_in_cost);
+    summary.best_edge = Some(edge);
 
-        let fee = runtime.fee_rate() * ask * (1.0 - ask);
-        let all_in_cost = ask + fee;
-        let edge = cell.p_win_lower - all_in_cost;
-        if index == 0 {
-            summary.best_fee = Some(fee);
-            summary.best_all_in_cost = Some(all_in_cost);
-            summary.best_edge = Some(edge);
-        }
-
-        if edge < required_edge {
-            break;
-        }
-
-        summary.positive_ev_depth_shares += size;
-        summary.positive_ev_depth_usdc += size * ask;
-        summary.weighted_avg_price =
-            Some(summary.positive_ev_depth_usdc / summary.positive_ev_depth_shares);
-        summary.max_acceptable_price = Some(ask);
+    if edge < required_edge {
+        return Some(summary);
     }
 
-    summary
+    let target_notional = Decimal::from_f64(runtime.max_position_usdc().min(order_cap_usdc))?;
+    let size_shares = (target_notional / price)
+        .trunc_with_scale(ORDER_SHARE_SCALE)
+        .normalize();
+    if size_shares <= Decimal::ZERO {
+        return Some(summary);
+    }
+    let notional = (size_shares * price)
+        .trunc_with_scale(ORDER_NOTIONAL_SCALE)
+        .normalize();
+    let size_shares_f64 = size_shares.to_f64()?;
+    let notional_f64 = notional.to_f64()?;
+
+    summary.positive_ev_depth_shares = size_shares_f64;
+    summary.positive_ev_depth_usdc = notional_f64;
+    summary.weighted_avg_price = Some(price_f64);
+    summary.max_acceptable_price = Some(price_f64);
+    summary.order_price = Some(price);
+    summary.order_size_shares = Some(size_shares);
+    summary.order_notional_usdc = Some(notional);
+
+    Some(summary)
 }
 
 #[cfg(test)]
@@ -2632,6 +2718,7 @@ mod tests {
 
     use chrono::{TimeDelta, TimeZone, Utc};
     use rust_decimal::Decimal;
+    use rust_decimal::prelude::FromPrimitive;
 
     use crate::{
         config::{LiveOrderType, PolymarketSignatureType, RuntimeConfig},
@@ -2659,7 +2746,7 @@ mod tests {
         live_settlement_candidate_slots, live_settlement_lookback_slots,
         live_settlement_summary_text, momentum_overlay_side_for_value, monitor_remaining_bucket,
         pre_submit_matches_initial, required_edge_probability, slot_start_from_market_slug,
-        summarize_asks, telegram_settlement_interval_duration,
+        summarize_maker_bid, telegram_settlement_interval_duration,
     };
 
     #[test]
@@ -2740,7 +2827,7 @@ mod tests {
     }
 
     #[test]
-    fn executable_depth_uses_p_win_lower_against_ask_levels() {
+    fn maker_bid_uses_p_win_lower_without_taker_fee() {
         let bundle = RuntimeBundle::load(
             std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("runtime/wiggler-prod-v1"),
         )
@@ -2750,78 +2837,71 @@ mod tests {
             .find_cell(60, VolBin::Low, SideLeading::UpLeading, 2.5)
             .unwrap();
 
-        let summary = summarize_asks(
+        let summary = summarize_maker_bid(
             runtime,
             cell,
-            &[
-                PriceLevel {
-                    price: Decimal::new(80, 2),
-                    size: Decimal::new(10, 0),
-                },
-                PriceLevel {
-                    price: Decimal::new(84, 2),
-                    size: Decimal::new(20, 0),
-                },
-                PriceLevel {
-                    price: Decimal::new(86, 2),
-                    size: Decimal::new(30, 0),
-                },
-            ],
+            &PriceLevel {
+                price: Decimal::new(80, 2),
+                size: Decimal::new(10, 0),
+            },
             runtime.min_edge_probability(),
-        );
+            25.0,
+        )
+        .unwrap();
 
-        assert!((summary.best_fee.unwrap() - 0.01152).abs() < 0.000001);
-        assert!((summary.best_all_in_cost.unwrap() - 0.81152).abs() < 0.000001);
+        assert_eq!(summary.best_fee, Some(0.0));
+        assert!((summary.best_all_in_cost.unwrap() - 0.80).abs() < 0.000001);
         assert!(summary.best_edge.unwrap() > runtime.min_edge_probability());
-        assert_eq!(summary.positive_ev_depth_shares, 30.0);
-        assert!((summary.weighted_avg_price.unwrap() - 0.8266666666666667).abs() < 0.000001);
-        assert_eq!(summary.max_acceptable_price, Some(0.84));
+        assert_eq!(summary.positive_ev_depth_shares, 31.25);
+        assert_eq!(summary.positive_ev_depth_usdc, 25.0);
+        assert_eq!(summary.weighted_avg_price, Some(0.80));
+        assert_eq!(summary.max_acceptable_price, Some(0.80));
+        assert_eq!(summary.order_price, Some(Decimal::new(80, 2)));
+        assert_eq!(summary.order_size_shares, Some(Decimal::new(3125, 2)));
     }
 
     #[test]
-    fn executable_depth_rejects_level_that_only_raw_p_win_would_accept() {
+    fn maker_bid_rejects_level_that_only_raw_p_win_would_accept() {
         let (runtime, cell) = btc_runtime_and_cell();
         assert!(cell.p_win > cell.p_win_lower);
 
-        let summary = summarize_asks(
+        let summary = summarize_maker_bid(
             runtime,
             cell,
-            &[PriceLevel {
-                price: Decimal::new(842, 3),
+            &PriceLevel {
+                price: Decimal::from_f64(cell.p_win - runtime.min_edge_probability())
+                    .unwrap()
+                    .trunc_with_scale(4),
                 size: Decimal::new(10, 0),
-            }],
+            },
             runtime.min_edge_probability(),
-        );
+            25.0,
+        )
+        .unwrap();
 
         assert!(cell.p_win - summary.best_all_in_cost.unwrap() >= runtime.min_edge_probability());
         assert!(summary.best_edge.unwrap() < runtime.min_edge_probability());
         assert_eq!(summary.positive_ev_depth_shares, 0.0);
+        assert_eq!(summary.order_price, None);
     }
 
     #[test]
-    fn executable_depth_stops_at_first_bad_level() {
+    fn maker_bid_respects_order_cap() {
         let (runtime, cell) = btc_runtime_and_cell();
-        let summary = summarize_asks(
+        let summary = summarize_maker_bid(
             runtime,
             cell,
-            &[
-                PriceLevel {
-                    price: Decimal::new(80, 2),
-                    size: Decimal::new(10, 0),
-                },
-                PriceLevel {
-                    price: Decimal::new(85, 2),
-                    size: Decimal::new(20, 0),
-                },
-                PriceLevel {
-                    price: Decimal::new(86, 2),
-                    size: Decimal::new(30, 0),
-                },
-            ],
+            &PriceLevel {
+                price: Decimal::new(80, 2),
+                size: Decimal::new(10, 0),
+            },
             runtime.min_edge_probability(),
-        );
+            10.0,
+        )
+        .unwrap();
 
-        assert_eq!(summary.positive_ev_depth_shares, 10.0);
+        assert_eq!(summary.positive_ev_depth_shares, 12.5);
+        assert_eq!(summary.positive_ev_depth_usdc, 10.0);
         assert_eq!(summary.max_acceptable_price, Some(0.80));
     }
 
@@ -2909,6 +2989,7 @@ mod tests {
                 None, // cell
                 None, // path_state
                 None, // required_edge
+                None, // best_bid
                 None, // best_ask
                 None, // edge_summary
                 false,
@@ -2937,6 +3018,7 @@ mod tests {
                 None, // cell
                 None, // path_state
                 None, // required_edge
+                None, // best_bid
                 None, // best_ask
                 None, // edge_summary
                 false,
@@ -3010,6 +3092,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
                 false,
                 false,
                 &config,
@@ -3040,6 +3123,7 @@ mod tests {
                 Some(Decimal::new(5, 0)),
                 Some(5.0),
                 Some(SideLeading::UpLeading),
+                None,
                 None,
                 None,
                 None,
@@ -3104,6 +3188,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
                 false,
                 false,
                 &config,
@@ -3159,6 +3244,7 @@ mod tests {
                 Some(runtime.min_edge_probability()),
                 None,
                 None,
+                None,
                 false,
                 false,
                 &config,
@@ -3187,6 +3273,7 @@ mod tests {
                 Some(1.0),
                 Some(cell),
                 Some(&invalid),
+                None,
                 None,
                 None,
                 None,
@@ -3240,6 +3327,7 @@ mod tests {
                 Some(runtime.min_edge_probability()),
                 None,
                 None,
+                None,
                 false,
                 false,
                 &config,
@@ -3269,6 +3357,7 @@ mod tests {
                 Some(cell),
                 Some(&path_state),
                 Some(runtime.min_edge_probability()),
+                None,
                 None,
                 None,
                 false,
@@ -3583,7 +3672,7 @@ mod tests {
             tradable_assets: vec![Asset::Btc, Asset::Eth, Asset::Sol, Asset::Xrp, Asset::Doge],
             min_order_usdc: 1.0,
             max_order_usdc: 25.0,
-            live_order_type: LiveOrderType::Fak,
+            live_order_type: LiveOrderType::MakerPostOnly,
             evaluation_interval: Duration::from_millis(1_000),
             candle_rest_sync_interval: Duration::from_millis(60_000),
             log_evaluations: false,
@@ -3616,7 +3705,11 @@ mod tests {
             token_id: token_id.to_string(),
             outcome,
             amount_usdc: 10.0,
-            max_price: 0.8,
+            order_price: 0.8,
+            size_shares: 12.5,
+            order_price_decimal: Decimal::new(80, 2),
+            order_size_shares_decimal: Decimal::new(125, 1),
+            expires_at: now + TimeDelta::seconds(240),
             line_price: 67_000.0,
             current_price: 67_010.0,
             line_observed_at: now - TimeDelta::seconds(120),
@@ -3629,7 +3722,9 @@ mod tests {
             p_win: Some(0.91),
             p_win_lower: Some(0.9),
             best_edge: Some(0.05),
-            best_ask: Some(0.75),
+            best_bid: Some(0.8),
+            best_bid_size: Some(100.0),
+            best_ask: Some(0.82),
             best_ask_size: Some(100.0),
             weighted_avg_price: Some(0.8),
             best_fee: Some(0.01),

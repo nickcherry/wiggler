@@ -62,13 +62,13 @@ Every `WIGGLER_EVALUATION_INTERVAL_MS`, for each active 5-minute market, the mon
 - 1-minute normalized momentum from the same candle store
 - leading side and corresponding Up/Down token
 - current 5-minute price path from the same live price source
-- executable ask-level edge using `p_win_lower`
+- maker-bid edge using `p_win_lower`
 
 The evaluator skips when data is missing or stale, the market is outside the
 regular 60-240 second trading window, the price is too close to the line, no
 runtime cell matches, the last-60-second price path is retracing against the
 leading side, the momentum overlay strongly favors the opposite side, max path
-lead is unavailable, or there is no positive-EV executable ask depth. As an
+lead is unavailable, or the current best bid has insufficient edge. As an
 explicit live experiment, 30-59 seconds remaining maps to the runtime's
 60-second bucket only when stricter final-window gates pass: at least 10 bps
 from the line, an additional 0.01 required probability edge, and a 10 USDC
@@ -77,38 +77,41 @@ effective order cap.
 The base executable-edge gate is `risk_defaults.min_edge_probability`. If the
 current absolute lead has decayed below 75% of the max absolute lead observed
 so far in the current 5-minute market, the evaluator adds a 0.005 probability
-edge penalty before walking asks.
+edge penalty before evaluating the maker bid.
 
-Fees are applied at runtime, not inside the probability grid:
+Entry costs are applied at runtime, not inside the probability grid. Live and
+shadow entries are evaluated as maker bids, so the entry cost is the current
+best bid with zero maker fee:
 
 ```text
-all_in_cost = ask + fee_rate * ask * (1 - ask)
+all_in_cost = best_bid
 edge = p_win_lower - all_in_cost
 ```
 
-The generated bundle defaults to `fee.taker_fee_rate = 0.072`. If crypto market
-fees change materially, regenerate with `training build-runtime` or
-`training refresh-runtime` and an explicit `--taker-fee-rate`.
+The generated bundle still records `fee.taker_fee_rate = 0.072` for historical
+taker analysis and bundle provenance, but live entry gating does not subtract
+taker fees.
 
 `WIGGLER_LIVE_TRADING=false` sends a Telegram shadow decision when all gates
 pass, but it never submits orders. `WIGGLER_LIVE_TRADING=true` sends a live
 intent notification, repeats the full evaluation immediately before submit, and
 submits only when the recomputed outcome token still matches the initial
 decision. Live order lifecycle logs use `decision="submitted"`,
-`decision="filled"`, or `decision="rejected"`. Full per-tick
+`decision="posted"`, `decision="filled"`, or `decision="rejected"`. Full per-tick
 `trade_evaluation` logs are off by default; enable `WIGGLER_LOG_EVALUATIONS=true`
 for short debugging runs.
 
 Live order sizing is the minimum of:
 
-- positive-EV executable depth in USDC
 - the runtime config's `max_position_usdc`
 - `WIGGLER_MAX_ORDER_USDC`
 
 For the experimental 30-59 second final window, the `WIGGLER_MAX_ORDER_USDC`
 leg is capped at 10 USDC before applying the normal minimum-order check.
 
-The monitor skips if that amount is below `WIGGLER_MIN_ORDER_USDC`.
+The monitor converts the selected notional into shares at the maker bid, truncates
+to CLOB lot precision, and skips if the resulting notional is below
+`WIGGLER_MIN_ORDER_USDC`.
 
 ## Warmup
 

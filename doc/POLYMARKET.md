@@ -101,11 +101,11 @@ https://clob.polymarket.com
 
 The SDK handles L1 authentication, L2 headers, EIP-712 signing, protocol
 version detection, and order submission. Wiggler also posts CLOB heartbeats
-while live trading is enabled. It only submits buy-side market orders with:
+while live trading is enabled. It only submits buy-side maker orders with:
 
-- explicit price limit from positive-EV ask depth
-- `FAK` by default, configurable to `FOK`
-- no maker/post-only path
+- `GTD` order type
+- `postOnly=true`
+- limit price at the current best bid
 - no sell/flipping path
 - no repeated local or remote exposure in the same market
 

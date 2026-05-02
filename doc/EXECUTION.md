@@ -32,8 +32,9 @@ Live trading must remain explicit and fail closed:
 
 - `WIGGLER_LIVE_TRADING` defaults to `false`
 - `POLYMARKET_PRIVATE_KEY` is required only for live mode
-- live orders are buy-only, taker-only, FAK/FOK market orders with an explicit
-  max acceptable price
+- live orders are buy-only, post-only GTD limit orders priced at the current
+  best bid; Polymarket rejects them rather than taking liquidity if the book
+  moves through the limit
 - the evaluator reruns immediately before submit
 - any existing local or remote market exposure blocks another order
 - live order attempts and responses are logged and sent to Telegram when

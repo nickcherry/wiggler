@@ -24,16 +24,16 @@ When configured, the monitor sends Telegram messages for:
 - live entry rejections and hard execution errors
 - one live settlement summary for each five-minute window with closed positions
 
-Live entry attempts are not messaged. Retryable FAK/FOK no-fill misses are
-sent as concise rejection messages, logged, and recorded, but they do not block
-the monitor from looking for another entry in the same market.
+Live entry attempts are not messaged. Retryable post-only rejections are sent
+as concise rejection messages, logged, and recorded, but they do not block the
+monitor from looking for another entry in the same market.
 
 Live settlement Telegram win/loss/PnL values use Polymarket Data API trade
 rows plus Gamma's resolved outcome prices. Local trade records are not used for
 PnL or win/loss summaries. Totals are account-wide for the configured wallet
 and asset whitelist, using resolved buy fills available from Polymarket APIs.
-PnL is net of the runtime-bundle estimated taker entry fee:
-`shares * fee_rate * price * (1 - price)`.
+PnL uses the live maker-entry fee model, so Polymarket entry fees are treated as
+zero for monitor settlement summaries.
 The wallet comes from `POLYMARKET_USER_ADDRESS` or `POLYMARKET_FUNDER_ADDRESS`
 in `.env`, with EOA configs falling back to `POLYMARKET_PRIVATE_KEY`.
 

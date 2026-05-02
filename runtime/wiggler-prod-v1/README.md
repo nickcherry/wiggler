@@ -33,5 +33,5 @@ The production monitor only reads the generated JSON files.
 - Basis risk versus Chainlink is unmeasured.
 - The 0–59s remaining window is not modeled.
 - Historical Polymarket order books are not included.
-- Production must compare model probability to executable ask/depth, not midpoint.
+- Production must compare model probability to the live maker bid, not midpoint.
 - Production must use `p_win_lower`, not `p_win`.

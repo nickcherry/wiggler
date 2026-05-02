@@ -91,7 +91,7 @@ impl RuntimeConfig {
             tradable_assets: asset_list_env("WIGGLER_TRADABLE_ASSETS")?,
             min_order_usdc: f64_env("WIGGLER_MIN_ORDER_USDC", DEFAULT_MIN_ORDER_USDC)?,
             max_order_usdc: f64_env("WIGGLER_MAX_ORDER_USDC", DEFAULT_MAX_ORDER_USDC)?,
-            live_order_type: enum_env("WIGGLER_LIVE_ORDER_TYPE", LiveOrderType::Fak)?,
+            live_order_type: enum_env("WIGGLER_LIVE_ORDER_TYPE", LiveOrderType::MakerPostOnly)?,
             evaluation_interval: Duration::from_millis(u64_env(
                 "WIGGLER_EVALUATION_INTERVAL_MS",
                 DEFAULT_EVALUATION_INTERVAL_MS,
@@ -176,8 +176,7 @@ impl RuntimeConfig {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LiveOrderType {
-    Fak,
-    Fok,
+    MakerPostOnly,
 }
 
 impl std::str::FromStr for LiveOrderType {
@@ -185,8 +184,10 @@ impl std::str::FromStr for LiveOrderType {
 
     fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
         match value.to_ascii_lowercase().as_str() {
-            "fak" | "fill-and-kill" => Ok(Self::Fak),
-            "fok" | "fill-or-kill" => Ok(Self::Fok),
+            "maker" | "post-only" | "post_only" | "gtd" => Ok(Self::MakerPostOnly),
+            // Backward-compatible aliases. The live executor now always posts maker-only GTD
+            // limit orders, even if an old environment still exports a taker order type.
+            "fak" | "fill-and-kill" | "fok" | "fill-or-kill" => Ok(Self::MakerPostOnly),
             _ => Err(format!("unsupported live order type: {value}")),
         }
     }
@@ -323,12 +324,15 @@ mod tests {
 
     #[test]
     fn parses_live_order_type_aliases() {
-        assert_eq!("fak".parse::<LiveOrderType>().unwrap(), LiveOrderType::Fak);
+        assert_eq!(
+            "maker".parse::<LiveOrderType>().unwrap(),
+            LiveOrderType::MakerPostOnly
+        );
         assert_eq!(
             "fill-or-kill".parse::<LiveOrderType>().unwrap(),
-            LiveOrderType::Fok
+            LiveOrderType::MakerPostOnly
         );
-        assert!("maker".parse::<LiveOrderType>().is_err());
+        assert!("market".parse::<LiveOrderType>().is_err());
     }
 
     #[test]

@@ -174,21 +174,22 @@ Use `p_win_lower`.
 
 ## Polymarket order book comparison
 
-Compare model probability to executable ask, not midpoint.
+Compare model probability to the live maker bid, not midpoint.
 
-If `buy_outcome == "up"`, inspect asks for the Up token.
-If `buy_outcome == "down"`, inspect asks for the Down token.
+If `buy_outcome == "up"`, inspect the best bid for the Up token.
+If `buy_outcome == "down"`, inspect the best bid for the Down token.
 
-For each ask level:
+For the selected token:
 
 ```text
-ask = level.price
-fee = fee_rate * ask * (1 - ask)
-all_in_cost = ask + fee
+bid = best_bid.price
+fee = 0
+all_in_cost = bid
 edge = p_win_lower - all_in_cost
 ```
 
-Use the config fee rate unless production fetches a more current market-specific fee rate.
+The runtime bundle's taker fee rate is retained for provenance and historical
+taker analysis; live entries are maker bids.
 
 A level is eligible if:
 
@@ -202,18 +203,19 @@ The default is:
 min_edge_probability = 0.015
 ```
 
-Walk the book from cheapest ask upward. Only consume levels that pass the edge check. Stop at the first level that fails.
+Evaluate the current best bid as a maker entry. The entry cost is the bid price
+with zero maker fee.
 
 ## Order behavior
 
 For v1:
 
 ```text
-taker only
-marketable limit / FAK / FOK style
-no maker mode
+maker only
+post-only GTD limit order at the current best bid
+no taker mode
 no blind market orders
-no crossing beyond max acceptable price
+no crossing the spread
 no averaging down
 no flipping sides inside a market
 one position per market unless explicitly changed
@@ -283,11 +285,13 @@ training_input_hash
 sample_count
 p_win
 p_win_lower
+best_bid
 best_ask
-fee_rate
+maker_fee_rate
+taker_fee_rate
 all_in_cost
 edge
-positive_ev_depth
+maker_order_notional_usdc
 decision
 skip_reason
 ```

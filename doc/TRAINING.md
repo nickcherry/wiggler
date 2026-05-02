@@ -148,16 +148,16 @@ production logs can continue to expose that assumption.
 
 ## Fees And Win Rate
 
-Crypto up/down fees are material. The grid itself estimates survival
-probability and should not bake in an assumed order-book price. Fees belong in
-the runtime decision gate:
+Crypto up/down taker fees are material. The grid itself estimates survival
+probability and should not bake in an assumed order-book price. Live entries are
+maker bids, so the current runtime decision gate uses zero maker fee:
 
 ```text
-all_in_cost = ask + fee_rate * ask * (1 - ask)
+all_in_cost = best_bid
 edge = p_win_lower - all_in_cost
 ```
 
-Higher fees mean the runtime will need either a better ask, a higher
-`p_win_lower`, or a larger configured edge before it trades. Keep
-`--taker-fee-rate` current, and use `--min-edge-probability` as the conservative
-operator lever when fee drag or slippage looks worse than expected.
+The runtime bundle still records `--taker-fee-rate` for historical taker
+analysis and provenance. For live maker entries, use `--min-edge-probability`
+as the conservative operator lever when adverse selection or missed fills look
+worse than expected.

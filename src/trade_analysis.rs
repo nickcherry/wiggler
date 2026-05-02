@@ -318,6 +318,12 @@ pub struct TradeFeeRates {
 }
 
 impl TradeFeeRates {
+    pub fn maker_for_assets(assets: &[Asset]) -> Self {
+        Self {
+            rates: assets.iter().copied().map(|asset| (asset, 0.0)).collect(),
+        }
+    }
+
     pub fn from_runtime_bundle(runtime_bundle: &RuntimeBundle, assets: &[Asset]) -> Result<Self> {
         let mut rates = HashMap::new();
         for asset in assets {
@@ -342,7 +348,11 @@ impl TradeFeeRates {
             .collect::<HashSet<_>>();
         if unique_rates.len() == 1 {
             let (_, rate) = rates[0];
-            format!("{} taker entry fee", format_percent(rate * 100.0))
+            if *rate == 0.0 {
+                "0.00% maker entry fee".to_string()
+            } else {
+                format!("{} taker entry fee", format_percent(rate * 100.0))
+            }
         } else {
             rates
                 .into_iter()

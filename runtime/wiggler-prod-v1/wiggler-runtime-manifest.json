@@ -78,7 +78,7 @@
     "resolution_source": "Chainlink Data Streams intended; historical labels are VWAP proxy",
     "basis_risk": "unmeasured",
     "final_0_to_59_sec_window": "not modeled; no trade under 60s remaining",
-    "order_book_history": "not included; production must use live executable asks and depth",
+    "order_book_history": "not included; production must use live maker bids and depth",
     "live_trading_control": "not encoded here; production app must use a separate operator-controlled live-trading flag"
   },
   "operator_asset_whitelist": [

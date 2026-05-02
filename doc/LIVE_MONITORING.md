@@ -61,7 +61,7 @@ Shadow decision code checks freshness before logging an eligible decision:
 - market still active/open
 - last-60-second path is not retracing against the current leading side
 - current lead has not decayed enough to fail the adjusted edge gate
-- enough executable ask depth at expected execution price
+- current best bid has enough maker edge
 - no local pending/positioned state for the market
 - no remote open orders or historical trades for the market before live submit
 
@@ -113,6 +113,10 @@ feeds are unavailable or gapped; current-market path gaps can also produce
 Live trading uses the same evaluator twice: once for the logged decision and
 again immediately before order submission. If the second evaluation fails, if
 the side flips, or if retracing appears, no order is sent.
+
+Live entries are posted as maker-only GTD bids at the current best bid. The
+order carries `postOnly=true`, so a crossed book or price move through the bid
+causes a retryable rejection instead of a taker fill.
 
 See [OPERATIONS.md](./OPERATIONS.md) for systemd and journald retention.
 

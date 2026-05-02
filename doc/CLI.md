@@ -191,7 +191,7 @@ Per-event book, best-bid/ask, and trade churn is logged at debug level.
 When enabled, `trade evaluation` logs include the market id, token ids,
 line/current prices, remaining-time bucket, distance from line, vol bin,
 runtime cell sample count, `p_win`, `p_win_lower`, path-state fields,
-executable ask edge, positive-EV depth, decision, skip reason, runtime hashes,
+maker-bid edge, maker order notional, decision, skip reason, runtime hashes,
 training input hash, and price source/resolution-source fields for basis
 auditing.
 
