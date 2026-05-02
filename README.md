@@ -13,7 +13,8 @@ Live trading is off by default. With `WIGGLER_LIVE_TRADING=false`, eligible
 decisions are logged as would-trades and no orders are submitted. With
 `WIGGLER_LIVE_TRADING=true`, the monitor uses the official Polymarket Rust CLOB
 SDK to sign and post buy-only, post-only GTD limit orders after a second
-pre-submit evaluation.
+pre-submit evaluation. Live fills are monitored through Polymarket's
+authenticated user websocket, with Data API polling as a fallback.
 
 ## Docs
 
@@ -24,7 +25,7 @@ pre-submit evaluation.
 - [Polymarket](./doc/POLYMARKET.md): discovery, CLOB websocket, RTDS price feed, and slot naming.
 - [Live Monitoring](./doc/LIVE_MONITORING.md): long-running monitor behavior and rollover model.
 - [Operations](./doc/OPERATIONS.md): systemd, journald retention, and runtime guardrails.
-- [Telegram](./doc/TELEGRAM.md): current notification surface and future decision alerts.
+- [Telegram](./doc/TELEGRAM.md): shadow, order lifecycle, and settlement notifications.
 - [Coding Conventions](./doc/CODING_CONVENTIONS.md): Rust structure, numbers, tests, and dependency rules.
 - [Documentation](./doc/DOCUMENTATION.md): what to document and where.
 - [Execution](./doc/EXECUTION.md): validation and completion discipline.

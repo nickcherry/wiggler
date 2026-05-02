@@ -97,13 +97,15 @@ taker analysis and bundle provenance, but live entry gating does not subtract
 taker fees.
 
 `WIGGLER_LIVE_TRADING=false` sends a Telegram shadow decision when all gates
-pass, but it never submits orders. `WIGGLER_LIVE_TRADING=true` sends a live
-intent notification, repeats the full evaluation immediately before submit, and
-submits only when the recomputed outcome token still matches the initial
-decision. Live order lifecycle logs use `decision="submitted"`,
-`decision="posted"`, `decision="filled"`, or `decision="rejected"`. Full per-tick
-`trade_evaluation` logs are off by default; enable `WIGGLER_LOG_EVALUATIONS=true`
-for short debugging runs.
+pass, but it never submits orders. `WIGGLER_LIVE_TRADING=true` repeats the full
+evaluation immediately before submit and submits only when the recomputed
+outcome token still matches the initial decision. Successful maker POSTs are
+recorded as `posted`; fills are recorded only from authenticated user websocket
+trade events or the Data API polling fallback. Live order response logs use
+`decision="submitted"`, `decision="posted"`, `decision="no_fill_retryable"`, or
+`decision="rejected"`; fill observations emit separate `live_order_fill` logs.
+Full per-tick `trade_evaluation` logs are off by default; enable
+`WIGGLER_LOG_EVALUATIONS=true` for short debugging runs.
 
 Live order sizing is the minimum of:
 

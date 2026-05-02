@@ -2,6 +2,7 @@ use std::{
     collections::{HashMap, HashSet, VecDeque},
     fs, future,
     path::{Path, PathBuf},
+    sync::Arc,
     time::Duration,
 };
 
@@ -31,16 +32,24 @@ use crate::{
         gamma::GammaClient,
         market_ws::{MarketWsEvent, run_market_feed},
         rtds::{PriceTick, run_price_feed},
+        user_ws::{UserFillFeedConfig, run_user_fill_feed},
     },
     runtime::{AssetRuntime, RuntimeBundle, RuntimeCell, SideLeading},
     telegram::TelegramClient,
     trade_analysis::{self, ApiClosedPositionPnlRow},
-    trading::{LIVE_ORDER_SIZE_SCALE, LiveOrderRequest, LiveOrderResponse, LiveTradeExecutor},
+    trading::{
+        LIVE_ORDER_SIZE_SCALE, LiveFill, LiveOrderRequest, LiveOrderResponse, LiveTradeExecutor,
+        executor::MarketExposureSnapshot,
+        fees::{LiquidityRole, platform_fee_usdc},
+    },
 };
 
 mod settlement;
 
 const TELEGRAM_SETTLEMENT_MAX_POSITIONS: usize = 10_000;
+const LIVE_EXPOSURE_RECONCILE_INTERVAL_MS: u64 = 5_000;
+const LIVE_EXPOSURE_CACHE_MAX_AGE_MS: i64 = 12_000;
+const LIVE_EXPOSURE_RECENT_TRADES_MAX: usize = 1_000;
 
 #[cfg(test)]
 use settlement::slot_start_from_market_slug;
@@ -108,6 +117,7 @@ pub async fn run(args: MonitorArgs, config: RuntimeConfig) -> Result<()> {
                 return Err(error.context("initialize live trading executor"));
             }
         }
+        .map(Arc::new)
     } else {
         None
     };
@@ -122,6 +132,7 @@ pub async fn run(args: MonitorArgs, config: RuntimeConfig) -> Result<()> {
     let (price_tx, mut price_rx) = mpsc::channel::<PriceTick>(1024);
     let (candle_tx, mut candle_rx) = mpsc::channel::<Candle>(1024);
     let (market_tx, mut market_rx) = mpsc::channel::<MarketWsEvent>(4096);
+    let (live_fill_tx, mut live_fill_rx) = mpsc::channel::<LiveFill>(1024);
 
     let price_handles = assets
         .iter()
@@ -152,10 +163,21 @@ pub async fn run(args: MonitorArgs, config: RuntimeConfig) -> Result<()> {
     drop(candle_tx);
 
     let mut market_handle: Option<JoinHandle<()>> = None;
+    let mut user_fill_handle: Option<JoinHandle<()>> = None;
     let mut subscribed_asset_ids = Vec::<String>::new();
+    let mut subscribed_user_condition_ids = Vec::<String>::new();
     let mut refresh_interval = time::interval(Duration::from_secs(10));
     let mut status_interval = time::interval(Duration::from_secs(15));
     let mut evaluation_interval = time::interval(config.evaluation_interval);
+    let (live_exposure_tx, mut live_exposure_rx) = mpsc::channel::<LiveExposureReconcileResult>(8);
+    let mut live_exposure_reconcile_interval = if live_executor.is_some() {
+        Some(time::interval(Duration::from_millis(
+            LIVE_EXPOSURE_RECONCILE_INTERVAL_MS,
+        )))
+    } else {
+        None
+    };
+    let mut live_exposure_reconcile_in_flight = false;
     let mut settlement_interval = if settlement_user.is_some() {
         telegram_settlement_interval(&telegram, config.telegram_pnl_interval)
     } else {
@@ -164,6 +186,9 @@ pub async fn run(args: MonitorArgs, config: RuntimeConfig) -> Result<()> {
     refresh_interval.tick().await;
     status_interval.tick().await;
     evaluation_interval.tick().await;
+    if let Some(interval) = live_exposure_reconcile_interval.as_mut() {
+        interval.tick().await;
+    }
     if let Some(interval) = settlement_interval.as_mut() {
         interval.tick().await;
     }
@@ -180,6 +205,22 @@ pub async fn run(args: MonitorArgs, config: RuntimeConfig) -> Result<()> {
         market_tx.clone(),
     )
     .await?;
+    refresh_live_user_fill_feed(
+        live_executor.as_ref(),
+        &watchset_config.ws_endpoint,
+        &state,
+        &mut subscribed_user_condition_ids,
+        &mut user_fill_handle,
+        live_fill_tx.clone(),
+    )
+    .await?;
+
+    maybe_spawn_live_exposure_reconcile(
+        live_executor.as_ref(),
+        &state,
+        &live_exposure_tx,
+        &mut live_exposure_reconcile_in_flight,
+    );
 
     info!(
         assets = format_assets(&assets),
@@ -233,9 +274,42 @@ pub async fn run(args: MonitorArgs, config: RuntimeConfig) -> Result<()> {
                 ).await {
                     warn!(error = %error, "watchset refresh failed");
                 }
+                if let Err(error) = refresh_live_user_fill_feed(
+                    live_executor.as_ref(),
+                    &watchset_config.ws_endpoint,
+                    &state,
+                    &mut subscribed_user_condition_ids,
+                    &mut user_fill_handle,
+                    live_fill_tx.clone(),
+                ).await {
+                    warn!(error = %error, "user fill websocket refresh failed");
+                }
+                maybe_spawn_live_exposure_reconcile(
+                    live_executor.as_ref(),
+                    &state,
+                    &live_exposure_tx,
+                    &mut live_exposure_reconcile_in_flight,
+                );
             }
             _ = status_interval.tick() => {
                 state.log_status();
+            }
+            _ = optional_interval_tick(&mut live_exposure_reconcile_interval) => {
+                maybe_spawn_live_exposure_reconcile(
+                    live_executor.as_ref(),
+                    &state,
+                    &live_exposure_tx,
+                    &mut live_exposure_reconcile_in_flight,
+                );
+            }
+            Some(reconcile) = live_exposure_rx.recv() => {
+                live_exposure_reconcile_in_flight = false;
+                for fill in state.apply_live_exposure_reconcile(reconcile) {
+                    state.apply_live_fill(fill, &telegram).await;
+                }
+            }
+            Some(fill) = live_fill_rx.recv() => {
+                state.apply_live_fill(fill, &telegram).await;
             }
             _ = optional_interval_tick(&mut settlement_interval) => {
                 state
@@ -256,7 +330,7 @@ pub async fn run(args: MonitorArgs, config: RuntimeConfig) -> Result<()> {
                 state.evaluate_and_maybe_execute(
                     &runtime_bundle,
                     &config,
-                    live_executor.as_ref(),
+                    live_executor.as_deref(),
                     &telegram,
                 ).await;
             }
@@ -279,6 +353,9 @@ pub async fn run(args: MonitorArgs, config: RuntimeConfig) -> Result<()> {
         handle.abort();
     }
     if let Some(handle) = market_handle {
+        handle.abort();
+    }
+    if let Some(handle) = user_fill_handle {
         handle.abort();
     }
 
@@ -327,6 +404,47 @@ async fn refresh_watchset(
         next_asset_ids,
         market_tx,
     )));
+
+    Ok(())
+}
+
+async fn refresh_live_user_fill_feed(
+    executor: Option<&Arc<LiveTradeExecutor>>,
+    ws_endpoint: &str,
+    state: &MonitorState,
+    subscribed_condition_ids: &mut Vec<String>,
+    user_fill_handle: &mut Option<JoinHandle<()>>,
+    live_fill_tx: mpsc::Sender<LiveFill>,
+) -> Result<()> {
+    let Some(executor) = executor else {
+        return Ok(());
+    };
+
+    let mut next_condition_ids = state.live_exposure_reconcile_condition_ids();
+    next_condition_ids.sort();
+    next_condition_ids.dedup();
+    let handle_finished = user_fill_handle
+        .as_ref()
+        .is_some_and(JoinHandle::is_finished);
+    if *subscribed_condition_ids == next_condition_ids && !handle_finished {
+        return Ok(());
+    }
+
+    if let Some(handle) = user_fill_handle.take() {
+        handle.abort();
+    }
+    *subscribed_condition_ids = next_condition_ids.clone();
+    if next_condition_ids.is_empty() {
+        return Ok(());
+    }
+
+    let config = UserFillFeedConfig {
+        endpoint: ws_endpoint.to_string(),
+        credentials: executor.current_credentials().await,
+        user_address: executor.user_address(),
+        condition_ids: next_condition_ids,
+    };
+    *user_fill_handle = Some(tokio::spawn(run_user_fill_feed(config, live_fill_tx)));
 
     Ok(())
 }
@@ -452,6 +570,46 @@ async fn optional_interval_tick(interval: &mut Option<time::Interval>) {
     }
 }
 
+struct LiveExposureReconcileResult {
+    condition_ids: Vec<String>,
+    checked_at: DateTime<Utc>,
+    result: Result<MarketExposureSnapshot>,
+}
+
+fn maybe_spawn_live_exposure_reconcile(
+    executor: Option<&Arc<LiveTradeExecutor>>,
+    state: &MonitorState,
+    tx: &mpsc::Sender<LiveExposureReconcileResult>,
+    in_flight: &mut bool,
+) {
+    if *in_flight {
+        return;
+    }
+    let Some(executor) = executor else {
+        return;
+    };
+    let condition_ids = state.live_exposure_reconcile_condition_ids();
+    if condition_ids.is_empty() {
+        return;
+    }
+
+    *in_flight = true;
+    let executor = Arc::clone(executor);
+    let tx = tx.clone();
+    tokio::spawn(async move {
+        let result = executor
+            .reconcile_market_exposure(&condition_ids, LIVE_EXPOSURE_RECENT_TRADES_MAX)
+            .await;
+        let _ = tx
+            .send(LiveExposureReconcileResult {
+                condition_ids,
+                checked_at: Utc::now(),
+                result,
+            })
+            .await;
+    });
+}
+
 #[derive(Clone, Debug)]
 struct SlotLine {
     price: Decimal,
@@ -479,12 +637,13 @@ struct MonitorState {
     positioned_markets: HashSet<String>,
     pending_markets: HashSet<String>,
     failed_order_markets: HashSet<String>,
+    remote_exposure_markets: HashSet<String>,
+    remote_exposure_checked_at: Option<DateTime<Utc>>,
     retryable_no_fill_cooldown_until: HashMap<String, DateTime<Utc>>,
     shadow_decision_markets: HashSet<String>,
     tracked_entries: HashMap<String, TrackedEntry>,
     resolved_markets: HashSet<String>,
     initial_books_seen: HashSet<String>,
-    live_pre_submit_error_cooldown_until: Option<DateTime<Utc>>,
     event_counts: EventCounts,
     sent_live_settlement_slots: HashSet<DateTime<Utc>>,
 }
@@ -517,7 +676,7 @@ impl MonitorState {
         info!(
             event = "live_settlement_summary_check",
             unsent_slot_count = unsent_slots.len(),
-            "checking Polymarket API closed positions for Telegram summaries"
+            "checking Polymarket API position PnL for Telegram summaries"
         );
 
         let api_rows = match trade_analysis::fetch_api_closed_position_pnl_rows(
@@ -532,7 +691,7 @@ impl MonitorState {
             Err(error) => {
                 warn!(
                     error = %error,
-                    "failed to load Polymarket API closed positions for Telegram summary"
+                    "failed to load Polymarket API position PnL for Telegram summary"
                 );
                 return;
             }
@@ -554,7 +713,7 @@ impl MonitorState {
                     slot_start = %slot_start,
                     positions_fetched,
                     positions_considered,
-                    "no closed positions available for Telegram summary"
+                    "no position PnL rows available for Telegram summary"
                 );
                 continue;
             }
@@ -613,6 +772,10 @@ impl MonitorState {
             .iter()
             .flat_map(MonitoredMarket::asset_ids)
             .collect::<HashSet<_>>();
+        let active_condition_ids = markets
+            .iter()
+            .map(|market| market.condition_id.clone())
+            .collect::<HashSet<_>>();
 
         self.markets_by_slug = markets
             .iter()
@@ -640,6 +803,14 @@ impl MonitorState {
                 .iter()
                 .any(|market| market.condition_id == *condition_id)
         });
+        self.positioned_markets
+            .retain(|condition_id| active_condition_ids.contains(condition_id));
+        self.pending_markets
+            .retain(|condition_id| active_condition_ids.contains(condition_id));
+        self.failed_order_markets
+            .retain(|condition_id| active_condition_ids.contains(condition_id));
+        self.remote_exposure_markets
+            .retain(|condition_id| active_condition_ids.contains(condition_id));
         self.books.retain_only(&active_asset_ids);
     }
 
@@ -1071,8 +1242,14 @@ impl MonitorState {
         let already_positioned = self.positioned_markets.contains(&market.condition_id)
             || self.pending_markets.contains(&market.condition_id);
         let market_resolved = self.resolved_markets.contains(&market.condition_id);
+        let live_exposure_skip_reason = config
+            .live_trading
+            .then(|| self.live_exposure_skip_reason(&market.condition_id, now))
+            .flatten();
         let skip_reason = if self.failed_order_markets.contains(&market.condition_id) {
             Some("live_order_failed")
+        } else if let Some(reason) = live_exposure_skip_reason {
+            Some(reason)
         } else {
             self.trade_skip_reason(
                 market.asset,
@@ -1298,12 +1475,6 @@ impl MonitorState {
         initial_prepared: &PreparedTrade,
     ) {
         let now = Utc::now();
-        if self
-            .live_pre_submit_error_cooldown_until
-            .is_some_and(|until| now < until)
-        {
-            return;
-        }
         let no_fill_key =
             retryable_no_fill_key(&initial_prepared.condition_id, &initial_prepared.token_id);
         if let Some(until) = self
@@ -1317,52 +1488,19 @@ impl MonitorState {
             self.retryable_no_fill_cooldown_until.remove(&no_fill_key);
         }
 
-        if self.pending_markets.contains(&market.condition_id)
-            || self.positioned_markets.contains(&market.condition_id)
-            || self.failed_order_markets.contains(&market.condition_id)
-        {
+        if self.failed_order_markets.contains(&market.condition_id) {
             return;
         }
-
-        match executor.has_market_exposure(&market.condition_id).await {
-            Ok(true) => {
-                self.positioned_markets.insert(market.condition_id.clone());
-                info!(
-                    event = "live_execution_skipped",
-                    slug = market.slug,
-                    condition_id = market.condition_id,
-                    skip_reason = "remote_market_exposure",
-                    "live execution skipped"
-                );
-                return;
-            }
-            Ok(false) => {
-                self.live_pre_submit_error_cooldown_until = None;
-            }
-            Err(error) => {
-                let error_chain = format!("{error:#}");
-                self.live_pre_submit_error_cooldown_until =
-                    Some(Utc::now() + TimeDelta::seconds(60));
-                warn!(
-                    event = "live_exposure_reconcile_error",
-                    error = %error_chain,
-                    slug = market.slug,
-                    condition_id = market.condition_id,
-                    "failed to reconcile market exposure"
-                );
-                if let Err(telegram_error) = telegram
-                    .send_message(&live_pre_submit_error_text(
-                        market,
-                        initial_prepared,
-                        "could not check existing market exposure",
-                        &error_chain,
-                    ))
-                    .await
-                {
-                    warn!(error = %telegram_error, slug = market.slug, "failed to send live pre-submit error Telegram message");
-                }
-                return;
-            }
+        if let Some(skip_reason) = self.live_exposure_skip_reason(&market.condition_id, now) {
+            info!(
+                event = "live_execution_skipped",
+                slug = market.slug,
+                condition_id = market.condition_id,
+                skip_reason,
+                exposure_checked_at = ?self.remote_exposure_checked_at,
+                "live execution skipped"
+            );
+            return;
         }
 
         let Some(prepared) = self.evaluate_trade(
@@ -1434,10 +1572,7 @@ impl MonitorState {
         match result {
             Ok(response) => {
                 let retryable_no_fill = is_retryable_no_fill_response(&response);
-                if response.has_fill() {
-                    self.positioned_markets.insert(market.condition_id.clone());
-                    self.retryable_no_fill_cooldown_until.remove(&no_fill_key);
-                } else if response.success {
+                if response.success {
                     self.positioned_markets.insert(market.condition_id.clone());
                     self.retryable_no_fill_cooldown_until.remove(&no_fill_key);
                 } else if retryable_no_fill {
@@ -1450,9 +1585,7 @@ impl MonitorState {
                         .insert(market.condition_id.clone());
                 }
                 self.record_live_response(&market.condition_id, &response);
-                let decision = if response.has_fill() {
-                    "filled"
-                } else if response.success {
+                let decision = if response.success {
                     "posted"
                 } else if retryable_no_fill {
                     "no_fill_retryable"
@@ -1508,10 +1641,8 @@ impl MonitorState {
                         "live order rejected"
                     );
                 }
-                let message = if response.has_fill() {
-                    Some(live_entry_filled_text(&prepared, &response))
-                } else if response.success {
-                    Some(live_entry_posted_text(&prepared, &response))
+                let message = if response.success {
+                    Some(live_entry_posted_text(&prepared))
                 } else if retryable_no_fill {
                     None
                 } else if !response.success {
@@ -1771,6 +1902,8 @@ impl MonitorState {
                 closeout_sent: false,
                 filled_amount_usdc: None,
                 filled_payout_usdc: None,
+                filled_trade_ids: HashSet::new(),
+                filled_fingerprints: HashSet::new(),
             },
         );
     }
@@ -1780,15 +1913,6 @@ impl MonitorState {
             return;
         };
         let retryable_no_fill = is_retryable_no_fill_response(response);
-        entry.track_closeout = response.has_fill();
-        if response.has_fill() {
-            entry.filled_amount_usdc = response
-                .filled_amount_usdc()
-                .or(Some(entry.prepared.amount_usdc));
-            entry.filled_payout_usdc = response
-                .filled_payout_usdc()
-                .or(entry.prepared.estimated_payout_usdc);
-        }
         entry.record["order_response"] = json!({
             "received_at": Utc::now().to_rfc3339(),
             "order_id": response.order_id.as_str(),
@@ -1798,13 +1922,9 @@ impl MonitorState {
             "making_amount": response.making_amount.as_str(),
             "taking_amount": response.taking_amount.as_str(),
             "trade_ids": &response.trade_ids,
-            "has_fill": response.has_fill(),
-            "filled_amount_usdc": entry.filled_amount_usdc,
-            "filled_payout_usdc": entry.filled_payout_usdc,
+            "maker_only": true,
         });
-        entry.record["state"] = json!(if response.has_fill() {
-            "filled"
-        } else if response.success {
+        entry.record["state"] = json!(if response.success {
             "posted"
         } else if retryable_no_fill {
             "no_fill_retryable"
@@ -1874,6 +1994,188 @@ impl MonitorState {
         }
     }
 
+    fn live_exposure_reconcile_condition_ids(&self) -> Vec<String> {
+        let mut condition_ids = self
+            .markets_by_slug
+            .values()
+            .map(|market| market.condition_id.clone())
+            .collect::<Vec<_>>();
+        condition_ids.sort();
+        condition_ids.dedup();
+        condition_ids
+    }
+
+    fn apply_live_exposure_reconcile(
+        &mut self,
+        reconcile: LiveExposureReconcileResult,
+    ) -> Vec<LiveFill> {
+        let requested_condition_ids = reconcile.condition_ids.into_iter().collect::<HashSet<_>>();
+        let current_condition_ids = self
+            .live_exposure_reconcile_condition_ids()
+            .into_iter()
+            .collect::<HashSet<_>>();
+        let market_count = requested_condition_ids.len();
+        match reconcile.result {
+            Ok(snapshot) => {
+                let open_order_count = snapshot.open_order_markets.len();
+                let traded_count = snapshot.traded_markets.len();
+                let mut exposed_markets = snapshot.exposed_markets();
+                let fills = snapshot.fills;
+                let fill_count = fills.len();
+                exposed_markets.retain(|condition_id| current_condition_ids.contains(condition_id));
+                self.remote_exposure_markets = exposed_markets;
+                let snapshot_is_current = requested_condition_ids == current_condition_ids;
+                self.remote_exposure_checked_at =
+                    snapshot_is_current.then_some(reconcile.checked_at);
+                info!(
+                    event = "live_exposure_reconcile",
+                    checked_at = %reconcile.checked_at,
+                    market_count,
+                    remote_exposure_count = self.remote_exposure_markets.len(),
+                    open_order_count,
+                    traded_count,
+                    fill_count,
+                    snapshot_is_current,
+                    "refreshed live exposure cache"
+                );
+                fills
+            }
+            Err(error) => {
+                warn!(
+                    event = "live_exposure_reconcile_error",
+                    market_count,
+                    error = %format!("{error:#}"),
+                    "failed to refresh live exposure cache"
+                );
+                Vec::new()
+            }
+        }
+    }
+
+    async fn apply_live_fill(&mut self, fill: LiveFill, telegram: &TelegramClient) {
+        self.positioned_markets.insert(fill.condition_id.clone());
+        self.remote_exposure_markets
+            .insert(fill.condition_id.clone());
+
+        let message = {
+            let Some(entry) = self.tracked_entries.get_mut(&fill.condition_id) else {
+                debug!(
+                    event = "live_fill_untracked",
+                    condition_id = fill.condition_id.as_str(),
+                    asset_id = fill.asset_id.as_str(),
+                    fill_id = fill.fill_id.as_str(),
+                    source = fill.source.as_str(),
+                    "observed fill without a local tracked entry"
+                );
+                return;
+            };
+            if entry.prepared.token_id != fill.asset_id {
+                debug!(
+                    event = "live_fill_token_mismatch",
+                    condition_id = fill.condition_id.as_str(),
+                    fill_asset_id = fill.asset_id.as_str(),
+                    tracked_token_id = entry.prepared.token_id.as_str(),
+                    fill_id = fill.fill_id.as_str(),
+                    source = fill.source.as_str(),
+                    "observed fill on a different outcome token"
+                );
+                return;
+            }
+
+            let fill_fingerprint = fill.approximate_key();
+            if entry.filled_trade_ids.contains(&fill.fill_id)
+                || entry.filled_fingerprints.contains(&fill_fingerprint)
+            {
+                return;
+            }
+            entry.filled_trade_ids.insert(fill.fill_id.clone());
+            entry.filled_fingerprints.insert(fill_fingerprint);
+            entry.track_closeout = true;
+            entry.filled_amount_usdc =
+                Some(entry.filled_amount_usdc.unwrap_or_default() + fill.amount_usdc);
+            entry.filled_payout_usdc =
+                Some(entry.filled_payout_usdc.unwrap_or_default() + fill.payout_usdc);
+
+            if entry
+                .record
+                .get("fills")
+                .and_then(Value::as_array)
+                .is_none()
+            {
+                entry.record["fills"] = json!([]);
+            }
+            if let Some(fills) = entry.record.get_mut("fills").and_then(Value::as_array_mut) {
+                fills.push(json!({
+                    "fill_id": fill.fill_id.as_str(),
+                    "source": fill.source.as_str(),
+                    "matched_at": fill.matched_at.to_rfc3339(),
+                    "condition_id": fill.condition_id.as_str(),
+                    "asset_id": fill.asset_id.as_str(),
+                    "size_shares": fill.size_shares,
+                    "price": fill.price,
+                    "amount_usdc": fill.amount_usdc,
+                    "payout_usdc": fill.payout_usdc,
+                }));
+            }
+            entry.record["state"] = json!("filled");
+            entry.record["filled_amount_usdc"] = json!(entry.filled_amount_usdc);
+            entry.record["filled_payout_usdc"] = json!(entry.filled_payout_usdc);
+            entry.write_record();
+
+            info!(
+                event = "live_order_fill",
+                slug = entry.prepared.slug.as_str(),
+                condition_id = fill.condition_id.as_str(),
+                asset_id = fill.asset_id.as_str(),
+                fill_id = fill.fill_id.as_str(),
+                source = fill.source.as_str(),
+                size_shares = fill.size_shares,
+                price = fill.price,
+                amount_usdc = fill.amount_usdc,
+                payout_usdc = fill.payout_usdc,
+                matched_at = %fill.matched_at,
+                "recorded live maker order fill"
+            );
+
+            live_entry_filled_text(&entry.prepared, &fill)
+        };
+
+        if let Err(error) = telegram.send_message(&message).await {
+            warn!(
+                error = %error,
+                condition_id = fill.condition_id,
+                fill_id = fill.fill_id,
+                "failed to send live fill Telegram message"
+            );
+        }
+    }
+
+    fn live_exposure_skip_reason(
+        &self,
+        condition_id: &str,
+        now: DateTime<Utc>,
+    ) -> Option<&'static str> {
+        if self.pending_markets.contains(condition_id) {
+            return Some("pending_market");
+        }
+        if self.positioned_markets.contains(condition_id) {
+            return Some("already_positioned");
+        }
+        if self.remote_exposure_markets.contains(condition_id) {
+            return Some("remote_market_exposure");
+        }
+        if self.live_exposure_cache_is_stale(now) {
+            return Some("live_exposure_cache_stale");
+        }
+        None
+    }
+
+    fn live_exposure_cache_is_stale(&self, now: DateTime<Utc>) -> bool {
+        self.remote_exposure_checked_at.is_none_or(|checked_at| {
+            (now - checked_at).num_milliseconds() > LIVE_EXPOSURE_CACHE_MAX_AGE_MS
+        })
+    }
+
     fn is_watched_condition(&self, condition_id: &str) -> bool {
         self.markets_by_slug
             .values()
@@ -1923,6 +2225,8 @@ struct TrackedEntry {
     closeout_sent: bool,
     filled_amount_usdc: Option<f64>,
     filled_payout_usdc: Option<f64>,
+    filled_trade_ids: HashSet<String>,
+    filled_fingerprints: HashSet<String>,
 }
 
 impl TrackedEntry {
@@ -2021,7 +2325,8 @@ fn trade_entry_record_json(
             "order_cap_usdc": prepared.order_cap_usdc,
             "target_order_notional_usdc": prepared.target_order_notional_usdc,
             "order_price": prepared.order_price,
-            "expires_at": prepared.expires_at,
+            "gtd_expires_at": prepared.expires_at,
+            "effective_until": maker_order_effective_until(prepared.expires_at),
             "expected_fill_price": prepared.expected_fill_price,
             "estimated_payout_usdc": prepared.estimated_payout_usdc,
             "estimated_profit_usdc": prepared.estimated_profit_usdc,
@@ -2324,49 +2629,33 @@ fn live_startup_error_text(error: &str) -> String {
     format!("Live trading could not start.\nReason: {error}\nNo live orders were sent.")
 }
 
-fn live_pre_submit_error_text(
-    market: &MonitoredMarket,
-    prepared: &PreparedTrade,
-    summary: &str,
-    error: &str,
-) -> String {
+fn live_entry_filled_text(prepared: &PreparedTrade, fill: &LiveFill) -> String {
     format!(
-        "Live order blocked before submit: {} {}\nBet: {}\nReason: {summary}\nDetails: {error}\nNo order was sent.",
-        market.asset.to_string().to_ascii_uppercase(),
-        outcome_label(&prepared.outcome),
-        format_usdc(prepared.amount_usdc)
-    )
-}
-
-fn live_entry_filled_text(prepared: &PreparedTrade, response: &LiveOrderResponse) -> String {
-    let filled_amount = response
-        .filled_amount_usdc()
-        .unwrap_or(prepared.amount_usdc);
-    format!(
-        "Entered {} {} for {} @ {}\n\nPrice line is {}\n\nCurrent price is {} {} the price line",
+        "Filled {} {} maker bid for {} ({} shares @ {:.4})\n\nCurrent price is {} {} the price line ({})",
         asset_ticker(prepared.asset),
         outcome_arrow(&prepared.outcome),
-        format_usdc(filled_amount),
-        format_market_price(prepared.asset, prepared.current_price),
-        format_market_price(prepared.asset, prepared.line_price),
+        format_usdc(fill.amount_usdc),
+        format_shares(fill.size_shares),
+        fill.price,
         format_price_line_distance_percent(prepared.current_price, prepared.line_price),
-        price_line_position(prepared.current_price, prepared.line_price)
+        price_line_position(prepared.current_price, prepared.line_price),
+        format_market_price(prepared.asset, prepared.line_price),
     )
 }
 
-fn live_entry_posted_text(prepared: &PreparedTrade, response: &LiveOrderResponse) -> String {
+fn live_entry_posted_text(prepared: &PreparedTrade) -> String {
+    let effective_until = maker_order_effective_until(prepared.expires_at);
     format!(
-        "Posted {} {} maker bid for {} ({} shares @ {:.4})\n\nOrder is resting, not filled yet.\n\nOrder ID: {}\nExpires: {}\n\nPrice line is {}\n\nCurrent price is {} {} the price line",
+        "Posted {} {} maker bid for {} ({} shares @ {:.4})\nExpires: {}\n\nCurrent price is {} {} the price line ({})",
         asset_ticker(prepared.asset),
         outcome_arrow(&prepared.outcome),
         format_usdc(prepared.amount_usdc),
         format_shares(prepared.size_shares),
         prepared.order_price,
-        response.order_id,
-        prepared.expires_at.format("%Y-%m-%d %H:%M:%S UTC"),
-        format_market_price(prepared.asset, prepared.line_price),
+        effective_until.format("%Y-%m-%d %H:%M:%S UTC"),
         format_price_line_distance_percent(prepared.current_price, prepared.line_price),
-        price_line_position(prepared.current_price, prepared.line_price)
+        price_line_position(prepared.current_price, prepared.line_price),
+        format_market_price(prepared.asset, prepared.line_price),
     )
 }
 
@@ -2422,8 +2711,7 @@ fn extract_error_json_value(reason: &str) -> Option<String> {
 }
 
 fn is_retryable_no_fill_response(response: &LiveOrderResponse) -> bool {
-    !response.has_fill()
-        && !response.success
+    !response.success
         && response
             .error_msg
             .as_deref()
@@ -2579,6 +2867,10 @@ fn maker_order_expires_at(slot_end: DateTime<Utc>) -> DateTime<Utc> {
     slot_end + TimeDelta::seconds(60)
 }
 
+fn maker_order_effective_until(expires_at: DateTime<Utc>) -> DateTime<Utc> {
+    expires_at - TimeDelta::seconds(60)
+}
+
 #[derive(Clone, Debug, Default)]
 struct MarketPricePath {
     samples: VecDeque<PathSample>,
@@ -2722,7 +3014,7 @@ fn summarize_maker_limit(
 
     let price = limit_price.normalize();
     let price_f64 = price.to_f64()?;
-    let fee = 0.0;
+    let fee = platform_fee_usdc(1.0, price_f64, 0.0, LiquidityRole::Maker)?;
     let all_in_cost = price_f64;
     let edge = cell.p_win_lower - all_in_cost;
     summary.best_fee = Some(fee);
@@ -2753,11 +3045,12 @@ fn summarize_maker_limit(
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
+    use std::{collections::HashSet, time::Duration};
 
     use chrono::{TimeDelta, TimeZone, Utc};
     use rust_decimal::Decimal;
     use rust_decimal::prelude::FromPrimitive;
+    use serde_json::json;
 
     use crate::{
         config::{PolymarketSignatureType, RuntimeConfig},
@@ -2771,18 +3064,19 @@ mod tests {
         runtime::{RuntimeBundle, SideLeading, VolBin},
         telegram::TelegramClient,
         trade_analysis::ApiClosedPositionPnlRow,
-        trading::LiveOrderResponse,
+        trading::{LiveFill, LiveFillSource, executor::MarketExposureSnapshot},
     };
 
     use super::{
-        ClosedPositionPnlRow, LIVE_SETTLEMENT_CHECK_INTERVAL_SECONDS,
+        ClosedPositionPnlRow, LIVE_SETTLEMENT_CHECK_INTERVAL_SECONDS, LiveExposureReconcileResult,
         MOMENTUM_OVERLAY_THRESHOLD_VOL_UNITS, MOMENTUM_OVERLAY_VOL_LOOKBACK_MIN, MarketPricePath,
-        MonitorState, PathState, PreparedTrade, SlotLine, adjusted_required_edge_probability,
-        asset_ids_for_markets, clean_failure_reason, closed_position_row_from_api_position,
-        closed_position_slot_start, closed_position_totals, distance_bps, effective_max_order_usdc,
-        experimental_final_window_applies, format_market_price, format_signed_usdc, format_usdc,
-        is_retryable_no_fill_error, live_entry_filled_text, live_entry_posted_text,
-        live_entry_rejected_text, live_settlement_candidate_slots, live_settlement_lookback_slots,
+        MonitorState, PathState, PreparedTrade, SlotLine, TrackedEntry,
+        adjusted_required_edge_probability, asset_ids_for_markets, clean_failure_reason,
+        closed_position_row_from_api_position, closed_position_slot_start, closed_position_totals,
+        distance_bps, effective_max_order_usdc, experimental_final_window_applies,
+        format_market_price, format_signed_usdc, format_usdc, is_retryable_no_fill_error,
+        live_entry_filled_text, live_entry_posted_text, live_entry_rejected_text,
+        live_settlement_candidate_slots, live_settlement_lookback_slots,
         live_settlement_summary_text, momentum_overlay_side_for_value, monitor_remaining_bucket,
         pre_submit_matches_initial, required_edge_probability, slot_start_from_market_slug,
         summarize_maker_limit, target_order_notional_usdc, telegram_settlement_interval_duration,
@@ -2792,6 +3086,57 @@ mod tests {
     fn asset_ids_are_sorted_and_deduped() {
         let market = market_with_tokens(vec!["2", "1", "2"]);
         assert_eq!(asset_ids_for_markets(&[market]), vec!["1", "2"]);
+    }
+
+    #[test]
+    fn live_exposure_cache_fails_closed_until_reconciled() {
+        let now = Utc.with_ymd_and_hms(2026, 5, 2, 12, 0, 0).unwrap();
+        let mut state = MonitorState::default();
+        let mut market = market_with_tokens(vec![]);
+        market.condition_id = "0xabc".to_string();
+        state.replace_markets(vec![market]);
+
+        assert_eq!(
+            state.live_exposure_skip_reason("0xabc", now),
+            Some("live_exposure_cache_stale")
+        );
+
+        state.apply_live_exposure_reconcile(LiveExposureReconcileResult {
+            condition_ids: vec!["0xabc".to_string()],
+            checked_at: now,
+            result: Ok(MarketExposureSnapshot::default()),
+        });
+        assert_eq!(state.live_exposure_skip_reason("0xabc", now), None);
+        assert_eq!(
+            state.live_exposure_skip_reason("0xabc", now + TimeDelta::seconds(3)),
+            None
+        );
+        assert_eq!(
+            state.live_exposure_skip_reason("0xabc", now + TimeDelta::seconds(13)),
+            Some("live_exposure_cache_stale")
+        );
+    }
+
+    #[test]
+    fn live_exposure_cache_blocks_remote_exposure() {
+        let now = Utc.with_ymd_and_hms(2026, 5, 2, 12, 0, 0).unwrap();
+        let mut snapshot = MarketExposureSnapshot::default();
+        snapshot.open_order_markets.insert("0xabc".to_string());
+
+        let mut state = MonitorState::default();
+        let mut market = market_with_tokens(vec![]);
+        market.condition_id = "0xabc".to_string();
+        state.replace_markets(vec![market]);
+        state.apply_live_exposure_reconcile(LiveExposureReconcileResult {
+            condition_ids: vec!["0xabc".to_string()],
+            checked_at: now,
+            result: Ok(snapshot),
+        });
+
+        assert_eq!(
+            state.live_exposure_skip_reason("0xabc", now),
+            Some("remote_market_exposure")
+        );
     }
 
     #[test]
@@ -3470,26 +3815,26 @@ mod tests {
         prepared.asset = Asset::Btc;
         prepared.line_price = 77972.55;
         prepared.current_price = 78000.0;
-        prepared.amount_usdc = 50.0;
-        let response = LiveOrderResponse {
-            order_id: "0xorder".to_string(),
-            status: "matched".to_string(),
-            success: true,
-            error_msg: None,
-            making_amount: "49.999999".to_string(),
-            taking_amount: "108.35".to_string(),
-            trade_ids: vec!["trade".to_string()],
-        };
+        let fill = LiveFill::new(
+            "condition".to_string(),
+            "up-token".to_string(),
+            "fill".to_string(),
+            100.0,
+            0.5,
+            Utc.with_ymd_and_hms(2026, 5, 2, 12, 0, 0).unwrap(),
+            LiveFillSource::UserWebSocket,
+        )
+        .unwrap();
 
         assert_eq!(
-            live_entry_filled_text(&prepared, &response),
-            "Entered BTC ↑ for $50.00 @ $78,000.00\n\nPrice line is $77,972.55\n\nCurrent price is 0.04% above the price line"
+            live_entry_filled_text(&prepared, &fill),
+            "Filled BTC ↑ maker bid for $50.00 (100 shares @ 0.5000)\n\nCurrent price is 0.04% above the price line ($77,972.55)"
         );
 
         prepared.current_price = 77900.0;
         assert_eq!(
-            live_entry_filled_text(&prepared, &response),
-            "Entered BTC ↑ for $50.00 @ $77,900.00\n\nPrice line is $77,972.55\n\nCurrent price is 0.09% below the price line"
+            live_entry_filled_text(&prepared, &fill),
+            "Filled BTC ↑ maker bid for $50.00 (100 shares @ 0.5000)\n\nCurrent price is 0.09% below the price line ($77,972.55)"
         );
     }
 
@@ -3503,20 +3848,54 @@ mod tests {
         prepared.size_shares = 138.88;
         prepared.order_price = 0.36;
         prepared.expires_at = Utc.with_ymd_and_hms(2026, 5, 2, 5, 5, 0).unwrap();
-        let response = LiveOrderResponse {
-            order_id: "0xorder".to_string(),
-            status: "live".to_string(),
-            success: true,
-            error_msg: None,
-            making_amount: "0".to_string(),
-            taking_amount: "0".to_string(),
-            trade_ids: vec![],
-        };
 
         assert_eq!(
-            live_entry_posted_text(&prepared, &response),
-            "Posted XRP ↓ maker bid for $50.00 (138.88 shares @ 0.3600)\n\nOrder is resting, not filled yet.\n\nOrder ID: 0xorder\nExpires: 2026-05-02 05:05:00 UTC\n\nPrice line is $2.412300\n\nCurrent price is 0.51% below the price line"
+            live_entry_posted_text(&prepared),
+            "Posted XRP ↓ maker bid for $50.00 (138.88 shares @ 0.3600)\nExpires: 2026-05-02 05:04:00 UTC\n\nCurrent price is 0.51% below the price line ($2.412300)"
         );
+    }
+
+    #[tokio::test]
+    async fn live_fill_updates_tracked_entry_for_closeout_and_dedupes() {
+        let prepared = prepared_trade(Outcome::Up, "up-token");
+        let mut state = MonitorState::default();
+        state.tracked_entries.insert(
+            prepared.condition_id.clone(),
+            TrackedEntry {
+                prepared: prepared.clone(),
+                slot_start: prepared.current_exchange_timestamp,
+                slot_end: prepared.expires_at,
+                record_path: None,
+                record: json!({}),
+                track_closeout: false,
+                closeout_sent: false,
+                filled_amount_usdc: None,
+                filled_payout_usdc: None,
+                filled_trade_ids: HashSet::new(),
+                filled_fingerprints: HashSet::new(),
+            },
+        );
+        let telegram = TelegramClient::from_config(&test_config(false));
+        let fill = LiveFill::new(
+            prepared.condition_id.clone(),
+            prepared.token_id.clone(),
+            "fill".to_string(),
+            100.0,
+            0.5,
+            prepared.current_exchange_timestamp,
+            LiveFillSource::UserWebSocket,
+        )
+        .unwrap();
+
+        state.apply_live_fill(fill.clone(), &telegram).await;
+        state.apply_live_fill(fill, &telegram).await;
+
+        let entry = state.tracked_entries.get(&prepared.condition_id).unwrap();
+        assert!(entry.track_closeout);
+        assert_eq!(entry.filled_amount_usdc, Some(50.0));
+        assert_eq!(entry.filled_payout_usdc, Some(100.0));
+        assert_eq!(entry.record["state"], json!("filled"));
+        assert_eq!(entry.record["fills"].as_array().unwrap().len(), 1);
     }
 
     #[test]

@@ -158,7 +158,14 @@ current L2 credentials, then checks trade history through the public Polymarket
 Data API. Set `WIGGLER_PROBE_MARKET=<condition id>` to include market-filtered
 orders/trades checks. Production exposure reconciliation uses the same split:
 CLOB for live open orders and Data API for historical trades, because CLOB
-`/data/trades` can reject otherwise valid API keys.
+`/data/trades` can reject otherwise valid API keys. The monitor refreshes this
+exposure data into a local cache every 5 seconds; live submit uses the cache and
+fails closed if it is stale.
+
+In live mode, fills are monitored primarily through the authenticated CLOB user
+websocket subscription for the watched condition IDs. Data API trade polling is
+kept as the fallback and also backfills fill records if a websocket message is
+missed.
 
 When the account is a Polymarket proxy wallet, verify the signature type before
 live trading. `proxy`, `gnosis-safe`, and `eoa` can all authenticate, but only

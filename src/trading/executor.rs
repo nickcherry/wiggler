@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fs,
     io::Write as _,
     path::{Path, PathBuf},
@@ -19,6 +19,7 @@ use alloy::{
     sol_types::SolStruct as _,
 };
 use anyhow::{Context, Result, bail};
+use chrono::{DateTime, Utc};
 use polymarket_client_sdk_v2::{
     POLYGON,
     auth::{Credentials, ExposeSecret as _, Uuid},
@@ -27,23 +28,27 @@ use polymarket_client_sdk_v2::{
         types::{
             AssetType, OrderType, Side, SignatureType,
             request::{BalanceAllowanceRequest, OrdersRequest},
-            response::{BalanceAllowanceResponse, HeartbeatResponse},
+            response::{BalanceAllowanceResponse, HeartbeatResponse, OpenOrderResponse, Page},
         },
     },
+    data::types::response::Trade,
     error::{Error as PolymarketError, Status as PolymarketStatus},
     types::{Address, B256, Decimal, U256},
 };
 use reqwest::header::{HeaderMap, HeaderValue};
-use rust_decimal::prelude::FromPrimitive;
+use rust_decimal::prelude::{FromPrimitive, ToPrimitive};
 use serde::Deserialize;
 use tokio::{sync::Mutex, task::JoinHandle};
 use tracing::{info, warn};
 
 use crate::{
     config::{PolymarketSignatureType, RuntimeConfig},
-    polymarket::data::DataApiClient,
+    polymarket::data::{DataApiClient, is_buy},
     telegram::TelegramClient,
-    trading::order::{LIVE_ORDER_SIZE_SCALE, LiveOrderRequest, LiveOrderResponse},
+    trading::{
+        fill::{LiveFill, LiveFillSource},
+        order::{LIVE_ORDER_SIZE_SCALE, LiveOrderRequest, LiveOrderResponse},
+    },
 };
 
 type AuthenticatedClient = Client<
@@ -53,6 +58,13 @@ type ClientState = Arc<Mutex<AuthenticatedClient>>;
 type HeartbeatState = Arc<Mutex<Option<Uuid>>>;
 type CredentialRotationLock = Arc<Mutex<()>>;
 static LAST_FRESH_API_NONCE: AtomicU32 = AtomicU32::new(0);
+const TERMINAL_CURSOR: &str = "LTE=";
+
+#[derive(Default)]
+struct RecentTradeExposure {
+    markets: HashSet<String>,
+    fills: Vec<LiveFill>,
+}
 
 sol! {
     struct ClobAuth {
@@ -72,6 +84,22 @@ pub struct LiveTradeExecutor {
     heartbeat_state: HeartbeatState,
     credential_rotation_lock: CredentialRotationLock,
     _heartbeat_task: JoinHandle<()>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct MarketExposureSnapshot {
+    pub open_order_markets: HashSet<String>,
+    pub traded_markets: HashSet<String>,
+    pub fills: Vec<LiveFill>,
+}
+
+impl MarketExposureSnapshot {
+    pub fn exposed_markets(&self) -> HashSet<String> {
+        self.open_order_markets
+            .union(&self.traded_markets)
+            .cloned()
+            .collect()
+    }
 }
 
 impl LiveTradeExecutor {
@@ -263,6 +291,32 @@ impl LiveTradeExecutor {
             .context("query Data API trade exposure")
     }
 
+    pub async fn reconcile_market_exposure(
+        &self,
+        condition_ids: &[String],
+        max_recent_trades: usize,
+    ) -> Result<MarketExposureSnapshot> {
+        let requested = parse_condition_ids(condition_ids)?;
+        if requested.is_empty() {
+            return Ok(MarketExposureSnapshot::default());
+        }
+
+        let open_order_markets = self
+            .open_order_markets_for(&requested)
+            .await
+            .context("reconcile open order exposure")?;
+        let traded_markets = self
+            .recent_trade_markets_for(&requested, max_recent_trades)
+            .await
+            .context("reconcile trade exposure")?;
+
+        Ok(MarketExposureSnapshot {
+            open_order_markets,
+            traded_markets: traded_markets.markets,
+            fills: traded_markets.fills,
+        })
+    }
+
     pub async fn execute(&self, request: &LiveOrderRequest) -> Result<LiveOrderResponse> {
         let token_id = U256::from_str(&request.token_id).context("parse token id")?;
         let price = probability_decimal_truncated_decimal("limit_price", request.limit_price, 4)?;
@@ -309,6 +363,106 @@ impl LiveTradeExecutor {
         self.client.lock().await.clone()
     }
 
+    pub async fn current_credentials(&self) -> Credentials {
+        self.current_client().await.credentials().clone()
+    }
+
+    pub fn user_address(&self) -> Address {
+        self.data_api_user
+    }
+
+    async fn open_order_markets_for(
+        &self,
+        requested: &HashMap<B256, String>,
+    ) -> Result<HashSet<String>> {
+        let request = OrdersRequest::builder().build();
+        let mut cursor = None;
+        let mut markets = HashSet::new();
+
+        loop {
+            let page = self.orders_page(&request, cursor.take()).await?;
+            for order in page.data {
+                if let Some(condition_id) = requested.get(&order.market) {
+                    markets.insert(condition_id.clone());
+                }
+            }
+            if page.next_cursor == TERMINAL_CURSOR {
+                break;
+            }
+            cursor = Some(page.next_cursor);
+        }
+
+        Ok(markets)
+    }
+
+    async fn recent_trade_markets_for(
+        &self,
+        requested: &HashMap<B256, String>,
+        max_recent_trades: usize,
+    ) -> Result<RecentTradeExposure> {
+        if max_recent_trades == 0 {
+            return Ok(RecentTradeExposure::default());
+        }
+
+        let trades = self
+            .data_api
+            .fetch_trades(self.data_api_user, max_recent_trades)
+            .await
+            .context("fetch recent Data API trades for exposure reconciliation")?;
+        let mut exposure = RecentTradeExposure::default();
+        for trade in trades {
+            let Some(condition_id) = requested.get(&trade.condition_id).cloned() else {
+                continue;
+            };
+            exposure.markets.insert(condition_id.clone());
+            if is_buy(&trade.side)
+                && let Some(fill) = live_fill_from_data_trade(condition_id, &trade)
+            {
+                exposure.fills.push(fill);
+            }
+        }
+
+        Ok(exposure)
+    }
+
+    async fn orders_page(
+        &self,
+        request: &OrdersRequest,
+        next_cursor: Option<String>,
+    ) -> Result<Page<OpenOrderResponse>> {
+        let mut client = self.current_client().await;
+        match client.orders(request, next_cursor.clone()).await {
+            Ok(orders) => Ok(orders),
+            Err(error) if is_l2_auth_error(&error) => {
+                warn!(
+                    event = "live_auth_refresh",
+                    endpoint = "data/orders",
+                    error = %error,
+                    "refreshing heartbeat after L2 auth error"
+                );
+                refresh_heartbeat(&client, &self.heartbeat_state)
+                    .await
+                    .context("refresh CLOB heartbeat after open-orders auth error")?;
+                match client.orders(request, next_cursor.clone()).await {
+                    Ok(orders) => Ok(orders),
+                    Err(retry_error) if is_l2_auth_error(&retry_error) => {
+                        client = self
+                            .rotate_api_key_after_l2_auth_error("data/orders", &retry_error)
+                            .await?;
+                        client
+                            .orders(request, next_cursor)
+                            .await
+                            .context("query open orders after API credential rotation")
+                    }
+                    Err(retry_error) => {
+                        Err(retry_error).context("query open orders after heartbeat refresh")
+                    }
+                }
+            }
+            Err(error) => Err(error).context("query open orders"),
+        }
+    }
+
     async fn rotate_api_key_after_l2_auth_error(
         &self,
         endpoint: &'static str,
@@ -327,6 +481,32 @@ impl LiveTradeExecutor {
         .await
         .context("recover CLOB client after L2 auth error")
     }
+}
+
+fn parse_condition_ids(condition_ids: &[String]) -> Result<HashMap<B256, String>> {
+    let mut parsed = HashMap::new();
+    for condition_id in condition_ids {
+        let market = B256::from_str(condition_id)
+            .with_context(|| format!("parse market condition id {condition_id}"))?;
+        parsed.insert(market, condition_id.clone());
+    }
+    Ok(parsed)
+}
+
+fn live_fill_from_data_trade(condition_id: String, trade: &Trade) -> Option<LiveFill> {
+    let size = trade.size.to_f64()?;
+    let price = trade.price.to_f64()?;
+    let matched_at = DateTime::<Utc>::from_timestamp(trade.timestamp, 0).unwrap_or_else(Utc::now);
+
+    LiveFill::new(
+        condition_id,
+        trade.asset.to_string(),
+        format!("tx:{}:{}", trade.transaction_hash, trade.asset),
+        size,
+        price,
+        matched_at,
+        LiveFillSource::DataApiPoll,
+    )
 }
 
 #[derive(Clone, Debug)]
@@ -1217,8 +1397,8 @@ mod tests {
     use rust_decimal::prelude::FromPrimitive;
 
     use super::{
-        LiveAuthConfig, credential_nonce_candidates, is_l2_auth_error, parse_env_lines,
-        positive_decimal_truncated_decimal, probability_decimal_truncated_decimal,
+        LiveAuthConfig, MarketExposureSnapshot, credential_nonce_candidates, is_l2_auth_error,
+        parse_env_lines, positive_decimal_truncated_decimal, probability_decimal_truncated_decimal,
         read_credentials_cache, reserve_fresh_api_nonce, validate_funder_address,
         write_credentials_cache,
     };
@@ -1255,6 +1435,20 @@ mod tests {
         )
         .unwrap();
         assert_eq!(price.to_string(), "0.8491");
+    }
+
+    #[test]
+    fn exposure_snapshot_unions_open_orders_and_trades() {
+        let mut snapshot = MarketExposureSnapshot::default();
+        snapshot.open_order_markets.insert("0xopen".to_string());
+        snapshot.traded_markets.insert("0xtraded".to_string());
+        snapshot.traded_markets.insert("0xopen".to_string());
+
+        let exposed = snapshot.exposed_markets();
+
+        assert_eq!(exposed.len(), 2);
+        assert!(exposed.contains("0xopen"));
+        assert!(exposed.contains("0xtraded"));
     }
 
     #[test]

@@ -14,8 +14,10 @@
 9. Load the production runtime probability-table bundle.
 10. Refresh the watchset every 10 seconds.
 11. If the token set changes, reconnect the CLOB websocket with the new set.
-12. Emit status logs every 15 seconds.
-13. Evaluate every `WIGGLER_EVALUATION_INTERVAL_MS`; full per-tick evaluation logs are opt-in.
+12. In live mode, subscribe to authenticated user trade fills for watched
+    condition IDs.
+13. Emit status logs every 15 seconds.
+14. Evaluate every `WIGGLER_EVALUATION_INTERVAL_MS`; full per-tick evaluation logs are opt-in.
 
 ## Rollover
 
@@ -63,12 +65,15 @@ Shadow decision code checks freshness before logging an eligible decision:
 - current lead has not decayed enough to fail the adjusted edge gate
 - current best bid has enough maker edge
 - no local pending/positioned state for the market
-- no remote open orders or historical trades for the market before live submit
+- a fresh live exposure cache shows no remote open orders or historical trades
+  for the market
 
 Defaults:
 
 - current price stale after 20 seconds
 - orderbook stale after 10 seconds
+- live exposure cache stale after 12 seconds; reconciliation runs every 5
+  seconds in the background, not in the order-submit hot path
 - no regular trading before 240 seconds or after 60 seconds remaining
 - experimental 30-59 second final-window trades map to the 60-second runtime
   bucket, require at least 10 bps from the line, add 0.01 required probability
@@ -119,7 +124,14 @@ order carries `postOnly=true`, so a crossed book or price move through the bid
 causes a retryable rejection instead of a taker fill. Sizing is based on
 Wiggler's configured min/max notional range at the selected limit price, not on
 the current best-bid depth, and share size is truncated to Polymarket's
-two-decimal lot precision before signing.
+two-decimal lot precision before signing. GTD expiration is sent as slot end
+plus Polymarket's one-minute threshold, making the effective resting lifetime
+end at the five-minute market close.
+
+Successful order posts are recorded as posted, not filled. A fill is recorded
+only when Polymarket reports a user trade through the authenticated websocket or
+the 5-second Data API fallback reconciliation. Fill records flip the local
+entry into closeout tracking and trigger a fill Telegram message.
 
 See [OPERATIONS.md](./OPERATIONS.md) for systemd and journald retention.
 
@@ -127,8 +139,11 @@ See [OPERATIONS.md](./OPERATIONS.md) for systemd and journald retention.
 
 - Gamma refresh failures are logged and retried on the next refresh.
 - RTDS reconnects with exponential backoff up to 30 seconds.
-- CLOB websocket reconnects with exponential backoff up to 30 seconds.
-- A changed token watchset restarts only the CLOB task.
+- CLOB market websocket reconnects with exponential backoff up to 30 seconds.
+- The authenticated user fill websocket uses the SDK heartbeat/reconnect loop
+  and is refreshed when the watched condition-ID set changes.
+- A changed token watchset restarts the market websocket and refreshes the user
+  fill websocket.
 - `WIGGLER_LIVE_TRADING=true` fails closed when credentials are missing,
   authentication fails, or the account is in closed-only mode.
 - `Ctrl-C` exits cleanly.

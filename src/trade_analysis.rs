@@ -10,8 +10,8 @@ use anyhow::{Context, Result, bail};
 use chrono::{DateTime, TimeDelta, Utc};
 use futures_util::{StreamExt, stream};
 use polymarket_client_sdk_v2::{
-    data::types::response::{ClosedPosition, Trade},
-    types::Address,
+    data::types::response::{ClosedPosition, Position, Trade},
+    types::{Address, B256, U256},
 };
 use rust_decimal::prelude::ToPrimitive;
 
@@ -27,7 +27,13 @@ use crate::{
         gamma::GammaClient,
     },
     runtime::RuntimeBundle,
+    trading::fees::{buy_gross_pnl_usdc, realized_pnl_adjustment_usdc},
 };
+
+const MIN_CURRENT_POSITION_LOOKUP_ROWS: usize = 500;
+
+#[cfg(test)]
+use crate::trading::fees::{LiquidityRole, buy_net_pnl_usdc, platform_fee_usdc};
 
 pub async fn run(args: AnalyzeTradesArgs, config: RuntimeConfig) -> Result<()> {
     if args.max_trades == 0 {
@@ -37,28 +43,38 @@ pub async fn run(args: AnalyzeTradesArgs, config: RuntimeConfig) -> Result<()> {
     let user = resolve_user_address(&args, &config)?;
     let duration = duration_from_seconds(args.slot_seconds)?;
     let assets = normalize_assets(args.assets);
-    let runtime_bundle = RuntimeBundle::load(&args.runtime_bundle_dir).with_context(|| {
-        format!(
-            "load runtime bundle from {}",
-            args.runtime_bundle_dir.display()
-        )
-    })?;
-    let fee_rates = TradeFeeRates::from_runtime_bundle(&runtime_bundle, &assets)?;
     let data_api = DataApiClient::new(&config.data_api_base_url)?;
     let gamma = GammaClient::new(config.gamma_base_url.clone());
 
     let trades = data_api.fetch_trades(user, args.max_trades).await?;
-    let analyzed = analyze_api_rows(&trades, &assets, duration, &gamma, &fee_rates).await?;
+    let closed_positions = data_api
+        .fetch_closed_positions(user, args.max_trades)
+        .await?;
+    let current_positions = data_api
+        .fetch_positions(
+            user,
+            args.max_trades.max(MIN_CURRENT_POSITION_LOOKUP_ROWS),
+            None,
+        )
+        .await?;
+    let position_pnl =
+        PositionPnlLookup::from_positions(&closed_positions, &current_positions, &assets)?;
+    let analyzed = analyze_api_rows(&trades, &assets, duration, &gamma, &position_pnl).await?;
     let report = PerformanceReport::new(ReportInput {
         user,
         data_api_base_url: config.data_api_base_url,
         gamma_base_url: config.gamma_base_url,
         assets,
         slot_seconds: duration.num_seconds(),
-        fee_model: fee_rates.summary(),
+        fee_model: position_pnl.summary(),
         trades_fetched: trades.len(),
+        closed_positions_fetched: closed_positions.len(),
+        closed_positions_considered: position_pnl.closed_positions_considered,
+        current_positions_fetched: current_positions.len(),
+        current_positions_considered: position_pnl.current_positions_considered,
         buy_trades_considered: analyzed.buy_trades_considered,
         unresolved_trades: analyzed.unresolved_trades,
+        missing_closed_position_trades: analyzed.missing_closed_position_trades,
         trades: analyzed.trades,
     });
 
@@ -108,6 +124,7 @@ pub struct ApiTradePnlRows {
     pub trades_fetched: usize,
     pub buy_trades_considered: usize,
     pub unresolved_trades: usize,
+    pub missing_closed_position_trades: usize,
 }
 
 #[derive(Clone, Debug)]
@@ -142,10 +159,16 @@ pub async fn fetch_api_trade_pnl_rows(
     assets: &[Asset],
     duration: TimeDelta,
     max_trades: usize,
-    fee_rates: &TradeFeeRates,
+    _fee_rates: &TradeFeeRates,
 ) -> Result<ApiTradePnlRows> {
     let trades = data_api.fetch_trades(user, max_trades).await?;
-    let analyzed = analyze_api_rows(&trades, assets, duration, gamma, fee_rates).await?;
+    let closed_positions = data_api.fetch_closed_positions(user, max_trades).await?;
+    let current_positions = data_api
+        .fetch_positions(user, max_trades.max(MIN_CURRENT_POSITION_LOOKUP_ROWS), None)
+        .await?;
+    let position_pnl =
+        PositionPnlLookup::from_positions(&closed_positions, &current_positions, assets)?;
+    let analyzed = analyze_api_rows(&trades, assets, duration, gamma, &position_pnl).await?;
     Ok(ApiTradePnlRows {
         rows: analyzed
             .trades
@@ -155,6 +178,7 @@ pub async fn fetch_api_trade_pnl_rows(
         trades_fetched: trades.len(),
         buy_trades_considered: analyzed.buy_trades_considered,
         unresolved_trades: analyzed.unresolved_trades,
+        missing_closed_position_trades: analyzed.missing_closed_position_trades,
     })
 }
 
@@ -165,9 +189,17 @@ pub async fn fetch_api_closed_position_pnl_rows(
     max_positions: usize,
 ) -> Result<ApiClosedPositionPnlRows> {
     let positions = data_api.fetch_closed_positions(user, max_positions).await?;
+    let current_positions = data_api
+        .fetch_positions(
+            user,
+            max_positions.max(MIN_CURRENT_POSITION_LOOKUP_ROWS),
+            Some(true),
+        )
+        .await?;
     let asset_filter = assets.iter().copied().collect::<HashSet<_>>();
     let mut rows = Vec::new();
     let mut positions_considered = 0;
+    let mut seen_positions = HashSet::new();
 
     for position in &positions {
         let Some(asset) =
@@ -179,12 +211,31 @@ pub async fn fetch_api_closed_position_pnl_rows(
             continue;
         }
         positions_considered += 1;
+        seen_positions.insert(PositionKey::new(position.condition_id, position.asset));
         rows.push(ApiClosedPositionPnlRow::from_closed_position(position)?);
+    }
+
+    for position in &current_positions {
+        let Some(asset) =
+            asset_from_market_text(&position.slug, &position.event_slug, &position.title)
+        else {
+            continue;
+        };
+        if !asset_filter.contains(&asset) {
+            continue;
+        }
+        let key = PositionKey::new(position.condition_id, position.asset);
+        if seen_positions.contains(&key) {
+            continue;
+        }
+
+        positions_considered += 1;
+        rows.push(ApiClosedPositionPnlRow::from_current_position(position)?);
     }
 
     Ok(ApiClosedPositionPnlRows {
         rows,
-        positions_fetched: positions.len(),
+        positions_fetched: positions.len() + current_positions.len(),
         positions_considered,
     })
 }
@@ -211,6 +262,18 @@ impl ApiClosedPositionPnlRow {
             outcome: position.outcome.clone(),
         })
     }
+
+    fn from_current_position(position: &Position) -> Result<Self> {
+        let cash_pnl = decimal_to_f64(position.cash_pnl, "cashPnl")?;
+        let realized_pnl = decimal_to_f64(position.realized_pnl, "realizedPnl")?;
+        Ok(Self {
+            realized_pnl: cash_pnl + realized_pnl,
+            slug: position.slug.clone(),
+            event_slug: position.event_slug.clone(),
+            title: position.title.clone(),
+            outcome: position.outcome.clone(),
+        })
+    }
 }
 
 async fn analyze_api_rows(
@@ -218,14 +281,14 @@ async fn analyze_api_rows(
     assets: &[Asset],
     duration: TimeDelta,
     gamma: &GammaClient,
-    fee_rates: &TradeFeeRates,
+    position_pnl: &PositionPnlLookup,
 ) -> Result<AnalysisRows> {
     let asset_filter = assets.iter().copied().collect::<HashSet<_>>();
     let mut candidate_trades = Vec::new();
     let mut slugs = HashSet::new();
-    let mut analyzed = Vec::new();
     let mut buy_trades_considered = 0;
     let mut unresolved_trades = 0;
+    let mut missing_closed_position_trades = 0;
 
     for trade in trades.iter().filter(|trade| is_buy(&trade.side)) {
         let Some(asset) = asset_from_market_text(&trade.slug, &trade.event_slug, &trade.title)
@@ -241,6 +304,8 @@ async fn analyze_api_rows(
     }
 
     let resolutions = fetch_resolutions(gamma, slugs).await?;
+    let mut candidates = Vec::new();
+    let mut position_totals = HashMap::<PositionKey, PositionGrossTotals>::new();
 
     for (trade, asset) in candidate_trades {
         let Some(resolution_price) = resolutions
@@ -259,9 +324,9 @@ async fn analyze_api_rows(
 
         let size = decimal_to_f64(trade.size, "size")?;
         let entry_price = decimal_to_f64(trade.price, "price")?;
-        let entry_fee = trade_fee(size, entry_price, fee_rates.rate_for(asset));
-        let cost_basis = (size * entry_price) + entry_fee;
-        let realized_pnl = buy_trade_pnl(size, entry_price, resolution_price, entry_fee);
+        let gross_pnl = buy_gross_pnl_usdc(size, entry_price, resolution_price)
+            .context("calculate buy gross PnL")?;
+        let pre_fee_notional = size * entry_price;
         let entry_remaining_seconds = trade
             .slug
             .as_str()
@@ -271,18 +336,52 @@ async fn analyze_api_rows(
                 let slot_end = start + duration;
                 slot_end.timestamp() - trade.timestamp
             });
-
-        analyzed.push(AnalyzedTrade {
+        let position_key = PositionKey::new(trade.condition_id, trade.asset);
+        position_totals
+            .entry(position_key.clone())
+            .or_default()
+            .add(gross_pnl, pre_fee_notional);
+        candidates.push(CandidateAnalyzedTrade {
             asset,
             slug: trade.slug.clone(),
             event_slug: trade.event_slug.clone(),
             title: trade.title.clone(),
             outcome: trade.outcome.clone(),
+            gross_pnl,
+            pre_fee_notional,
+            entry_price,
+            entry_remaining_seconds,
+            position_key,
+        });
+    }
+
+    let mut analyzed = Vec::new();
+    for candidate in candidates {
+        let Some(position_total_pnl) = position_pnl.pnl(&candidate.position_key) else {
+            missing_closed_position_trades += 1;
+            continue;
+        };
+        let totals = position_totals
+            .get(&candidate.position_key)
+            .context("candidate position totals missing")?;
+        let total_adjustment = realized_pnl_adjustment_usdc(totals.gross_pnl, position_total_pnl)
+            .context("derive position PnL adjustment")?;
+        let weight = totals.weight_for(candidate.pre_fee_notional);
+        let entry_fee = total_adjustment * weight;
+        let realized_pnl = candidate.gross_pnl - entry_fee;
+        let cost_basis = (candidate.pre_fee_notional + entry_fee).max(0.0);
+
+        analyzed.push(AnalyzedTrade {
+            asset: candidate.asset,
+            slug: candidate.slug,
+            event_slug: candidate.event_slug,
+            title: candidate.title,
+            outcome: candidate.outcome,
             realized_pnl,
             total_bought: cost_basis,
             fees: entry_fee,
-            entry_price,
-            entry_remaining_seconds,
+            entry_price: candidate.entry_price,
+            entry_remaining_seconds: candidate.entry_remaining_seconds,
         });
     }
 
@@ -290,6 +389,7 @@ async fn analyze_api_rows(
         trades: analyzed,
         buy_trades_considered,
         unresolved_trades,
+        missing_closed_position_trades,
     })
 }
 
@@ -366,6 +466,130 @@ struct AnalysisRows {
     trades: Vec<AnalyzedTrade>,
     buy_trades_considered: usize,
     unresolved_trades: usize,
+    missing_closed_position_trades: usize,
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct PositionKey {
+    condition_id: B256,
+    asset: U256,
+}
+
+impl PositionKey {
+    fn new(condition_id: B256, asset: U256) -> Self {
+        Self {
+            condition_id,
+            asset,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct PositionGrossTotals {
+    gross_pnl: f64,
+    pre_fee_notional: f64,
+    trades: u64,
+}
+
+impl PositionGrossTotals {
+    fn add(&mut self, gross_pnl: f64, pre_fee_notional: f64) {
+        self.gross_pnl += gross_pnl;
+        self.pre_fee_notional += pre_fee_notional.max(0.0);
+        self.trades += 1;
+    }
+
+    fn weight_for(self, pre_fee_notional: f64) -> f64 {
+        if self.pre_fee_notional > f64::EPSILON {
+            pre_fee_notional.max(0.0) / self.pre_fee_notional
+        } else if self.trades > 0 {
+            1.0 / self.trades as f64
+        } else {
+            0.0
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct CandidateAnalyzedTrade {
+    asset: Asset,
+    slug: String,
+    event_slug: String,
+    title: String,
+    outcome: String,
+    gross_pnl: f64,
+    pre_fee_notional: f64,
+    entry_price: f64,
+    entry_remaining_seconds: Option<i64>,
+    position_key: PositionKey,
+}
+
+#[derive(Clone, Debug)]
+pub struct PositionPnlLookup {
+    pnl_by_position: HashMap<PositionKey, f64>,
+    closed_positions_considered: usize,
+    current_positions_considered: usize,
+}
+
+impl PositionPnlLookup {
+    fn from_positions(
+        closed_positions: &[ClosedPosition],
+        current_positions: &[Position],
+        assets: &[Asset],
+    ) -> Result<Self> {
+        let asset_filter = assets.iter().copied().collect::<HashSet<_>>();
+        let mut pnl_by_position = HashMap::<PositionKey, f64>::new();
+        let mut closed_positions_considered = 0;
+        let mut current_positions_considered = 0;
+
+        for position in closed_positions {
+            let Some(asset) =
+                asset_from_market_text(&position.slug, &position.event_slug, &position.title)
+            else {
+                continue;
+            };
+            if !asset_filter.contains(&asset) {
+                continue;
+            }
+
+            closed_positions_considered += 1;
+            let key = PositionKey::new(position.condition_id, position.asset);
+            let realized_pnl = decimal_to_f64(position.realized_pnl, "realizedPnl")?;
+            *pnl_by_position.entry(key).or_default() += realized_pnl;
+        }
+
+        for position in current_positions {
+            let Some(asset) =
+                asset_from_market_text(&position.slug, &position.event_slug, &position.title)
+            else {
+                continue;
+            };
+            if !asset_filter.contains(&asset) {
+                continue;
+            }
+
+            current_positions_considered += 1;
+            let key = PositionKey::new(position.condition_id, position.asset);
+            let cash_pnl = decimal_to_f64(position.cash_pnl, "cashPnl")?;
+            let realized_pnl = decimal_to_f64(position.realized_pnl, "realizedPnl")?;
+            pnl_by_position
+                .entry(key)
+                .or_insert(cash_pnl + realized_pnl);
+        }
+
+        Ok(Self {
+            pnl_by_position,
+            closed_positions_considered,
+            current_positions_considered,
+        })
+    }
+
+    fn pnl(&self, key: &PositionKey) -> Option<f64> {
+        self.pnl_by_position.get(key).copied()
+    }
+
+    fn summary(&self) -> String {
+        "Polymarket Data API realizedPnl for closed positions, or realizedPnl+cashPnl for current positions; fee/adjustment = gross fill PnL minus API position PnL, allocated by pre-fee notional".to_string()
+    }
 }
 
 fn decimal_to_f64(value: rust_decimal::Decimal, field: &'static str) -> Result<f64> {
@@ -397,11 +621,11 @@ impl TradeFeeRates {
         Ok(Self { rates })
     }
 
-    fn rate_for(&self, asset: Asset) -> f64 {
+    pub fn rate_for(&self, asset: Asset) -> f64 {
         *self.rates.get(&asset).unwrap_or(&0.0)
     }
 
-    fn summary(&self) -> String {
+    pub fn summary(&self) -> String {
         let mut rates = self.rates.iter().collect::<Vec<_>>();
         rates.sort_by_key(|(asset, _)| **asset);
         let unique_rates = rates
@@ -431,12 +655,14 @@ impl TradeFeeRates {
     }
 }
 
+#[cfg(test)]
 fn trade_fee(size: f64, price: f64, fee_rate: f64) -> f64 {
-    size * fee_rate * price * (1.0 - price)
+    platform_fee_usdc(size, price, fee_rate, LiquidityRole::Taker).unwrap_or(0.0)
 }
 
+#[cfg(test)]
 fn buy_trade_pnl(size: f64, entry_price: f64, resolution_price: f64, entry_fee: f64) -> f64 {
-    size * (resolution_price - entry_price) - entry_fee
+    buy_net_pnl_usdc(size, entry_price, resolution_price, entry_fee).unwrap_or(0.0)
 }
 
 #[derive(Clone, Debug)]
@@ -462,8 +688,13 @@ struct ReportInput {
     slot_seconds: i64,
     fee_model: String,
     trades_fetched: usize,
+    closed_positions_fetched: usize,
+    closed_positions_considered: usize,
+    current_positions_fetched: usize,
+    current_positions_considered: usize,
     buy_trades_considered: usize,
     unresolved_trades: usize,
+    missing_closed_position_trades: usize,
     trades: Vec<AnalyzedTrade>,
 }
 
@@ -476,8 +707,13 @@ struct PerformanceReport {
     slot_seconds: i64,
     fee_model: String,
     trades_fetched: usize,
+    closed_positions_fetched: usize,
+    closed_positions_considered: usize,
+    current_positions_fetched: usize,
+    current_positions_considered: usize,
     buy_trades_considered: usize,
     unresolved_trades: usize,
+    missing_closed_position_trades: usize,
     overall: SummaryStats,
     by_asset: Vec<GroupRow>,
     by_remaining: Vec<GroupRow>,
@@ -497,8 +733,13 @@ impl PerformanceReport {
             slot_seconds: input.slot_seconds,
             fee_model: input.fee_model,
             trades_fetched: input.trades_fetched,
+            closed_positions_fetched: input.closed_positions_fetched,
+            closed_positions_considered: input.closed_positions_considered,
+            current_positions_fetched: input.current_positions_fetched,
+            current_positions_considered: input.current_positions_considered,
             buy_trades_considered: input.buy_trades_considered,
             unresolved_trades: input.unresolved_trades,
+            missing_closed_position_trades: input.missing_closed_position_trades,
             by_asset: group_by(&input.trades, |trade| GroupKey::Asset(trade.asset)),
             by_remaining: group_by(&input.trades, |trade| {
                 GroupKey::Remaining(RemainingBucket::from_seconds(
@@ -535,27 +776,33 @@ impl PerformanceReport {
             self.gamma_base_url
         )
         .unwrap();
+        writeln!(output, "{} {}", theme.dim("Fee model:"), self.fee_model,).unwrap();
         writeln!(
             output,
-            "{} net PnL subtracts estimated {} using fee = shares * rate * price * (1 - price)",
-            theme.dim("Fee model:"),
-            self.fee_model,
-        )
-        .unwrap();
-        writeln!(
-            output,
-            "{} Fee Drag = fees / gross edge before fees; Fee/Notional = fees / pre-fee notional.",
+            "{} Fee Drag = derived fees/adjustments / gross edge before fees; Fee/Notional = derived fees/adjustments / pre-fee notional.",
             theme.dim("Fee efficiency:")
         )
         .unwrap();
         writeln!(output, "{} {}", theme.dim("Wallet:"), self.user).unwrap();
         writeln!(
             output,
-            "{} {} | {} {} | {} {} | {} {} | {} {}s",
+            "{} {} | {} {} | {} {} | {} {} | {} {} | {} {} | {} {}s",
             theme.dim("Assets:"),
             format_assets(&self.assets),
             theme.dim("trades fetched:"),
             format_whole_number(self.trades_fetched as u64),
+            theme.dim("closed positions:"),
+            format!(
+                "{}/{}",
+                format_whole_number(self.closed_positions_considered as u64),
+                format_whole_number(self.closed_positions_fetched as u64)
+            ),
+            theme.dim("current positions:"),
+            format!(
+                "{}/{}",
+                format_whole_number(self.current_positions_considered as u64),
+                format_whole_number(self.current_positions_fetched as u64)
+            ),
             theme.dim("buy trades considered:"),
             format_whole_number(self.buy_trades_considered as u64),
             theme.dim("resolved trades analyzed:"),
@@ -575,6 +822,17 @@ impl PerformanceReport {
             )
             .unwrap();
         }
+        if self.missing_closed_position_trades > 0 {
+            writeln!(
+                output,
+                "{}",
+                theme.warn(&format!(
+                    "{} resolved buy trades were skipped because Polymarket position data did not include matching PnL.",
+                    format_whole_number(self.missing_closed_position_trades as u64)
+                ))
+            )
+            .unwrap();
+        }
         writeln!(output).unwrap();
 
         self.render_overall(&mut output, &theme);
@@ -590,7 +848,7 @@ impl PerformanceReport {
             &mut output,
             &theme,
             "By Entry Vs Start Line",
-            Some("Polymarket Data API closed-position/trade rows do not include historical underlying start-line and entry-price values, so an API-only analysis cannot reconstruct these buckets."),
+            Some("Polymarket Data API position/trade rows do not include historical underlying start-line and entry-price values, so an API-only analysis cannot reconstruct these buckets."),
             &self.by_line_distance,
         );
         self.render_group_table(
@@ -1209,7 +1467,7 @@ mod tests {
         format_signed_usdc, trade_fee,
     };
     use crate::domain::asset::Asset;
-    use polymarket_client_sdk_v2::data::types::response::ClosedPosition;
+    use polymarket_client_sdk_v2::data::types::response::{ClosedPosition, Position};
     use polymarket_client_sdk_v2::types::address;
     use serde_json::json;
 
@@ -1308,6 +1566,44 @@ mod tests {
     }
 
     #[test]
+    fn api_current_position_row_uses_cash_and_realized_pnl() {
+        let position: Position = serde_json::from_value(json!({
+            "proxyWallet": "0x1234567890abcdef1234567890abcdef12345678",
+            "asset": "1",
+            "conditionId": "0x0000000000000000000000000000000000000000000000000000000000000001",
+            "size": "10",
+            "avgPrice": "0.45",
+            "initialValue": "4.5",
+            "currentValue": "10",
+            "cashPnl": "5.5",
+            "percentPnl": "122.2222",
+            "totalBought": "4.5",
+            "realizedPnl": "1.25",
+            "percentRealizedPnl": "27.7778",
+            "curPrice": "1",
+            "redeemable": true,
+            "mergeable": false,
+            "title": "Bitcoin Up or Down - May 1, 11:20AM-11:25AM ET",
+            "slug": "btc-updown-5m-1777648800",
+            "icon": "",
+            "eventSlug": "btc-updown-5m-1777648800",
+            "outcome": "Up",
+            "outcomeIndex": 0,
+            "oppositeOutcome": "Down",
+            "oppositeAsset": "2",
+            "endDate": "2026-05-01",
+            "negativeRisk": false
+        }))
+        .unwrap();
+
+        let row = ApiClosedPositionPnlRow::from_current_position(&position).unwrap();
+
+        assert_eq!(row.realized_pnl, 6.75);
+        assert_eq!(row.slug, "btc-updown-5m-1777648800");
+        assert_eq!(row.outcome, "Up");
+    }
+
+    #[test]
     fn asset_extraction_uses_slug_then_title() {
         assert_eq!(
             asset_from_market_text("btc-updown-5m-1777562400", "", "ignored"),
@@ -1327,10 +1623,15 @@ mod tests {
             gamma_base_url: "https://gamma-api.polymarket.com".to_string(),
             assets: vec![Asset::Btc, Asset::Eth],
             slot_seconds: 300,
-            fee_model: "7.2% taker entry fee".to_string(),
+            fee_model: "closed-position realizedPnl".to_string(),
             trades_fetched: 2,
+            closed_positions_fetched: 2,
+            closed_positions_considered: 2,
+            current_positions_fetched: 0,
+            current_positions_considered: 0,
             buy_trades_considered: 2,
             unresolved_trades: 0,
+            missing_closed_position_trades: 0,
             trades: vec![
                 trade(Asset::Btc, 12.5, 50.0, 0.5, 0.7, Some(210)),
                 trade(Asset::Eth, -10.0, 40.0, 0.4, 0.4, Some(45)),
@@ -1360,10 +1661,15 @@ mod tests {
             gamma_base_url: "https://gamma-api.polymarket.com".to_string(),
             assets: vec![Asset::Btc, Asset::Eth],
             slot_seconds: 300,
-            fee_model: "7.2% taker entry fee".to_string(),
+            fee_model: "closed-position realizedPnl".to_string(),
             trades_fetched: 2,
+            closed_positions_fetched: 2,
+            closed_positions_considered: 2,
+            current_positions_fetched: 0,
+            current_positions_considered: 0,
             buy_trades_considered: 2,
             unresolved_trades: 0,
+            missing_closed_position_trades: 0,
             trades: vec![
                 trade(Asset::Btc, 5.0, 50.0, 0.5, 0.7, Some(210)),
                 trade(Asset::Eth, -10.0, 40.0, 0.4, 0.4, Some(45)),

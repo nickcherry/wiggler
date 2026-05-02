@@ -12,7 +12,7 @@ clap = { version = "4.5.51", features = ["derive", "env"] }
 dotenvy = "0.15.7"
 futures-util = "0.3.31"
 hex = "0.4.3"
-polymarket_client_sdk_v2 = { version = "0.5.1", features = ["clob", "data", "tracing"] }
+polymarket_client_sdk_v2 = { version = "0.5.1", features = ["clob", "data", "tracing", "ws"] }
 reqwest = { version = "0.12.24", default-features = false, features = ["json", "rustls-tls"] }
 rust_decimal = { version = "1.39.0", features = ["serde-with-str"] }
 rustls = { version = "0.23.40", default-features = false, features = ["ring"] }

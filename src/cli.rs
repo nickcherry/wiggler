@@ -104,7 +104,8 @@ pub struct AnalyzeTradesArgs {
     #[arg(long, default_value_t = 300)]
     pub slot_seconds: i64,
 
-    /// Runtime probability-table bundle directory. Used for Polymarket fee rates.
+    /// Runtime probability-table bundle directory. Retained for compatibility.
+    /// analyze-trades now derives PnL from Polymarket position data.
     #[arg(
         long,
         env = "WIGGLER_RUNTIME_BUNDLE_DIR",

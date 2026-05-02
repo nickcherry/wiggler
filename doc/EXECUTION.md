@@ -26,7 +26,8 @@ logging under systemd/journald retention rather than app-managed files.
 ## Live-System Caution
 
 `monitor` talks to public Polymarket websockets in shadow mode. When
-`WIGGLER_LIVE_TRADING=true`, it can sign and post Polymarket orders.
+`WIGGLER_LIVE_TRADING=true`, it can sign and post Polymarket orders and opens
+an authenticated user websocket for fill monitoring.
 
 Live trading must remain explicit and fail closed:
 
@@ -35,15 +36,19 @@ Live trading must remain explicit and fail closed:
 - live orders are buy-only, post-only GTD limit orders priced at the current
   best bid; Polymarket rejects them rather than taking liquidity if the book
   moves through the limit
+- GTD expiration is set to slot end plus Polymarket's one-minute threshold, so
+  the effective resting lifetime ends at the five-minute market close
 - live order size is selected inside the configured dollar min/max range and
   converted to shares at the selected limit price, not from current best-bid
   depth
 - share size is truncated to Polymarket's two-decimal lot precision before
   signing
 - the evaluator reruns immediately before submit
-- any existing local or remote market exposure blocks another order
-- live order attempts and responses are logged and sent to Telegram when
-  Telegram is configured
+- any existing local or remote market exposure blocks another order; remote
+  exposure is refreshed into a local cache in the background, and stale cache
+  data fails closed instead of making a submit-path API call
+- live order submits, responses, and fills are logged; Telegram sends posts,
+  fills, hard rejections/errors, and settlement summaries when configured
 
 ## Debugging
 

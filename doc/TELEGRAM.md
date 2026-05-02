@@ -1,6 +1,6 @@
 # Telegram
 
-Telegram support is scaffolded in `src/telegram.rs`.
+Telegram support is implemented in `src/telegram.rs`.
 
 ## Configuration
 
@@ -20,32 +20,43 @@ dedupes summaries by slot.
 
 When configured, the monitor sends Telegram messages for:
 
-- live entry fills
+- live order posts
+- live order fills
 - live entry rejections and hard execution errors
-- one live settlement summary for each five-minute window with closed positions
+- one live settlement summary for each five-minute window with position PnL
 
-Live entry attempts are not messaged. Retryable post-only rejections are sent
-as concise rejection messages, logged, and recorded, but they do not block the
-monitor from looking for another entry in the same market.
+Retryable post-only rejections are logged and recorded without a Telegram
+message, and they do not block the monitor from looking for another entry in
+the same market.
 
-Live settlement Telegram win/loss/PnL values use Polymarket Data API closed
-positions and Polymarket's `realizedPnl` field. Local trade records are not
-used for PnL or win/loss summaries. Totals are account-wide for the configured
-wallet and asset whitelist, using closed positions available from Polymarket
-APIs.
+Live settlement Telegram win/loss/PnL values use Polymarket Data API position
+PnL. Closed/redeemed positions use `realizedPnl`; resolved but not-yet-redeemed
+current positions use `realizedPnl + cashPnl`. Local trade records are not used
+for PnL or win/loss summaries. Totals are account-wide for the configured
+wallet and asset whitelist, using position data available from Polymarket APIs.
+Posted-order messages show the effective resting lifetime. The signed GTD
+expiration sent to Polymarket carries the required one-minute buffer, so local
+records store both `gtd_expires_at` and `effective_until`.
 The wallet comes from `POLYMARKET_USER_ADDRESS` or `POLYMARKET_FUNDER_ADDRESS`
 in `.env`, with EOA configs falling back to `POLYMARKET_PRIVATE_KEY`.
 
 ## Message Content
 
-Live entry fill messages use this shape:
+Live order post messages use this shape:
 
 ```text
-Entered BTC ↑ for $49.99 @ $78,000.00
+Posted SOL ↑ maker bid for $50.00 (96.15 shares @ 0.5200)
+Expires: 2026-05-02 11:56:00 UTC
 
-Price line is $77,972.55
+Current price is 0.01% above the price line ($83.6113)
+```
 
-Current price is 0.04% above the price line
+Live order fill messages use this shape:
+
+```text
+Filled SOL ↑ maker bid for $50.00 (96.15 shares @ 0.5200)
+
+Current price is 0.01% above the price line ($83.6113)
 ```
 
 Live entry rejection messages use this shape:
