@@ -590,6 +590,7 @@ impl PerformanceReport {
             ],
             rows.iter()
                 .map(|row| {
+                    let pnl_share_pct = row.stats.pnl_share_pct(self.overall.pnl);
                     vec![
                         Cell::plain(row.label.clone()),
                         Cell::plain(format_whole_number(row.stats.trades)),
@@ -601,10 +602,8 @@ impl PerformanceReport {
                         Cell::plain(format_optional_percent(row.stats.fee_drag_pct())),
                         Cell::plain(format_optional_percent(row.stats.fee_notional_pct())),
                         Cell::pnl(
-                            format_optional_signed_percent(
-                                row.stats.pnl_share_pct(self.overall.pnl),
-                            ),
-                            row.stats.pnl,
+                            format_optional_signed_percent(pnl_share_pct),
+                            pnl_share_pct.unwrap_or(0.0),
                         ),
                         Cell::pnl(
                             format_optional_signed_percent(row.stats.roi_pct()),
@@ -1249,6 +1248,32 @@ mod tests {
     }
 
     #[test]
+    fn net_pnl_share_color_follows_rendered_percent_sign() {
+        let report = PerformanceReport::new(ReportInput {
+            user: address!("1234567890abcdef1234567890abcdef12345678"),
+            data_api_base_url: "https://data-api.polymarket.com".to_string(),
+            gamma_base_url: "https://gamma-api.polymarket.com".to_string(),
+            assets: vec![Asset::Btc, Asset::Eth],
+            slot_seconds: 300,
+            fee_model: "7.2% taker entry fee".to_string(),
+            trades_fetched: 2,
+            buy_trades_considered: 2,
+            unresolved_trades: 0,
+            trades: vec![
+                trade(Asset::Btc, 5.0, 50.0, 0.5, 0.7, Some(210)),
+                trade(Asset::Eth, -10.0, 40.0, 0.4, 0.4, Some(45)),
+            ],
+        });
+
+        let rendered = report.render(true);
+        let btc_line = rendered.lines().find(|line| line.contains("BTC")).unwrap();
+        let eth_line = rendered.lines().find(|line| line.contains("ETH")).unwrap();
+
+        assert_ansi_color_for_text(btc_line, "-100%", "31");
+        assert_ansi_color_for_text(eth_line, "+200%", "32");
+    }
+
+    #[test]
     fn signed_usdc_formats_losses() {
         assert_eq!(format_signed_usdc(-8751.006), "-$8,751.01");
     }
@@ -1273,5 +1298,21 @@ mod tests {
             entry_price,
             entry_remaining_seconds,
         }
+    }
+
+    fn assert_ansi_color_for_text(line: &str, text: &str, code: &str) {
+        let text_index = line.find(text).unwrap();
+        let prefix = &line[..text_index];
+        let color_index = prefix.rfind("\x1b[").unwrap();
+        let color_span = &line[color_index..text_index];
+
+        assert!(
+            color_span.starts_with(&format!("\x1b[{code}m")),
+            "{text} had wrong ANSI color in {line:?}"
+        );
+        assert!(
+            !color_span.contains("\x1b[0m"),
+            "{text} was not inside active ANSI color in {line:?}"
+        );
     }
 }
