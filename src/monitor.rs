@@ -8,6 +8,7 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, TimeDelta, Utc};
+use futures_util::{StreamExt, stream};
 use polymarket_client_sdk_v2::types::Address;
 use rust_decimal::{
     Decimal,
@@ -36,7 +37,7 @@ use crate::{
     },
     runtime::{AssetRuntime, RuntimeBundle, RuntimeCell, SideLeading},
     telegram::TelegramClient,
-    trade_analysis::{self, ApiClosedPositionPnlRow},
+    trade_analysis::{self, ApiClosedPositionPnlRow, ApiClosedPositionPnlRows},
     trading::{
         LIVE_ORDER_SIZE_SCALE, LiveFill, LiveOrderRequest, LiveOrderResponse, LiveTradeExecutor,
         executor::MarketExposureSnapshot,
@@ -47,6 +48,10 @@ use crate::{
 mod settlement;
 
 const TELEGRAM_SETTLEMENT_MAX_POSITIONS: usize = 10_000;
+const TELEGRAM_OUTBOX_CAPACITY: usize = 256;
+const WATCHSET_REFRESH_INTERVAL_SECONDS: u64 = 10;
+const WATCHSET_REFRESH_TIMEOUT_SECONDS: u64 = 4;
+const WATCHSET_FETCH_CONCURRENCY: usize = 8;
 const LIVE_EXPOSURE_RECONCILE_INTERVAL_MS: u64 = 5_000;
 const LIVE_EXPOSURE_CACHE_MAX_AGE_MS: i64 = 12_000;
 const LIVE_EXPOSURE_RECENT_TRADES_MAX: usize = 1_000;
@@ -81,6 +86,7 @@ pub async fn run(args: MonitorArgs, config: RuntimeConfig) -> Result<()> {
         0
     };
     let telegram = TelegramClient::from_config(&config);
+    let telegram_outbox = TelegramOutbox::new(telegram.clone());
     let settlement_user = if telegram.is_configured() && !config.telegram_pnl_interval.is_zero() {
         match trade_analysis::resolve_config_user_address(&config) {
             Ok(address) => Some(address),
@@ -166,9 +172,12 @@ pub async fn run(args: MonitorArgs, config: RuntimeConfig) -> Result<()> {
     let mut user_fill_handle: Option<JoinHandle<()>> = None;
     let mut subscribed_asset_ids = Vec::<String>::new();
     let mut subscribed_user_condition_ids = Vec::<String>::new();
-    let mut refresh_interval = time::interval(Duration::from_secs(10));
+    let mut refresh_interval =
+        time::interval(Duration::from_secs(WATCHSET_REFRESH_INTERVAL_SECONDS));
     let mut status_interval = time::interval(Duration::from_secs(15));
     let mut evaluation_interval = time::interval(config.evaluation_interval);
+    let (watchset_tx, mut watchset_rx) = mpsc::channel::<WatchsetRefreshResult>(2);
+    let mut watchset_refresh_in_flight = false;
     let (live_exposure_tx, mut live_exposure_rx) = mpsc::channel::<LiveExposureReconcileResult>(8);
     let mut live_exposure_reconcile_interval = if live_executor.is_some() {
         Some(time::interval(Duration::from_millis(
@@ -183,6 +192,9 @@ pub async fn run(args: MonitorArgs, config: RuntimeConfig) -> Result<()> {
     } else {
         None
     };
+    let (live_settlement_tx, mut live_settlement_rx) =
+        mpsc::channel::<LiveSettlementFetchResult>(2);
+    let mut live_settlement_fetch_in_flight = false;
     refresh_interval.tick().await;
     status_interval.tick().await;
     evaluation_interval.tick().await;
@@ -196,15 +208,15 @@ pub async fn run(args: MonitorArgs, config: RuntimeConfig) -> Result<()> {
         .max_runtime_seconds
         .map(|seconds| time::Instant::now() + Duration::from_secs(seconds));
 
-    refresh_watchset(
-        &gamma,
-        &watchset_config,
+    let initial_markets = fetch_watchset_with_timeout(&gamma, &watchset_config).await?;
+    apply_watchset_markets(
+        initial_markets,
+        &watchset_config.ws_endpoint,
         &mut state,
         &mut subscribed_asset_ids,
         &mut market_handle,
         market_tx.clone(),
-    )
-    .await?;
+    );
     refresh_live_user_fill_feed(
         live_executor.as_ref(),
         &watchset_config.ws_endpoint,
@@ -241,15 +253,12 @@ pub async fn run(args: MonitorArgs, config: RuntimeConfig) -> Result<()> {
         "monitor started"
     );
     if telegram.is_configured() && !config.live_trading {
-        telegram
-            .send_message(&format!(
-                "wiggler started: live_trading={} assets={} tradable={}",
-                config.live_trading,
-                format_assets(&assets),
-                format_assets(&config.tradable_assets)
-            ))
-            .await
-            .context("send Telegram startup message")?;
+        telegram_outbox.send_message(format!(
+            "wiggler started: live_trading={} assets={} tradable={}",
+            config.live_trading,
+            format_assets(&assets),
+            format_assets(&config.tradable_assets)
+        ));
     }
 
     loop {
@@ -264,32 +273,56 @@ pub async fn run(args: MonitorArgs, config: RuntimeConfig) -> Result<()> {
                 break;
             }
             _ = refresh_interval.tick() => {
-                if let Err(error) = refresh_watchset(
+                maybe_spawn_watchset_refresh(
                     &gamma,
                     &watchset_config,
-                    &mut state,
-                    &mut subscribed_asset_ids,
-                    &mut market_handle,
-                    market_tx.clone(),
-                ).await {
-                    warn!(error = %error, "watchset refresh failed");
-                }
-                if let Err(error) = refresh_live_user_fill_feed(
-                    live_executor.as_ref(),
-                    &watchset_config.ws_endpoint,
-                    &state,
-                    &mut subscribed_user_condition_ids,
-                    &mut user_fill_handle,
-                    live_fill_tx.clone(),
-                ).await {
-                    warn!(error = %error, "user fill websocket refresh failed");
-                }
+                    &watchset_tx,
+                    &mut watchset_refresh_in_flight,
+                );
                 maybe_spawn_live_exposure_reconcile(
                     live_executor.as_ref(),
                     &state,
                     &live_exposure_tx,
                     &mut live_exposure_reconcile_in_flight,
                 );
+            }
+            Some(refresh) = watchset_rx.recv() => {
+                watchset_refresh_in_flight = false;
+                match refresh.result {
+                    Ok(markets) => {
+                        apply_watchset_markets(
+                            markets,
+                            &watchset_config.ws_endpoint,
+                            &mut state,
+                            &mut subscribed_asset_ids,
+                            &mut market_handle,
+                            market_tx.clone(),
+                        );
+                        if let Err(error) = refresh_live_user_fill_feed(
+                            live_executor.as_ref(),
+                            &watchset_config.ws_endpoint,
+                            &state,
+                            &mut subscribed_user_condition_ids,
+                            &mut user_fill_handle,
+                            live_fill_tx.clone(),
+                        ).await {
+                            warn!(error = %error, "user fill websocket refresh failed");
+                        }
+                        maybe_spawn_live_exposure_reconcile(
+                            live_executor.as_ref(),
+                            &state,
+                            &live_exposure_tx,
+                            &mut live_exposure_reconcile_in_flight,
+                        );
+                    }
+                    Err(error) => {
+                        warn!(
+                            checked_at = %refresh.checked_at,
+                            error = %format!("{error:#}"),
+                            "watchset refresh failed"
+                        );
+                    }
+                }
             }
             _ = status_interval.tick() => {
                 state.log_status();
@@ -305,33 +338,37 @@ pub async fn run(args: MonitorArgs, config: RuntimeConfig) -> Result<()> {
             Some(reconcile) = live_exposure_rx.recv() => {
                 live_exposure_reconcile_in_flight = false;
                 for fill in state.apply_live_exposure_reconcile(reconcile) {
-                    state.apply_live_fill(fill, &telegram).await;
+                    state.apply_live_fill(fill, &telegram_outbox);
                 }
             }
             Some(fill) = live_fill_rx.recv() => {
-                state.apply_live_fill(fill, &telegram).await;
+                state.apply_live_fill(fill, &telegram_outbox);
             }
             _ = optional_interval_tick(&mut settlement_interval) => {
-                state
-                    .send_live_settlement_summaries(LiveSettlementSummaryContext {
-                        telegram: &telegram,
-                        duration,
-                        pnl_interval: config.telegram_pnl_interval,
-                        data_api: &data_api,
-                        user: settlement_user
-                            .as_ref()
-                            .cloned()
-                            .expect("settlement interval requires user address"),
-                        assets: &assets,
-                    })
-                    .await;
+                maybe_spawn_live_settlement_fetch(
+                    &data_api,
+                    settlement_user
+                        .as_ref()
+                        .cloned()
+                        .expect("settlement interval requires user address"),
+                    &assets,
+                    duration,
+                    config.telegram_pnl_interval,
+                    &state,
+                    &live_settlement_tx,
+                    &mut live_settlement_fetch_in_flight,
+                );
+            }
+            Some(settlement) = live_settlement_rx.recv() => {
+                live_settlement_fetch_in_flight = false;
+                state.apply_live_settlement_fetch(settlement, &telegram_outbox);
             }
             _ = evaluation_interval.tick() => {
                 state.evaluate_and_maybe_execute(
                     &runtime_bundle,
                     &config,
                     live_executor.as_deref(),
-                    &telegram,
+                    &telegram_outbox,
                 ).await;
             }
             Some(tick) = price_rx.recv() => {
@@ -362,26 +399,19 @@ pub async fn run(args: MonitorArgs, config: RuntimeConfig) -> Result<()> {
     Ok(())
 }
 
-async fn refresh_watchset(
-    gamma: &GammaClient,
-    config: &WatchsetConfig,
+fn apply_watchset_markets(
+    markets: Vec<MonitoredMarket>,
+    ws_endpoint: &str,
     state: &mut MonitorState,
     subscribed_asset_ids: &mut Vec<String>,
     market_handle: &mut Option<JoinHandle<()>>,
     market_tx: mpsc::Sender<MarketWsEvent>,
-) -> Result<()> {
-    let markets = fetch_watchset(
-        gamma,
-        &config.assets,
-        config.duration,
-        config.lookahead_slots,
-    )
-    .await?;
+) {
     state.replace_markets(markets.clone());
 
     let next_asset_ids = asset_ids_for_markets(&markets);
     if *subscribed_asset_ids == next_asset_ids {
-        return Ok(());
+        return;
     }
 
     if let Some(handle) = market_handle.take() {
@@ -391,7 +421,7 @@ async fn refresh_watchset(
     *subscribed_asset_ids = next_asset_ids.clone();
     if next_asset_ids.is_empty() {
         warn!("no Polymarket token ids discovered for watchset");
-        return Ok(());
+        return;
     }
 
     info!(
@@ -400,12 +430,10 @@ async fn refresh_watchset(
         "refreshing market websocket subscription"
     );
     *market_handle = Some(tokio::spawn(run_market_feed(
-        config.ws_endpoint.clone(),
+        ws_endpoint.to_string(),
         next_asset_ids,
         market_tx,
     )));
-
-    Ok(())
 }
 
 async fn refresh_live_user_fill_feed(
@@ -449,6 +477,53 @@ async fn refresh_live_user_fill_feed(
     Ok(())
 }
 
+struct WatchsetRefreshResult {
+    checked_at: DateTime<Utc>,
+    result: Result<Vec<MonitoredMarket>>,
+}
+
+fn maybe_spawn_watchset_refresh(
+    gamma: &GammaClient,
+    config: &WatchsetConfig,
+    tx: &mpsc::Sender<WatchsetRefreshResult>,
+    in_flight: &mut bool,
+) {
+    if *in_flight {
+        return;
+    }
+
+    *in_flight = true;
+    let gamma = gamma.clone();
+    let config = config.clone();
+    let tx = tx.clone();
+    tokio::spawn(async move {
+        let result = fetch_watchset_with_timeout(&gamma, &config).await;
+        let _ = tx
+            .send(WatchsetRefreshResult {
+                checked_at: Utc::now(),
+                result,
+            })
+            .await;
+    });
+}
+
+async fn fetch_watchset_with_timeout(
+    gamma: &GammaClient,
+    config: &WatchsetConfig,
+) -> Result<Vec<MonitoredMarket>> {
+    time::timeout(
+        Duration::from_secs(WATCHSET_REFRESH_TIMEOUT_SECONDS),
+        fetch_watchset(
+            gamma,
+            &config.assets,
+            config.duration,
+            config.lookahead_slots,
+        ),
+    )
+    .await
+    .context("watchset refresh timed out")?
+}
+
 async fn fetch_watchset(
     gamma: &GammaClient,
     assets: &[Asset],
@@ -456,34 +531,47 @@ async fn fetch_watchset(
     lookahead_slots: u32,
 ) -> Result<Vec<MonitoredMarket>> {
     let current_slot = MarketSlot::current(Utc::now(), duration)?;
-    let mut markets = Vec::new();
-
-    for asset in assets {
+    let mut requests = Vec::new();
+    for &asset in assets {
         for offset in 0..=lookahead_slots {
-            let slot = current_slot.offset(i64::from(offset))?;
-            match gamma.fetch_slot_market(*asset, &slot).await {
-                Ok(Some(market)) => {
-                    debug!(
-                        asset = %asset,
-                        slug = market.slug,
-                        start = %market.slot.start(),
-                        end = %market.slot.end(),
-                        token_count = market.tokens.len(),
-                        "discovered market"
-                    );
-                    markets.push(market);
-                }
-                Ok(None) => {
-                    let slug = slot.slug(*asset)?;
-                    debug!(asset = %asset, slug, "market not yet available");
-                }
-                Err(error) => {
-                    let slug = slot.slug(*asset)?;
-                    warn!(asset = %asset, slug, error = %error, "failed to fetch market");
-                }
-            }
+            requests.push((asset, current_slot.offset(i64::from(offset))?));
         }
     }
+
+    let mut markets = stream::iter(requests)
+        .map(|(asset, slot)| {
+            let gamma = gamma.clone();
+            async move {
+                match gamma.fetch_slot_market(asset, &slot).await {
+                    Ok(Some(market)) => {
+                        debug!(
+                            asset = %asset,
+                            slug = market.slug,
+                            start = %market.slot.start(),
+                            end = %market.slot.end(),
+                            token_count = market.tokens.len(),
+                            "discovered market"
+                        );
+                        Some(market)
+                    }
+                    Ok(None) => {
+                        let slug = slot.slug(asset).ok();
+                        debug!(asset = %asset, slug, "market not yet available");
+                        None
+                    }
+                    Err(error) => {
+                        let slug = slot.slug(asset).ok();
+                        warn!(asset = %asset, slug, error = %error, "failed to fetch market");
+                        None
+                    }
+                }
+            }
+        })
+        .buffer_unordered(WATCHSET_FETCH_CONCURRENCY)
+        .filter_map(future::ready)
+        .collect::<Vec<_>>()
+        .await;
+    markets.sort_by(|left, right| left.slug.cmp(&right.slug));
 
     Ok(markets)
 }
@@ -521,6 +609,50 @@ async fn sleep_until(deadline: Option<time::Instant>) {
         time::sleep_until(deadline).await;
     } else {
         future::pending::<()>().await;
+    }
+}
+
+#[derive(Clone)]
+struct TelegramOutbox {
+    tx: Option<mpsc::Sender<String>>,
+}
+
+impl TelegramOutbox {
+    fn new(client: TelegramClient) -> Self {
+        if !client.is_configured() {
+            return Self { tx: None };
+        }
+
+        let (tx, mut rx) = mpsc::channel::<String>(TELEGRAM_OUTBOX_CAPACITY);
+        tokio::spawn(async move {
+            while let Some(message) = rx.recv().await {
+                if let Err(error) = client.send_message(&message).await {
+                    warn!(
+                        error = %error,
+                        "failed to send queued Telegram message"
+                    );
+                }
+            }
+        });
+
+        Self { tx: Some(tx) }
+    }
+
+    fn send_message(&self, message: impl Into<String>) -> bool {
+        let Some(tx) = &self.tx else {
+            return false;
+        };
+        match tx.try_send(message.into()) {
+            Ok(()) => true,
+            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                warn!("Telegram outbox full; dropped message");
+                false
+            }
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                warn!("Telegram outbox closed; dropped message");
+                false
+            }
+        }
     }
 }
 
@@ -610,19 +742,69 @@ fn maybe_spawn_live_exposure_reconcile(
     });
 }
 
+fn maybe_spawn_live_settlement_fetch(
+    data_api: &DataApiClient,
+    user: Address,
+    assets: &[Asset],
+    duration: TimeDelta,
+    pnl_interval: Duration,
+    state: &MonitorState,
+    tx: &mpsc::Sender<LiveSettlementFetchResult>,
+    in_flight: &mut bool,
+) {
+    if *in_flight {
+        return;
+    }
+
+    let candidate_slots = live_settlement_candidate_slots(
+        Utc::now(),
+        duration,
+        live_settlement_lookback_slots(duration, pnl_interval),
+    );
+    let unsent_slots = candidate_slots
+        .into_iter()
+        .filter(|slot_start| !state.sent_live_settlement_slots.contains(slot_start))
+        .collect::<Vec<_>>();
+    if unsent_slots.is_empty() {
+        return;
+    }
+
+    info!(
+        event = "live_settlement_summary_check",
+        unsent_slot_count = unsent_slots.len(),
+        "checking Polymarket API position PnL for Telegram summaries"
+    );
+
+    *in_flight = true;
+    let data_api = data_api.clone();
+    let assets = assets.to_vec();
+    let tx = tx.clone();
+    tokio::spawn(async move {
+        let result = trade_analysis::fetch_api_closed_position_pnl_rows(
+            &data_api,
+            user,
+            &assets,
+            TELEGRAM_SETTLEMENT_MAX_POSITIONS,
+        )
+        .await;
+        let _ = tx
+            .send(LiveSettlementFetchResult {
+                unsent_slots,
+                result,
+            })
+            .await;
+    });
+}
+
 #[derive(Clone, Debug)]
 struct SlotLine {
     price: Decimal,
     observed_at: DateTime<Utc>,
 }
 
-struct LiveSettlementSummaryContext<'a> {
-    telegram: &'a TelegramClient,
-    duration: TimeDelta,
-    pnl_interval: Duration,
-    data_api: &'a DataApiClient,
-    user: Address,
-    assets: &'a [Asset],
+struct LiveSettlementFetchResult {
+    unsent_slots: Vec<DateTime<Utc>>,
+    result: Result<ApiClosedPositionPnlRows>,
 }
 
 #[derive(Default)]
@@ -656,37 +838,12 @@ impl MonitorState {
         }
     }
 
-    async fn send_live_settlement_summaries(&mut self, context: LiveSettlementSummaryContext<'_>) {
-        if !context.telegram.is_configured() {
-            return;
-        }
-
-        let candidate_slots = live_settlement_candidate_slots(
-            Utc::now(),
-            context.duration,
-            live_settlement_lookback_slots(context.duration, context.pnl_interval),
-        );
-        let unsent_slots = candidate_slots
-            .into_iter()
-            .filter(|slot_start| !self.sent_live_settlement_slots.contains(slot_start))
-            .collect::<Vec<_>>();
-        if unsent_slots.is_empty() {
-            return;
-        }
-        info!(
-            event = "live_settlement_summary_check",
-            unsent_slot_count = unsent_slots.len(),
-            "checking Polymarket API position PnL for Telegram summaries"
-        );
-
-        let api_rows = match trade_analysis::fetch_api_closed_position_pnl_rows(
-            context.data_api,
-            context.user,
-            context.assets,
-            TELEGRAM_SETTLEMENT_MAX_POSITIONS,
-        )
-        .await
-        {
+    fn apply_live_settlement_fetch(
+        &mut self,
+        settlement: LiveSettlementFetchResult,
+        telegram: &TelegramOutbox,
+    ) {
+        let api_rows = match settlement.result {
             Ok(api_rows) => api_rows,
             Err(error) => {
                 warn!(
@@ -705,7 +862,7 @@ impl MonitorState {
             .collect::<Vec<_>>();
 
         let mut summaries = Vec::new();
-        for slot_start in unsent_slots {
+        for slot_start in settlement.unsent_slots {
             let mut slot_rows = closed_rows_for_slot(&api_rows, slot_start);
             if slot_rows.is_empty() {
                 info!(
@@ -741,24 +898,15 @@ impl MonitorState {
 
         for (slot_start, slot_rows) in summaries {
             let message = live_settlement_summary_text(&slot_rows, all_time_totals);
-            match context.telegram.send_message(&message).await {
-                Ok(()) => {
-                    self.sent_live_settlement_slots.insert(slot_start);
-                    info!(
-                        event = "live_settlement_summary_sent",
-                        slot_start = %slot_start,
-                        row_count = slot_rows.len(),
-                        source = "polymarket_api",
-                        "sent live settlement Telegram summary"
-                    );
-                }
-                Err(error) => {
-                    warn!(
-                        error = %error,
-                        slot_start = %slot_start,
-                        "failed to send live settlement Telegram summary"
-                    );
-                }
+            if telegram.send_message(message) {
+                self.sent_live_settlement_slots.insert(slot_start);
+                info!(
+                    event = "live_settlement_summary_queued",
+                    slot_start = %slot_start,
+                    row_count = slot_rows.len(),
+                    source = "polymarket_api",
+                    "queued live settlement Telegram summary"
+                );
             }
         }
     }
@@ -1087,7 +1235,7 @@ impl MonitorState {
         runtime_bundle: &RuntimeBundle,
         config: &RuntimeConfig,
         live_executor: Option<&LiveTradeExecutor>,
-        telegram: &TelegramClient,
+        telegram: &TelegramOutbox,
     ) {
         let now = Utc::now();
         let markets = self.markets_by_slug.values().cloned().collect::<Vec<_>>();
@@ -1121,12 +1269,7 @@ impl MonitorState {
                 .insert(market.condition_id.clone())
             {
                 self.record_trade_entry(config, market, &prepared, TradeMode::Shadow, true);
-                if let Err(error) = telegram
-                    .send_message(&prepared.telegram_text(TradeMode::Shadow))
-                    .await
-                {
-                    warn!(error = %error, slug = market.slug, "failed to send shadow trade Telegram message");
-                }
+                telegram.send_message(prepared.telegram_text(TradeMode::Shadow));
             }
         }
     }
@@ -1471,7 +1614,7 @@ impl MonitorState {
         runtime_bundle: &RuntimeBundle,
         config: &RuntimeConfig,
         executor: &LiveTradeExecutor,
-        telegram: &TelegramClient,
+        telegram: &TelegramOutbox,
         initial_prepared: &PreparedTrade,
     ) {
         let now = Utc::now();
@@ -1654,14 +1797,8 @@ impl MonitorState {
                 } else {
                     None
                 };
-                if let Some(message) = message
-                    && let Err(error) = telegram.send_message(&message).await
-                {
-                    warn!(
-                        error = %error,
-                        slug = market.slug,
-                        "failed to send live execution Telegram message"
-                    );
+                if let Some(message) = message {
+                    telegram.send_message(message);
                 }
             }
             Err(error) => {
@@ -1693,9 +1830,7 @@ impl MonitorState {
                         &request.outcome,
                         &clean_failure_reason(&error_chain),
                     );
-                    if let Err(telegram_error) = telegram.send_message(&message).await {
-                        warn!(error = %telegram_error, slug = market.slug, "failed to send live error Telegram message");
-                    }
+                    telegram.send_message(message);
                 }
             }
         }
@@ -2052,7 +2187,7 @@ impl MonitorState {
         }
     }
 
-    async fn apply_live_fill(&mut self, fill: LiveFill, telegram: &TelegramClient) {
+    fn apply_live_fill(&mut self, fill: LiveFill, telegram: &TelegramOutbox) {
         self.positioned_markets.insert(fill.condition_id.clone());
         self.remote_exposure_markets
             .insert(fill.condition_id.clone());
@@ -2140,14 +2275,7 @@ impl MonitorState {
             live_entry_filled_text(&entry.prepared, &fill)
         };
 
-        if let Err(error) = telegram.send_message(&message).await {
-            warn!(
-                error = %error,
-                condition_id = fill.condition_id,
-                fill_id = fill.fill_id,
-                "failed to send live fill Telegram message"
-            );
-        }
+        telegram.send_message(message);
     }
 
     fn live_exposure_skip_reason(
@@ -2787,7 +2915,7 @@ const PATH_LOOKBACK_SECONDS: i64 = 60;
 const MAX_PATH_LOOKBACK_DRIFT_SECONDS: i64 = 30;
 const LEAD_DECAY_PENALTY_THRESHOLD: f64 = 0.75;
 const LEAD_DECAY_EDGE_PENALTY: f64 = 0.005;
-const RETRYABLE_NO_FILL_COOLDOWN_SECONDS: i64 = 10;
+const RETRYABLE_NO_FILL_COOLDOWN_SECONDS: i64 = 2;
 const LIVE_SETTLEMENT_CHECK_INTERVAL_SECONDS: u64 = 30;
 const MOMENTUM_OVERLAY_VOL_LOOKBACK_MIN: u32 = 30;
 const MOMENTUM_OVERLAY_THRESHOLD_VOL_UNITS: f64 = 2.0;
@@ -3070,7 +3198,7 @@ mod tests {
     use super::{
         ClosedPositionPnlRow, LIVE_SETTLEMENT_CHECK_INTERVAL_SECONDS, LiveExposureReconcileResult,
         MOMENTUM_OVERLAY_THRESHOLD_VOL_UNITS, MOMENTUM_OVERLAY_VOL_LOOKBACK_MIN, MarketPricePath,
-        MonitorState, PathState, PreparedTrade, SlotLine, TrackedEntry,
+        MonitorState, PathState, PreparedTrade, SlotLine, TelegramOutbox, TrackedEntry,
         adjusted_required_edge_probability, asset_ids_for_markets, clean_failure_reason,
         closed_position_row_from_api_position, closed_position_slot_start, closed_position_totals,
         distance_bps, effective_max_order_usdc, experimental_final_window_applies,
@@ -3875,7 +4003,7 @@ mod tests {
                 filled_fingerprints: HashSet::new(),
             },
         );
-        let telegram = TelegramClient::from_config(&test_config(false));
+        let telegram = TelegramOutbox::new(TelegramClient::from_config(&test_config(false)));
         let fill = LiveFill::new(
             prepared.condition_id.clone(),
             prepared.token_id.clone(),
@@ -3887,8 +4015,8 @@ mod tests {
         )
         .unwrap();
 
-        state.apply_live_fill(fill.clone(), &telegram).await;
-        state.apply_live_fill(fill, &telegram).await;
+        state.apply_live_fill(fill.clone(), &telegram);
+        state.apply_live_fill(fill, &telegram);
 
         let entry = state.tracked_entries.get(&prepared.condition_id).unwrap();
         assert!(entry.track_closeout);

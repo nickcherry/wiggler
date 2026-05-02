@@ -48,7 +48,8 @@ Live trading must remain explicit and fail closed:
   exposure is refreshed into a local cache in the background, and stale cache
   data fails closed instead of making a submit-path API call
 - live order submits, responses, and fills are logged; Telegram sends posts,
-  fills, hard rejections/errors, and settlement summaries when configured
+  fills, hard rejections/errors, and settlement summaries through a background
+  queue when configured
 
 ## Debugging
 

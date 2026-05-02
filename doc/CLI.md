@@ -154,7 +154,7 @@ Default behavior:
 - Lookahead: current slot plus one future slot
 - Underlying price feed: `chainlink`
 - Runtime bundle: `runtime/wiggler-prod-v1`
-- Evaluation cadence: `1000` ms
+- Evaluation cadence: `250` ms
 - Live trading: disabled; enable with `WIGGLER_LIVE_TRADING=true` and Polymarket credentials
 
 Use a comma-separated whitelist to monitor more than one market family:
@@ -170,14 +170,15 @@ the checked-in runtime bundle.
 
 Side effects:
 
-- Makes public Gamma REST requests every 10 seconds.
+- Starts public Gamma REST refreshes every 10 seconds in a background task.
 - Opens one RTDS websocket per whitelisted asset for the configured price source.
 - Opens one CLOB market websocket for the full token watchset.
 - In live mode, opens one authenticated CLOB user websocket for watched fill
   events.
 - Backfills bounded in-memory 1-minute Coinbase/Binance OHLCV candle stores and keeps them fresh with Binance kline websocket updates plus REST reconciliation.
 - Emits JSON logs to stdout/stderr through tracing.
-- Sends Telegram notifications for shadow decisions and live order lifecycle events when configured.
+- Queues Telegram notifications for shadow decisions and live order lifecycle
+  events when configured.
 - Logs full per-tick trade evaluations only when `WIGGLER_LOG_EVALUATIONS=true`.
 - Places live orders only when `WIGGLER_LIVE_TRADING=true`.
 

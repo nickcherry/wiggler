@@ -85,12 +85,12 @@ cargo run -- monitor --runtime-bundle-dir runtime/wiggler-prod-v1
 | `WIGGLER_LIVE_TRADING` | `false` | Global live-trading flag |
 | `WIGGLER_MIN_ORDER_USDC` | `1` | Minimum live/shadow decision notional |
 | `WIGGLER_MAX_ORDER_USDC` | `25` | Production cap applied below bundle position caps |
-| `WIGGLER_EVALUATION_INTERVAL_MS` | `1000` | Decision/evaluation cadence |
+| `WIGGLER_EVALUATION_INTERVAL_MS` | `250` | Decision/evaluation cadence |
 | `WIGGLER_CANDLE_REST_SYNC_INTERVAL_MS` | `60000` | Coinbase/Binance candle reconciliation cadence |
 | `WIGGLER_LOG_EVALUATIONS` | `false` | Emit full per-tick `trade_evaluation` logs when debugging |
 | `WIGGLER_TRADE_RECORD_DIR` | `trade-records` | Ignored JSON record directory for shadow/live entry attempts |
-| `WIGGLER_PRICE_STALE_AFTER_MS` | `20000` | Max current-price age for an eligible evaluation |
-| `WIGGLER_ORDERBOOK_STALE_AFTER_MS` | `10000` | Max orderbook age for an eligible evaluation |
+| `WIGGLER_PRICE_STALE_AFTER_MS` | `5000` | Max current-price age for an eligible evaluation |
+| `WIGGLER_ORDERBOOK_STALE_AFTER_MS` | `5000` | Max orderbook age for an eligible evaluation |
 | `WIGGLER_MIN_ABS_D_BPS` | `0.01` | Dust threshold around the market line |
 | `WIGGLER_TELEGRAM_PNL_INTERVAL_SECS` | `900` | Telegram summary lookback control; summaries check every 30s, `0` disables summaries |
 | `DATABASE_URL` | `postgres://localhost:5432/wiggler` | Offline training database; not used by `monitor` |

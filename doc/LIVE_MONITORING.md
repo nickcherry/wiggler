@@ -12,7 +12,7 @@
    vol buckets and the momentum overlay.
 8. Maintain a per-market in-memory price path from the same RTDS price source.
 9. Load the production runtime probability-table bundle.
-10. Refresh the watchset every 10 seconds.
+10. Start a background watchset refresh every 10 seconds.
 11. If the token set changes, reconnect the CLOB websocket with the new set.
 12. In live mode, subscribe to authenticated user trade fills for watched
     condition IDs.
@@ -70,10 +70,11 @@ Shadow decision code checks freshness before logging an eligible decision:
 
 Defaults:
 
-- current price stale after 20 seconds
-- orderbook stale after 10 seconds
+- current price stale after 5 seconds
+- orderbook stale after 5 seconds
 - live exposure cache stale after 12 seconds; reconciliation runs every 5
   seconds in the background, not in the order-submit hot path
+- retryable post-only no-fill/crossed-book responses cool down for 2 seconds
 - no regular trading before 240 seconds or after 60 seconds remaining
 - experimental 30-59 second final-window trades map to the 60-second runtime
   bucket, require at least 10 bps from the line, add 0.01 required probability
@@ -118,6 +119,12 @@ feeds are unavailable or gapped; current-market path gaps can also produce
 Live trading uses the same evaluator twice: once for the logged decision and
 again immediately before order submission. If the second evaluation fails, if
 the side flips, or if retracing appears, no order is sent.
+
+The main monitor loop does not await Gamma refreshes, settlement API fetches, or
+Telegram sends. Gamma refreshes and settlement summary fetches run in background
+tasks and return through channels; Telegram messages go through an in-process
+queue. Live order submission remains awaited so local pending/positioned state
+tracks the actual CLOB response.
 
 Live entries are posted as maker-only GTD bids at the current best bid. The
 order carries `postOnly=true`, so a crossed book or price move through the bid
