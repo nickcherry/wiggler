@@ -25,6 +25,8 @@ Everything that matters is reachable through one non-interactive entrypoint:
   `db:migrate`
 - `candles:*`
   `candles:sync`
+- `prices:*`
+  `prices:capture`
 - `telegram:*`
   `telegram:test`
 - `help`
