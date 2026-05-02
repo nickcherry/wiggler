@@ -206,6 +206,10 @@ min_edge_probability = 0.015
 Evaluate the current best bid as a maker entry. The entry cost is the bid price
 with zero maker fee.
 
+Use the best bid as the maker limit price only. Do not size from best-bid
+depth; size from the configured notional caps divided by the selected limit
+price.
+
 ## Order behavior
 
 For v1:

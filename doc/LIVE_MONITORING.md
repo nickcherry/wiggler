@@ -116,7 +116,9 @@ the side flips, or if retracing appears, no order is sent.
 
 Live entries are posted as maker-only GTD bids at the current best bid. The
 order carries `postOnly=true`, so a crossed book or price move through the bid
-causes a retryable rejection instead of a taker fill.
+causes a retryable rejection instead of a taker fill. Sizing is based on
+Wiggler's notional caps at the selected limit price, not on the current
+best-bid depth.
 
 See [OPERATIONS.md](./OPERATIONS.md) for systemd and journald retention.
 

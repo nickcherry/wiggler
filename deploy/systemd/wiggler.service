@@ -17,7 +17,6 @@ Environment=WIGGLER_ASSETS=btc,eth,sol,xrp,doge
 Environment=WIGGLER_TRADABLE_ASSETS=btc,eth,sol,xrp,doge
 Environment=WIGGLER_RUNTIME_BUNDLE_DIR=runtime/wiggler-prod-v1
 Environment=WIGGLER_LIVE_TRADING=false
-Environment=WIGGLER_LIVE_ORDER_TYPE=maker
 Environment=WIGGLER_EVALUATION_INTERVAL_MS=1000
 Environment=WIGGLER_MAX_ORDER_USDC=25
 Environment=POLYMARKET_CLOB_API_URL=https://clob.polymarket.com

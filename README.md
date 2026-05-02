@@ -82,7 +82,6 @@ cargo run -- monitor --runtime-bundle-dir runtime/wiggler-prod-v1
 | `WIGGLER_TRADABLE_ASSETS` | `btc,eth,sol,xrp,doge` | Comma-separated shadow/live eligibility whitelist |
 | `WIGGLER_RUNTIME_BUNDLE_DIR` | `runtime/wiggler-prod-v1` | Runtime probability-table bundle |
 | `WIGGLER_LIVE_TRADING` | `false` | Global live-trading flag |
-| `WIGGLER_LIVE_ORDER_TYPE` | `maker` | Deprecated compatibility knob; live entries are always post-only maker GTD orders |
 | `WIGGLER_MIN_ORDER_USDC` | `1` | Minimum live/shadow decision notional |
 | `WIGGLER_MAX_ORDER_USDC` | `25` | Production cap applied below bundle position caps |
 | `WIGGLER_EVALUATION_INTERVAL_MS` | `1000` | Decision/evaluation cadence |

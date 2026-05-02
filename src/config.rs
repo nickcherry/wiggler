@@ -38,7 +38,6 @@ pub struct RuntimeConfig {
     pub tradable_assets: Vec<Asset>,
     pub min_order_usdc: f64,
     pub max_order_usdc: f64,
-    pub live_order_type: LiveOrderType,
     pub evaluation_interval: Duration,
     pub candle_rest_sync_interval: Duration,
     pub log_evaluations: bool,
@@ -91,7 +90,6 @@ impl RuntimeConfig {
             tradable_assets: asset_list_env("WIGGLER_TRADABLE_ASSETS")?,
             min_order_usdc: f64_env("WIGGLER_MIN_ORDER_USDC", DEFAULT_MIN_ORDER_USDC)?,
             max_order_usdc: f64_env("WIGGLER_MAX_ORDER_USDC", DEFAULT_MAX_ORDER_USDC)?,
-            live_order_type: enum_env("WIGGLER_LIVE_ORDER_TYPE", LiveOrderType::MakerPostOnly)?,
             evaluation_interval: Duration::from_millis(u64_env(
                 "WIGGLER_EVALUATION_INTERVAL_MS",
                 DEFAULT_EVALUATION_INTERVAL_MS,
@@ -171,25 +169,6 @@ impl RuntimeConfig {
         }
 
         Ok(())
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum LiveOrderType {
-    MakerPostOnly,
-}
-
-impl std::str::FromStr for LiveOrderType {
-    type Err = String;
-
-    fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
-        match value.to_ascii_lowercase().as_str() {
-            "maker" | "post-only" | "post_only" | "gtd" => Ok(Self::MakerPostOnly),
-            // Backward-compatible aliases. The live executor now always posts maker-only GTD
-            // limit orders, even if an old environment still exports a taker order type.
-            "fak" | "fill-and-kill" | "fok" | "fill-or-kill" => Ok(Self::MakerPostOnly),
-            _ => Err(format!("unsupported live order type: {value}")),
-        }
     }
 }
 
@@ -320,20 +299,7 @@ fn require_non_negative(name: &str, value: f64) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{LiveOrderType, PolymarketSignatureType, parse_asset_list};
-
-    #[test]
-    fn parses_live_order_type_aliases() {
-        assert_eq!(
-            "maker".parse::<LiveOrderType>().unwrap(),
-            LiveOrderType::MakerPostOnly
-        );
-        assert_eq!(
-            "fill-or-kill".parse::<LiveOrderType>().unwrap(),
-            LiveOrderType::MakerPostOnly
-        );
-        assert!("market".parse::<LiveOrderType>().is_err());
-    }
+    use super::{PolymarketSignatureType, parse_asset_list};
 
     #[test]
     fn parses_polymarket_signature_type_aliases() {

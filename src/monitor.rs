@@ -1066,12 +1066,13 @@ impl MonitorState {
                 adjusted_required_edge_probability(runtime, state, final_window_experimental)
             });
         let order_cap_usdc = effective_max_order_usdc(config, final_window_experimental);
+        let maker_limit_price = best_bid.as_ref().map(|level| level.price);
         let edge_summary = runtime
             .zip(cell)
-            .zip(best_bid.as_ref())
+            .zip(maker_limit_price)
             .zip(required_edge)
-            .and_then(|(((runtime, cell), best_bid), required_edge)| {
-                summarize_maker_bid(runtime, cell, best_bid, required_edge, order_cap_usdc)
+            .and_then(|(((runtime, cell), limit_price), required_edge)| {
+                summarize_maker_limit(runtime, cell, limit_price, required_edge, order_cap_usdc)
             });
         let already_positioned = self.positioned_markets.contains(&market.condition_id)
             || self.pending_markets.contains(&market.condition_id);
@@ -1180,9 +1181,6 @@ impl MonitorState {
                 weighted_avg_price = ?edge_summary.as_ref().and_then(|summary| summary.weighted_avg_price),
                 all_in_cost = ?edge_summary.as_ref().and_then(|summary| summary.best_all_in_cost),
                 edge = ?edge_summary.as_ref().and_then(|summary| summary.best_edge),
-                positive_ev_depth_shares = ?edge_summary.as_ref().map(|summary| summary.positive_ev_depth_shares),
-                positive_ev_depth_usdc = ?edge_summary.as_ref().map(|summary| summary.positive_ev_depth_usdc),
-                positive_ev_depth = ?edge_summary.as_ref().map(|summary| summary.positive_ev_depth_shares),
                 max_acceptable_price = ?edge_summary.as_ref().and_then(|summary| summary.max_acceptable_price),
                 maker_fee_rate = 0.0,
                 taker_fee_rate = ?runtime.map(AssetRuntime::fee_rate),
@@ -1264,8 +1262,6 @@ impl MonitorState {
             weighted_avg_price: edge_summary.weighted_avg_price,
             best_fee: edge_summary.best_fee,
             best_all_in_cost: edge_summary.best_all_in_cost,
-            positive_ev_depth_shares: edge_summary.positive_ev_depth_shares,
-            positive_ev_depth_usdc: edge_summary.positive_ev_depth_usdc,
             expected_fill_price,
             estimated_payout_usdc,
             estimated_profit_usdc,
@@ -1686,22 +1682,24 @@ impl MonitorState {
         {
             return Some("order_book_crossed_or_locked");
         }
-        if edge_summary.is_none_or(|summary| summary.positive_ev_depth_shares <= 0.0) {
-            return Some("no_positive_ev_depth");
-        }
+        let Some(edge_summary) = edge_summary else {
+            return Some("missing_maker_order_summary");
+        };
         if edge_summary
-            .and_then(|summary| summary.max_acceptable_price)
-            .is_none()
+            .best_edge
+            .zip(required_edge)
+            .is_none_or(|(edge, required)| edge < required)
         {
+            return Some("maker_edge_below_required");
+        }
+        if edge_summary.max_acceptable_price.is_none() {
             return Some("missing_max_acceptable_price");
         }
-        if edge_summary.is_some_and(|summary| {
-            summary
-                .positive_ev_depth_usdc
-                .min(runtime.max_position_usdc())
-                .min(effective_max_order_usdc(config, final_window_experimental))
-                < config.min_order_usdc
-        }) {
+        if edge_summary
+            .order_notional_usdc
+            .and_then(|notional| notional.to_f64())
+            .is_none_or(|notional| notional < config.min_order_usdc)
+        {
             return Some("order_size_below_min");
         }
 
@@ -2034,8 +2032,6 @@ fn trade_entry_record_json(
             "best_fee": prepared.best_fee,
             "best_all_in_cost": prepared.best_all_in_cost,
             "weighted_avg_price": prepared.weighted_avg_price,
-            "positive_ev_depth_shares": prepared.positive_ev_depth_shares,
-            "positive_ev_depth_usdc": prepared.positive_ev_depth_usdc,
         },
         "runtime": {
             "vol_bps_per_sqrt_min": prepared.vol_bps_per_sqrt_min,
@@ -2128,8 +2124,6 @@ struct PreparedTrade {
     weighted_avg_price: Option<f64>,
     best_fee: Option<f64>,
     best_all_in_cost: Option<f64>,
-    positive_ev_depth_shares: f64,
-    positive_ev_depth_usdc: f64,
     expected_fill_price: Option<f64>,
     estimated_payout_usdc: Option<f64>,
     estimated_profit_usdc: Option<f64>,
@@ -2405,10 +2399,8 @@ fn is_retryable_no_fill_response(response: &LiveOrderResponse) -> bool {
 
 fn is_retryable_no_fill_error(error: &str) -> bool {
     let normalized = error.to_ascii_lowercase();
-    (normalized.contains("no orders found to match")
-        && (normalized.contains("fak") || normalized.contains("fok")))
-        || (normalized.contains("invalid_post_only_order")
-            && !normalized.contains("invalid_post_only_order_type"))
+    (normalized.contains("invalid_post_only_order")
+        && !normalized.contains("invalid_post_only_order_type"))
         || (normalized.contains("post-only") && normalized.contains("would cross"))
 }
 
@@ -2657,8 +2649,6 @@ struct EdgeSummary {
     best_fee: Option<f64>,
     best_all_in_cost: Option<f64>,
     best_edge: Option<f64>,
-    positive_ev_depth_shares: f64,
-    positive_ev_depth_usdc: f64,
     weighted_avg_price: Option<f64>,
     max_acceptable_price: Option<f64>,
     order_price: Option<Decimal>,
@@ -2666,16 +2656,16 @@ struct EdgeSummary {
     order_notional_usdc: Option<Decimal>,
 }
 
-fn summarize_maker_bid(
+fn summarize_maker_limit(
     runtime: &AssetRuntime,
     cell: &RuntimeCell,
-    best_bid: &PriceLevel,
+    limit_price: Decimal,
     required_edge: f64,
     order_cap_usdc: f64,
 ) -> Option<EdgeSummary> {
     let mut summary = EdgeSummary::default();
 
-    let price = best_bid.price.normalize();
+    let price = limit_price.normalize();
     let price_f64 = price.to_f64()?;
     let fee = 0.0;
     let all_in_cost = price_f64;
@@ -2698,11 +2688,6 @@ fn summarize_maker_bid(
     let notional = (size_shares * price)
         .trunc_with_scale(ORDER_NOTIONAL_SCALE)
         .normalize();
-    let size_shares_f64 = size_shares.to_f64()?;
-    let notional_f64 = notional.to_f64()?;
-
-    summary.positive_ev_depth_shares = size_shares_f64;
-    summary.positive_ev_depth_usdc = notional_f64;
     summary.weighted_avg_price = Some(price_f64);
     summary.max_acceptable_price = Some(price_f64);
     summary.order_price = Some(price);
@@ -2721,11 +2706,11 @@ mod tests {
     use rust_decimal::prelude::FromPrimitive;
 
     use crate::{
-        config::{LiveOrderType, PolymarketSignatureType, RuntimeConfig},
+        config::{PolymarketSignatureType, RuntimeConfig},
         domain::{
             asset::Asset,
             market::{MonitoredMarket, Outcome, OutcomeToken},
-            orderbook::{PriceLevel, TokenBook},
+            orderbook::TokenBook,
             time::MarketSlot,
         },
         polymarket::rtds::{PriceFeedSource, PriceTick},
@@ -2746,7 +2731,7 @@ mod tests {
         live_settlement_candidate_slots, live_settlement_lookback_slots,
         live_settlement_summary_text, momentum_overlay_side_for_value, monitor_remaining_bucket,
         pre_submit_matches_initial, required_edge_probability, slot_start_from_market_slug,
-        summarize_maker_bid, telegram_settlement_interval_duration,
+        summarize_maker_limit, telegram_settlement_interval_duration,
     };
 
     #[test]
@@ -2827,7 +2812,7 @@ mod tests {
     }
 
     #[test]
-    fn maker_bid_uses_p_win_lower_without_taker_fee() {
+    fn maker_limit_uses_p_win_lower_without_taker_fee() {
         let bundle = RuntimeBundle::load(
             std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("runtime/wiggler-prod-v1"),
         )
@@ -2837,13 +2822,10 @@ mod tests {
             .find_cell(60, VolBin::Low, SideLeading::UpLeading, 2.5)
             .unwrap();
 
-        let summary = summarize_maker_bid(
+        let summary = summarize_maker_limit(
             runtime,
             cell,
-            &PriceLevel {
-                price: Decimal::new(80, 2),
-                size: Decimal::new(10, 0),
-            },
+            Decimal::new(80, 2),
             runtime.min_edge_probability(),
             25.0,
         )
@@ -2852,28 +2834,24 @@ mod tests {
         assert_eq!(summary.best_fee, Some(0.0));
         assert!((summary.best_all_in_cost.unwrap() - 0.80).abs() < 0.000001);
         assert!(summary.best_edge.unwrap() > runtime.min_edge_probability());
-        assert_eq!(summary.positive_ev_depth_shares, 31.25);
-        assert_eq!(summary.positive_ev_depth_usdc, 25.0);
         assert_eq!(summary.weighted_avg_price, Some(0.80));
         assert_eq!(summary.max_acceptable_price, Some(0.80));
         assert_eq!(summary.order_price, Some(Decimal::new(80, 2)));
         assert_eq!(summary.order_size_shares, Some(Decimal::new(3125, 2)));
+        assert_eq!(summary.order_notional_usdc, Some(Decimal::new(25, 0)));
     }
 
     #[test]
-    fn maker_bid_rejects_level_that_only_raw_p_win_would_accept() {
+    fn maker_limit_rejects_price_that_only_raw_p_win_would_accept() {
         let (runtime, cell) = btc_runtime_and_cell();
         assert!(cell.p_win > cell.p_win_lower);
 
-        let summary = summarize_maker_bid(
+        let summary = summarize_maker_limit(
             runtime,
             cell,
-            &PriceLevel {
-                price: Decimal::from_f64(cell.p_win - runtime.min_edge_probability())
-                    .unwrap()
-                    .trunc_with_scale(4),
-                size: Decimal::new(10, 0),
-            },
+            Decimal::from_f64(cell.p_win - runtime.min_edge_probability())
+                .unwrap()
+                .trunc_with_scale(4),
             runtime.min_edge_probability(),
             25.0,
         )
@@ -2881,27 +2859,24 @@ mod tests {
 
         assert!(cell.p_win - summary.best_all_in_cost.unwrap() >= runtime.min_edge_probability());
         assert!(summary.best_edge.unwrap() < runtime.min_edge_probability());
-        assert_eq!(summary.positive_ev_depth_shares, 0.0);
         assert_eq!(summary.order_price, None);
+        assert_eq!(summary.order_size_shares, None);
     }
 
     #[test]
-    fn maker_bid_respects_order_cap() {
+    fn maker_limit_sizes_from_notional_cap() {
         let (runtime, cell) = btc_runtime_and_cell();
-        let summary = summarize_maker_bid(
+        let summary = summarize_maker_limit(
             runtime,
             cell,
-            &PriceLevel {
-                price: Decimal::new(80, 2),
-                size: Decimal::new(10, 0),
-            },
+            Decimal::new(80, 2),
             runtime.min_edge_probability(),
             10.0,
         )
         .unwrap();
 
-        assert_eq!(summary.positive_ev_depth_shares, 12.5);
-        assert_eq!(summary.positive_ev_depth_usdc, 10.0);
+        assert_eq!(summary.order_size_shares, Some(Decimal::new(125, 1)));
+        assert_eq!(summary.order_notional_usdc, Some(Decimal::new(10, 0)));
         assert_eq!(summary.max_acceptable_price, Some(0.80));
     }
 
@@ -3379,10 +3354,11 @@ mod tests {
     }
 
     #[test]
-    fn fak_no_match_is_retryable_no_fill() {
+    fn post_only_cross_is_retryable_no_fill() {
         assert!(is_retryable_no_fill_error(
-            "Status: error(400 Bad Request) making POST call to /order with {\"error\":\"no orders found to match with FAK order\"}"
+            "Status: error(400 Bad Request) making POST call to /order with {\"error\":\"invalid_post_only_order\"}"
         ));
+        assert!(is_retryable_no_fill_error("post-only order would cross"));
         assert!(!is_retryable_no_fill_error(
             "Status: error(401 Unauthorized) making GET call to /data/orders with {\"error\":\"Unauthorized/Invalid api key\"}"
         ));
@@ -3672,7 +3648,6 @@ mod tests {
             tradable_assets: vec![Asset::Btc, Asset::Eth, Asset::Sol, Asset::Xrp, Asset::Doge],
             min_order_usdc: 1.0,
             max_order_usdc: 25.0,
-            live_order_type: LiveOrderType::MakerPostOnly,
             evaluation_interval: Duration::from_millis(1_000),
             candle_rest_sync_interval: Duration::from_millis(60_000),
             log_evaluations: false,
@@ -3727,10 +3702,8 @@ mod tests {
             best_ask: Some(0.82),
             best_ask_size: Some(100.0),
             weighted_avg_price: Some(0.8),
-            best_fee: Some(0.01),
-            best_all_in_cost: Some(0.81),
-            positive_ev_depth_shares: 12.5,
-            positive_ev_depth_usdc: 10.0,
+            best_fee: Some(0.0),
+            best_all_in_cost: Some(0.8),
             expected_fill_price: Some(0.8),
             estimated_payout_usdc: Some(12.5),
             estimated_profit_usdc: Some(2.5),

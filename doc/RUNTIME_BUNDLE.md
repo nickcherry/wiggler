@@ -68,8 +68,8 @@ The evaluator skips when data is missing or stale, the market is outside the
 regular 60-240 second trading window, the price is too close to the line, no
 runtime cell matches, the last-60-second price path is retracing against the
 leading side, the momentum overlay strongly favors the opposite side, max path
-lead is unavailable, or the current best bid has insufficient edge. As an
-explicit live experiment, 30-59 seconds remaining maps to the runtime's
+lead is unavailable, or the current maker limit price has insufficient edge. As
+an explicit live experiment, 30-59 seconds remaining maps to the runtime's
 60-second bucket only when stricter final-window gates pass: at least 10 bps
 from the line, an additional 0.01 required probability edge, and a 10 USDC
 effective order cap.
@@ -80,13 +80,17 @@ so far in the current 5-minute market, the evaluator adds a 0.005 probability
 edge penalty before evaluating the maker bid.
 
 Entry costs are applied at runtime, not inside the probability grid. Live and
-shadow entries are evaluated as maker bids, so the entry cost is the current
-best bid with zero maker fee:
+shadow entries are evaluated as maker bids at the current best-bid price, so
+the entry cost is the chosen maker limit with zero maker fee:
 
 ```text
 all_in_cost = best_bid
 edge = p_win_lower - all_in_cost
 ```
+
+Order size is separate from book depth. Once the maker price passes the edge
+gate, shares are sized from Wiggler's notional caps divided by that limit
+price.
 
 The generated bundle still records `fee.taker_fee_rate = 0.072` for historical
 taker analysis and bundle provenance, but live entry gating does not subtract

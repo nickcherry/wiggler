@@ -35,6 +35,8 @@ Live trading must remain explicit and fail closed:
 - live orders are buy-only, post-only GTD limit orders priced at the current
   best bid; Polymarket rejects them rather than taking liquidity if the book
   moves through the limit
+- live order size is derived from the configured notional caps and selected
+  limit price, not from current best-bid depth
 - the evaluator reruns immediately before submit
 - any existing local or remote market exposure blocks another order
 - live order attempts and responses are logged and sent to Telegram when
