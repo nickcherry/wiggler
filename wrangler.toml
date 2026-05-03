@@ -1,0 +1,16 @@
+# Cloudflare Worker config for the training:distributions dashboard.
+#
+# We don't ship a Worker script — just a directory of static assets that
+# Wrangler serves directly. The directory is populated by
+# `deployTrainingDashboard.ts` (called when `--deploy` is passed to the
+# CLI command, or when invoked manually via `bun alea training:distributions
+# --deploy`). The latest dashboard is copied in as `index.html`; everything
+# else under `tmp/web/` is treated as additional static assets.
+#
+# Hosted at https://alea.nickcherryjiggz.workers.dev — the worker name
+# `alea` resolves to that subdomain on the workers.dev zone.
+name = "alea"
+compatibility_date = "2026-05-01"
+
+[assets]
+directory = "./tmp/web"

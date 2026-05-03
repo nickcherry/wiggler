@@ -24,6 +24,7 @@ import {
   computeSurvivalSnapshots,
   SNAPSHOT_PIPELINE_VERSION,
 } from "@alea/lib/training/computeSurvivalSnapshots";
+import { deployTrainingDashboard } from "@alea/lib/training/deployTrainingDashboard";
 import { loadMaxCandleTimestamp } from "@alea/lib/training/loadMaxCandleTimestamp";
 import { loadTrainingCandles } from "@alea/lib/training/loadTrainingCandles";
 import { applySurvivalFilters } from "@alea/lib/training/survivalFilters/applySurvivalFilters";
@@ -93,12 +94,23 @@ export const trainingDistributionsCommand = defineCommand({
           "Bypass the on-disk cache and recompute everything from scratch.",
         ),
     }),
+    defineFlagOption({
+      key: "deploy",
+      long: "--deploy",
+      schema: z
+        .boolean()
+        .default(false)
+        .describe(
+          "After rendering the dashboard, push it to the alea Cloudflare Worker via Wrangler.",
+        ),
+    }),
   ],
   examples: [
     "bun alea training:distributions",
     "bun alea training:distributions --assets btc,eth",
     "bun alea training:distributions --no-open",
     "bun alea training:distributions --no-cache",
+    "bun alea training:distributions --deploy --no-open",
   ],
   output:
     "Prints per-asset row counts and the paths of the HTML + JSON artifacts.",
@@ -190,6 +202,25 @@ export const trainingDistributionsCommand = defineCommand({
 
     if (!options.noOpen) {
       openHtmlOnDarwin({ path: htmlPath });
+    }
+
+    if (options.deploy) {
+      const repoRoot = resolvePath(import.meta.dir, "../../..");
+      const webDir = resolvePath(repoRoot, "tmp/web");
+      io.writeStdout(`\n${pc.bold("deploying")} ${pc.dim("to alea worker")}\n`);
+      try {
+        const { url } = await deployTrainingDashboard({
+          htmlPath,
+          webDir,
+          cwd: repoRoot,
+          onLog: (line) => io.writeStdout(pc.dim("  wrangler ") + line + "\n"),
+        });
+        io.writeStdout(`${pc.green("deployed")} ${pc.dim(url)}\n`);
+      } catch (err) {
+        io.writeStdout(
+          `${pc.red("deploy failed:")} ${err instanceof Error ? err.message : String(err)}\n`,
+        );
+      }
     }
   },
 });

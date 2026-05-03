@@ -1,4 +1,5 @@
 import type {
+  SurvivalRemainingMinutes,
   SurvivalSnapshot,
   SurvivalSnapshotContext,
 } from "@alea/lib/training/computeSurvivalSnapshots";
@@ -8,10 +9,9 @@ import type {
 } from "@alea/lib/training/types";
 
 /**
- * Result of classifying a single snapshot into one half of a binary
- * filter:
+ * Result of classifying a single snapshot for a binary filter:
  *
- *   - `true`/`false` — snapshot belongs to that side of the split
+ *   - `true`/`false` — snapshot belongs to that side of the split.
  *   - `"skip"` — snapshot lacks the lookback context this filter needs
  *     (e.g. very early in the series). Skipped snapshots count toward
  *     `snapshotsSkipped` in the filter summary but never toward either
@@ -19,38 +19,80 @@ import type {
  */
 export type SurvivalFilterDecision = boolean | "skip";
 
-/**
- * A binary context filter on the survival surface. The framework runs one
- * pass over the snapshot stream, calls `classify` per snapshot, and
- * accumulates separate buckets for the `true` and `false` halves. The
- * resulting `SurvivalFilterResult` is rendered as one section of the
- * dashboard with the same chart + table treatment as the baseline.
- *
- * Adding a new filter is: implement this interface, register it.
- */
+// ----------------------------------------------------------------
+// SurvivalFilter — the canonical interface every filter implements.
+//
+// Adding a new filter is one file under `survivalFilters/` exporting an
+// object that satisfies this type, plus a single line in the registry.
+// The runner, the cache layer, the renderer all consume filters
+// generically through this interface — they never special-case a
+// particular filter id. Keep the metadata fields tight; rich
+// per-section copy belongs in `description`.
+// ----------------------------------------------------------------
+
 export type SurvivalFilter = {
-  readonly id: string;
-  readonly displayName: string;
-  readonly description: string;
-  readonly trueLabel: string;
-  readonly falseLabel: string;
   /**
-   * Bumps when the classifier logic changes in a way that would alter
-   * the produced surfaces — different threshold, new tie-break, etc.
-   * Cache keys mix this in so a version bump invalidates only that
-   * filter's cached results, not the whole dashboard.
+   * Stable, machine-readable identifier (snake_case, no spaces). Used as
+   * the cache filename component and the JSON payload field key. Don't
+   * change it after a filter is in production — the cache will go stale
+   * silently and the dashboard's UI state (selected tab, etc.) won't
+   * carry over.
+   */
+  readonly id: string;
+
+  /**
+   * Human-readable section title for the dashboard.
+   */
+  readonly displayName: string;
+
+  /**
+   * One-or-two-sentence prose explanation of what the split means.
+   * Rendered verbatim under the section title.
+   */
+  readonly description: string;
+
+  /**
+   * Label for the "filter classified true" half. Shown in the chart
+   * legend, summary line, and (when surfaced) tab badges.
+   */
+  readonly trueLabel: string;
+
+  /**
+   * Label for the "filter classified false" half. Same surfaces as
+   * `trueLabel`.
+   */
+  readonly falseLabel: string;
+
+  /**
+   * Bumps when `classify` produces materially different output for the
+   * same input — different tie-break, different threshold, a corrected
+   * bug. Cache keys mix this in so a version bump invalidates only this
+   * filter's cached results, not the whole dashboard. Start at 1; the
+   * convention is monotonic positive integers.
    */
   readonly version: number;
+
+  /**
+   * Pure classifier. The `context` argument is the snapshot's lookback
+   * context (prev 1m direction, MA-20, etc.); it's also accessible as
+   * `snapshot.context` but is passed separately so closures over context
+   * fields stay easy to write. Must return `"skip"` when the lookback
+   * data the filter needs isn't present.
+   */
   readonly classify: (
     snapshot: SurvivalSnapshot,
     context: SurvivalSnapshotContext,
   ) => SurvivalFilterDecision;
 };
 
+// ----------------------------------------------------------------
+// Per-asset rolled-up filter result + summary.
+// ----------------------------------------------------------------
+
 /**
- * Per-filter rolled-up result. The baseline surface is duplicated into
- * each result so the renderer can build delta cells without maintaining
- * its own join from `(asset, filter)` back to the baseline.
+ * Per-asset rolled-up filter result. The baseline surface is duplicated
+ * into each result so the renderer can build delta cells without
+ * maintaining its own join from `(asset, filter)` back to the baseline.
  */
 export type SurvivalFilterResult = {
   readonly id: string;
@@ -65,46 +107,48 @@ export type SurvivalFilterResult = {
 };
 
 /**
- * Summary fields for a filter, designed to feed both the per-section
- * verdict header and (later) a global ranking. Everything except the
- * `score`/`verdict` pair is concrete and populated for v1; those two are
- * `null` until a rubric is specified, and the UI omits them when null.
+ * Summary metrics for one filter against the baseline. Designed to feed
+ * both the per-section header line and (later) a global filter ranking.
+ *
+ * All bp-delta fields use the convention "negative = good": a more
+ * negative number means the filter reaches the same win-rate target
+ * with less distance from the line, which is exactly the
+ * point-of-no-return signal we trade on.
  */
 export type SurvivalFilterSummary = {
-  /** Total snapshots the filter saw (true + false + skipped). */
   readonly snapshotsTotal: number;
-  /** Snapshots classified as belonging to the `true` half. */
   readonly snapshotsTrue: number;
-  /** Snapshots classified as belonging to the `false` half. */
   readonly snapshotsFalse: number;
-  /** Snapshots the filter declined to classify (missing lookback, etc.). */
   readonly snapshotsSkipped: number;
-  /**
-   * Share of *classified* snapshots (true + false, ignoring skipped) that
-   * landed in the `true` half. A filter that fires on, say, 12% of
-   * windows tells you whether the improvement it shows is rare-event or
-   * everyday signal.
-   */
+  /** Share of classified snapshots in each half (true + false sum to 1). */
   readonly occurrenceTrue: number;
-  /** Share of classified snapshots in the `false` half. */
   readonly occurrenceFalse: number;
   /**
    * Best (most negative) bp delta between the `true` half and baseline
    * across all `(remainingMinutes, target win rate)` cells where both
-   * sides have a value above the sample-count floor. Negative = the
-   * filter reaches the target with less distance than baseline (good).
-   * `null` when no comparable cell exists.
+   * sides clear the sample-count floor. `null` when no comparable cell
+   * exists.
    */
   readonly bestImprovementBpTrue: number | null;
   /** Same as above for the `false` half. */
   readonly bestImprovementBpFalse: number | null;
   /**
-   * Reserved for a later rubric. Higher = more useful.
+   * Per-remaining-minutes best improvement for each side. The renderer
+   * uses these to label the time-bucket tabs and to pick which tab to
+   * default to (the bucket whose `min(true, false)` is most negative).
    */
+  readonly bestImprovementByRemaining: Readonly<
+    Record<
+      SurvivalRemainingMinutes,
+      {
+        readonly trueBp: number | null;
+        readonly falseBp: number | null;
+      }
+    >
+  >;
+  /** Reserved for a later rubric. Higher = more useful. */
   readonly score: number | null;
-  /**
-   * Reserved for a later rubric. Categorical readout.
-   */
+  /** Reserved for a later rubric. Categorical readout. */
   readonly verdict: "strong" | "promising" | "neutral" | "weak" | "thin" | null;
 };
 

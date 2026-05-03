@@ -140,6 +140,16 @@ export type SurvivalFilterSummaryPayload = {
   readonly occurrenceFalse: number;
   readonly bestImprovementBpTrue: number | null;
   readonly bestImprovementBpFalse: number | null;
+  /**
+   * Per-remaining-minutes best improvement for each half. Powers the
+   * dashboard's time-bucket tab badges and the default-tab selection.
+   */
+  readonly bestImprovementByRemaining: Readonly<
+    Record<
+      SurvivalRemainingMinutes,
+      { readonly trueBp: number | null; readonly falseBp: number | null }
+    >
+  >;
   readonly score: number | null;
   readonly verdict: "strong" | "promising" | "neutral" | "weak" | "thin" | null;
 };

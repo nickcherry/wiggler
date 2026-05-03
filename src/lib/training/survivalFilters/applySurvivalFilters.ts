@@ -22,7 +22,7 @@ import type {
  * Kept here (not imported from the renderer) so the compute layer has no
  * dependency on the rendering layer.
  */
-const SUMMARY_MIN_SAMPLES = 500;
+const SUMMARY_MIN_SAMPLES = 300;
 
 /**
  * Win-rate targets the summary scans for the best-improvement metric.
@@ -334,6 +334,24 @@ function computeSummary({
   const occurrenceFalse = classified === 0 ? 0 : counts.falseCount / classified;
   const trueThresholds = computeThresholdMatrix({ surface: whenTrue });
   const falseThresholds = computeThresholdMatrix({ surface: whenFalse });
+  const bestImprovementByRemaining = {} as Record<
+    SurvivalRemainingMinutes,
+    { trueBp: number | null; falseBp: number | null }
+  >;
+  for (const remaining of REMAINING_VALUES) {
+    bestImprovementByRemaining[remaining] = {
+      trueBp: bestImprovementAtRemaining({
+        baseline: baselineThresholds,
+        half: trueThresholds,
+        remaining,
+      }),
+      falseBp: bestImprovementAtRemaining({
+        baseline: baselineThresholds,
+        half: falseThresholds,
+        remaining,
+      }),
+    };
+  }
   return {
     snapshotsTotal: classified + counts.skipCount,
     snapshotsTrue: counts.trueCount,
@@ -349,9 +367,44 @@ function computeSummary({
       baseline: baselineThresholds,
       half: falseThresholds,
     }),
+    bestImprovementByRemaining,
     score: null,
     verdict: null,
   };
+}
+
+function bestImprovementAtRemaining({
+  baseline,
+  half,
+  remaining,
+}: {
+  readonly baseline: ThresholdMatrix;
+  readonly half: ThresholdMatrix;
+  readonly remaining: SurvivalRemainingMinutes;
+}): number | null {
+  const baseInner = baseline.get(remaining);
+  const halfInner = half.get(remaining);
+  if (baseInner === undefined || halfInner === undefined) {
+    return null;
+  }
+  let best: number | null = null;
+  for (const target of SUMMARY_TARGET_WIN_RATES) {
+    const baseBp = baseInner.get(target);
+    const halfBp = halfInner.get(target);
+    if (
+      baseBp === undefined ||
+      baseBp === null ||
+      halfBp === undefined ||
+      halfBp === null
+    ) {
+      continue;
+    }
+    const delta = halfBp - baseBp;
+    if (best === null || delta < best) {
+      best = delta;
+    }
+  }
+  return best;
 }
 
 function bestImprovement({

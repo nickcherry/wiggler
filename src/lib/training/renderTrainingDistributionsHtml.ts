@@ -23,39 +23,30 @@ const bodyColor = aleaChartTokens.bodyColor;
 const wickColor = aleaChartTokens.wickColor;
 
 /**
- * Percentiles to render in the upper-tail table. Chart shows all 101 points
- * regardless; the table is a focused readout of the right half of the
- * distribution where threshold decisions get made.
- */
-const tableTailPercentiles: readonly number[] = [
-  95, 90, 85, 80, 75, 70, 65, 60, 55, 50,
-];
-
-/**
  * Minimum snapshot count required for a `(remaining, distance)` survival
- * bucket to be considered trustworthy: rendered as a chart point and
- * eligible to fill a threshold-table cell. Buckets below this floor are
- * hidden from the chart and shown as "—" in the table. 500 is conservative
- * enough given a few years of 1m candles (~100k+ snapshots per
- * remaining-minutes bucket per asset) without hiding too much useful data.
+ * bucket to be considered trustworthy: rendered as a chart point with a
+ * filled marker. Buckets below this floor are hidden as gaps. Tuned at
+ * 300 — conservative enough given a few years of 1m candles (~100k+
+ * snapshots per remaining-minutes bucket per asset) without hiding the
+ * mid-tail data we actually want to read.
  */
-const SURVIVAL_MIN_SAMPLES = 500;
+const SURVIVAL_MIN_SAMPLES = 300;
 
 /**
- * x-axis range for the survival chart, in basis points. Matches the upper
- * end of the body/wick CDF so the two charts read at the same visual
- * scale.
+ * Hard cap on the x-axis range for the survival chart, in basis points.
+ * The chart auto-fits to the largest distance any line actually reaches
+ * (after the sample-count floor cuts off the noisy tail) plus a small
+ * pad, so most asset/filter combinations end well below this — the cap
+ * is just a sanity ceiling.
  */
 const SURVIVAL_MAX_DISTANCE_BP = 75;
 
 /**
- * Target win rates (percent) for the threshold-table columns. Each cell
- * is the minimum distance bucket whose win rate meets/exceeds the target
- * while also clearing `SURVIVAL_MIN_SAMPLES`.
+ * Padding (bp) added to the right edge after auto-fitting the chart to
+ * the data. Keeps the rightmost line away from the axis without leaving
+ * the wasteland of empty space we had at the fixed 75bp cap.
  */
-const SURVIVAL_TARGET_WIN_RATES: readonly number[] = [
-  60, 65, 70, 75, 80, 85, 90, 95,
-];
+const SURVIVAL_X_AXIS_PAD_BP = 2;
 
 /**
  * Color per remaining-minutes line. Cooler/blue for 4m-left (far from
@@ -108,9 +99,8 @@ type DashboardAssetSlice = {
 /**
  * Chart-ready data for one filter section. Three densified surfaces
  * (baseline / whenTrue / whenFalse) sharing the same `distancesBp`
- * x-axis. The filter table reads the same `winRate` arrays plus the
- * pre-computed thresholds for delta arrows. `summary` powers the
- * per-section header line above the chart grid.
+ * x-axis, plus per-remaining best-improvement metrics that drive the
+ * tab badges and the default-selected tab.
  */
 type FilterSlice = {
   readonly id: string;
@@ -122,18 +112,6 @@ type FilterSlice = {
   readonly baseline: FilterSurfaceArrays;
   readonly whenTrue: FilterSurfaceArrays;
   readonly whenFalse: FilterSurfaceArrays;
-  /**
-   * Threshold matrix per surface — minimum distance (bp) at which the
-   * surface's win rate first meets each target win rate, subject to the
-   * sample-count floor. `null` for "never reaches", `"thin"` for
-   * "below sample-count floor everywhere within range". Indexed by
-   * remaining minutes → target → cell value.
-   */
-  readonly thresholds: {
-    readonly baseline: ThresholdMatrixSerialized;
-    readonly whenTrue: ThresholdMatrixSerialized;
-    readonly whenFalse: ThresholdMatrixSerialized;
-  };
   readonly summary: {
     readonly snapshotsTrue: number;
     readonly snapshotsFalse: number;
@@ -142,7 +120,21 @@ type FilterSlice = {
     readonly occurrenceFalse: number;
     readonly bestImprovementBpTrue: number | null;
     readonly bestImprovementBpFalse: number | null;
+    readonly bestImprovementByRemaining: Readonly<
+      Record<
+        SurvivalRemainingMinutes,
+        { readonly trueBp: number | null; readonly falseBp: number | null }
+      >
+    >;
   };
+  /**
+   * Pre-picked best remaining-minutes bucket: the one whose
+   * `min(trueBp, falseBp)` improvement is most negative (i.e. the filter
+   * tightens the point of no return most). `4` is used as a fallback
+   * when no bucket has a measurable improvement, so the chart always
+   * has something to default to.
+   */
+  readonly defaultRemaining: SurvivalRemainingMinutes;
 };
 
 type FilterSurfaceArrays = Readonly<
@@ -153,12 +145,6 @@ type FilterSurfaceArrays = Readonly<
       readonly sampleCount: readonly number[];
     }
   >
->;
-
-type ThresholdCell = number | null | "thin";
-
-type ThresholdMatrixSerialized = Readonly<
-  Record<SurvivalRemainingMinutes, readonly ThresholdCell[]>
 >;
 
 /**
@@ -222,12 +208,6 @@ export function renderTrainingDistributionsHtml({
   );
   const seriesLabel = `${payload.series.source}-${payload.series.product} ${payload.series.timeframe}`;
   const generatedAt = formatGeneratedAt(payload.generatedAtMs);
-  const tableHeaderCells = tableTailPercentiles
-    .map((p) => `<th scope="col">p${p}</th>`)
-    .join("");
-  const survivalTableHeaderCells = SURVIVAL_TARGET_WIN_RATES.map(
-    (rate) => `<th scope="col">${rate}%</th>`,
-  ).join("");
   const survivalLegendItems = SURVIVAL_REMAINING_ORDER.map(
     (rem) =>
       `<span class="alea-legend-item"><span class="alea-legend-swatch" style="background:${SURVIVAL_REMAINING_COLORS[rem]}"></span>${rem}m left</span>`,
@@ -238,7 +218,7 @@ export function renderTrainingDistributionsHtml({
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Alea · Training · Candle Size Distributions</title>
+  <title>Alea · Training · Point-of-No-Return</title>
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/uplot@1.6.30/dist/uPlot.min.css" />
   <script src="https://cdn.jsdelivr.net/npm/uplot@1.6.30/dist/uPlot.iife.min.js" charset="utf-8"></script>
   ${aleaDesignSystemHead()}
@@ -289,31 +269,12 @@ export function renderTrainingDistributionsHtml({
       font-size: 12px;
     }
 
-    /* Percentile table: dense numeric layout. Min-width keeps the columns
-       readable on narrow viewports (the wrap scrolls horizontally). */
-    table.percentiles { min-width: 970px; table-layout: fixed; }
-    table.percentiles th:first-child,
-    table.percentiles td:first-child { width: 90px; }
-    table.percentiles th, table.percentiles td { white-space: nowrap; }
-    table.percentiles tbody tr.body th { color: ${bodyColor}; }
-    table.percentiles tbody tr.wick th { color: ${wickColor}; }
-
     /* Push the candle-count meta to the right edge of the card header. */
     .alea-card-meta-end { margin-left: auto; }
 
-    /* Numeric cells use the display serif; gives the readout a slight
-       ledger feel without sacrificing tabular-nums alignment. */
-    table.percentiles tbody td {
-      font-family: var(--alea-font-display);
-      font-weight: 500;
-      font-size: 16px;
-      letter-spacing: 0.01em;
-      color: var(--alea-text);
-    }
-
-    /* Survival section: a second chart + table inside the same asset
-       panel. Spacing matches the body/wick block above so the two read as
-       siblings rather than a new card. */
+    /* Survival section: a chart inside the asset panel. Spacing matches
+       the surrounding blocks so the section reads as a sibling rather
+       than a new card. */
     .survival-section { display: flex; flex-direction: column; gap: 14px; }
 
     .survival-helper {
@@ -335,33 +296,10 @@ export function renderTrainingDistributionsHtml({
       background: rgba(15, 22, 16, 0.4);
     }
 
-    /* Threshold table styling — matches the percentile table conventions
-       but its own min-width since the column count is different. */
-    table.survival-thresholds { min-width: 760px; table-layout: fixed; }
-    table.survival-thresholds th:first-child,
-    table.survival-thresholds td:first-child { width: 110px; }
-    table.survival-thresholds th, table.survival-thresholds td { white-space: nowrap; }
-    table.survival-thresholds tbody td {
-      font-family: var(--alea-font-display);
-      font-weight: 500;
-      font-size: 16px;
-      letter-spacing: 0.01em;
-      color: var(--alea-text);
-    }
-    table.survival-thresholds tbody td.empty {
-      color: var(--alea-text-subtle);
-      font-family: var(--alea-font-sans);
-      font-weight: 400;
-      font-size: 14px;
-    }
-
-    /* Filter overlay sections — one per binary filter, rendered below the
-       baseline survival section. Same visual language as the survival
-       section but with small-multiples charts (one per remaining-minutes
-       bucket) and a 12-row threshold table that includes deltas vs
-       baseline. */
+    /* Filter overlay sections — one per binary filter. Same visual
+       language as the survival section but with a remaining-minutes tab
+       row above a single full-size chart. */
     .filter-sections-host { display: flex; flex-direction: column; gap: 32px; }
-
     .filter-section { display: flex; flex-direction: column; gap: 14px; }
 
     .filter-summary-line {
@@ -371,97 +309,87 @@ export function renderTrainingDistributionsHtml({
       font-variant-numeric: tabular-nums;
       letter-spacing: 0.02em;
     }
-
     .filter-summary-line .filter-summary-pill {
       display: inline-block;
       margin-right: 14px;
     }
-
     .filter-summary-line .filter-summary-key {
       color: var(--alea-text-subtle);
       margin-right: 6px;
     }
-
     .filter-summary-line .filter-summary-value {
       color: var(--alea-text);
       font-weight: 500;
     }
-
     .filter-summary-line .filter-summary-good { color: var(--alea-green); }
     .filter-summary-line .filter-summary-bad { color: var(--alea-red); }
 
-    .filter-chart-grid {
-      display: grid;
-      grid-template-columns: 1fr 1fr;
-      gap: 14px;
+    /* Remaining-minutes tab row above each filter chart. Compact
+       segmented-control feel: subtle background, antique-gold underline
+       on the active tab to match the asset tabs at the top of the page. */
+    .filter-tabs {
+      display: inline-flex;
+      gap: 0;
+      align-self: flex-start;
+      border: 1px solid var(--alea-border-muted);
+      border-radius: 8px;
+      overflow: hidden;
+      background: linear-gradient(
+        180deg,
+        rgba(16, 23, 15, 0.92),
+        rgba(8, 10, 8, 0.92)
+      );
     }
-
-    @media (max-width: 1080px) {
-      .filter-chart-grid { grid-template-columns: 1fr; }
-    }
-
-    .filter-chart-cell {
-      display: flex;
-      flex-direction: column;
-      gap: 6px;
-    }
-
-    .filter-chart-cell-label {
-      color: var(--alea-text-muted);
-      font-size: 11.5px;
-      font-weight: 600;
-      letter-spacing: 0.18em;
-      text-transform: uppercase;
-      padding-left: 4px;
-    }
-
-    .filter-chart-cell .chart-host {
-      height: 220px;
-      min-height: 220px;
-      max-height: 220px;
-    }
-
-    /* Filter threshold table: same general look as survival-thresholds but
-       with grouping borders between remaining-minutes triples and styled
-       split rows (baseline ivory, with-filter green tint, against red
-       tint). */
-    table.filter-thresholds { min-width: 760px; table-layout: fixed; }
-    table.filter-thresholds th:first-child,
-    table.filter-thresholds td:first-child { width: 200px; }
-    table.filter-thresholds th, table.filter-thresholds td { white-space: nowrap; }
-    table.filter-thresholds tbody td {
-      font-family: var(--alea-font-display);
-      font-weight: 500;
-      font-size: 15px;
-      letter-spacing: 0.01em;
-      color: var(--alea-text);
-    }
-    table.filter-thresholds tbody tr.row-baseline th {
-      color: var(--alea-text-muted);
-    }
-    table.filter-thresholds tbody tr.row-when-true th { color: var(--alea-green); }
-    table.filter-thresholds tbody tr.row-when-false th { color: var(--alea-red); }
-    table.filter-thresholds tbody tr.row-group-end td,
-    table.filter-thresholds tbody tr.row-group-end th {
-      border-bottom: 1px solid var(--alea-border-muted);
-    }
-    table.filter-thresholds tbody td.empty,
-    table.filter-thresholds tbody td.thin {
+    .filter-tab {
+      padding: 8px 14px;
+      border: 0;
+      background: transparent;
       color: var(--alea-text-subtle);
       font-family: var(--alea-font-sans);
-      font-weight: 400;
-      font-size: 13px;
+      font-size: 11.5px;
+      font-weight: 600;
+      letter-spacing: 0.16em;
+      text-transform: uppercase;
+      cursor: pointer;
+      border-right: 1px solid var(--alea-border-muted);
+      transition: color 120ms ease, background-color 120ms ease;
+      outline: none;
+      font-variant-numeric: tabular-nums;
     }
-    table.filter-thresholds tbody td .delta-good { color: var(--alea-green); margin-left: 6px; font-size: 12.5px; }
-    table.filter-thresholds tbody td .delta-bad { color: var(--alea-red); margin-left: 6px; font-size: 12.5px; }
-    table.filter-thresholds tbody td .delta-flat { color: var(--alea-text-subtle); margin-left: 6px; font-size: 12.5px; }
+    .filter-tab:last-child { border-right: 0; }
+    .filter-tab:hover,
+    .filter-tab:focus-visible {
+      color: var(--alea-text);
+      background: rgba(215, 170, 69, 0.04);
+    }
+    .filter-tab:focus-visible {
+      outline: 1px solid var(--alea-border-strong);
+      outline-offset: -3px;
+    }
+    .filter-tab.active {
+      color: var(--alea-gold);
+      background: rgba(215, 170, 69, 0.06);
+      box-shadow: inset 0 -2px 0 0 var(--alea-gold);
+    }
+    .filter-tab .filter-tab-delta {
+      margin-left: 8px;
+      font-size: 11px;
+      font-weight: 500;
+      letter-spacing: 0.04em;
+      text-transform: none;
+      color: var(--alea-text-subtle);
+    }
+    .filter-tab .filter-tab-delta-good { color: var(--alea-green); }
+    .filter-tab .filter-tab-delta-bad { color: var(--alea-red); }
+    .filter-tab.active .filter-tab-delta-good { color: var(--alea-green); }
+    .filter-tab.active .filter-tab-delta-bad { color: var(--alea-red); }
   </style>
 </head>
 <body>
   <div class="alea-shell">
     <header class="alea-header">
       <div class="alea-brand-row">${aleaBrandMark()}</div>
-      <h1 class="alea-title">Training · Candle Size Distributions</h1>
+      <h1 class="alea-title">Training · Point-of-No-Return</h1>
       <p class="alea-subtitle">${escapeHtml(seriesLabel)}<span class="sep">·</span>generated ${escapeHtml(generatedAt)}</p>
     </header>
     <main class="alea-main">
@@ -494,23 +422,12 @@ export function renderTrainingDistributionsHtml({
             <div id="survival-chart" class="chart-host"><div class="chart-loading">Loading chart…</div></div>
             <div id="survival-tooltip" class="alea-tooltip"></div>
           </div>
-          <div class="alea-table-wrap">
-            <table class="alea-table survival-thresholds">
-              <thead>
-                <tr>
-                  <th scope="col"></th>
-                  ${survivalTableHeaderCells}
-                </tr>
-              </thead>
-              <tbody id="survival-tbody"></tbody>
-            </table>
-          </div>
         </div>
 
         <div class="alea-section-rule">
-          <h2>Simple Filter Overlays</h2>
+          <h2>Filter Overlays</h2>
         </div>
-        <p class="survival-helper">Each filter splits the same survival snapshots in two, so we can ask "does this slice of context tighten the point of no return?". Mini-charts compare baseline vs filter-true vs filter-false at each remaining-time bucket; the table below shows where each split reaches the same win-rate targets, with deltas from baseline. Lower is better.</p>
+        <p class="survival-helper">Each filter splits the same survival snapshots in two, so we can ask "does this slice of context tighten the point of no return?". The chart compares baseline vs filter-true vs filter-false at one remaining-time bucket — switch buckets with the tabs above each chart. The default tab is the bucket where the filter most strongly tightens the threshold (negative deltas in the badges = good).</p>
 
         <div class="filter-sections-host" id="filter-sections-host"></div>
 
@@ -528,28 +445,15 @@ export function renderTrainingDistributionsHtml({
             <div id="chart-tooltip" class="alea-tooltip"></div>
           </div>
         </div>
-        <div class="alea-table-wrap">
-          <table class="alea-table percentiles">
-            <thead>
-              <tr>
-                <th scope="col"></th>
-                ${tableHeaderCells}
-              </tr>
-            </thead>
-            <tbody></tbody>
-          </table>
-        </div>
       </section>
     </main>
   </div>
   <script>
     const slices = ${JSON.stringify(slices)};
-    const tablePs = ${JSON.stringify(tableTailPercentiles)};
     // Chart is a histogram: x = move size in bp, y = % of candles whose
     // size falls in that 1 bp bin. The bin range is sized to p99 of the
     // larger metric, so anything past it (the rare flash-crash tail) lives
-    // in the overflow slot of the histogram payload and isn't plotted —
-    // the table still surfaces p100 if you want it.
+    // in the overflow slot of the histogram payload and isn't plotted.
     const bodyColor = ${JSON.stringify(bodyColor)};
     const wickColor = ${JSON.stringify(wickColor)};
     // Translucent line-color fills for the two histogram series. Computed
@@ -561,8 +465,8 @@ export function renderTrainingDistributionsHtml({
     const chartTokens = ${JSON.stringify(aleaChartTokens)};
     const survivalRemainingOrder = ${JSON.stringify(SURVIVAL_REMAINING_ORDER)};
     const survivalRemainingColors = ${JSON.stringify(SURVIVAL_REMAINING_COLORS)};
-    const survivalTargetWinRates = ${JSON.stringify(SURVIVAL_TARGET_WIN_RATES)};
     const survivalMinSamples = ${SURVIVAL_MIN_SAMPLES};
+    const survivalXAxisPadBp = ${SURVIVAL_X_AXIS_PAD_BP};
 
     // Source values are in percent (e.g. 0.05 = 0.05%). Display in basis
     // points: 1% = 100 bp, rounded to the nearest integer. Same numbers,
@@ -571,13 +475,6 @@ export function renderTrainingDistributionsHtml({
       if (v == null || !Number.isFinite(v)) return "—";
       return Math.round(v * 100).toLocaleString() + " bp";
     };
-    // Table cells are CDF readouts ("p95 = ≤ N bp" reads as "95% of
-    // candles are at or below N bp"), so prefix the bp value with ≤. The
-    // null/non-finite path drops the prefix — "≤ —" looks broken.
-    const formatBipsCdf = (v) => {
-      if (v == null || !Number.isFinite(v)) return "—";
-      return "≤ " + Math.round(v * 100).toLocaleString() + " bp";
-    };
     // Histogram density axis: bin counts normalized to % of all candles.
     // Typical heights are in the 0.1–5% range so two decimal places gives
     // the tooltip useful resolution without going to noise.
@@ -585,6 +482,31 @@ export function renderTrainingDistributionsHtml({
       if (v == null || !Number.isFinite(v)) return "—";
       return v.toFixed(2) + "%";
     };
+
+    // Largest distance bucket index where any of the given y arrays still
+    // has a (finite) value. Returns the matching bp + a small pad so the
+    // rightmost line stays a few bp away from the axis. Falls back to
+    // the original axis cap if no point qualifies — keeps the chart
+    // sane on empty data.
+    function autoFitMaxBp({ xs, yArrays }) {
+      let maxIdx = -1;
+      for (const ys of yArrays) {
+        for (let i = ys.length - 1; i > maxIdx; i--) {
+          const v = ys[i];
+          if (v != null && Number.isFinite(v)) {
+            maxIdx = i;
+            break;
+          }
+        }
+      }
+      if (maxIdx < 0) {
+        return xs[xs.length - 1] != null ? xs[xs.length - 1] : 1;
+      }
+      const lastBp = xs[maxIdx] != null ? xs[maxIdx] : maxIdx;
+      const padded = lastBp + survivalXAxisPadBp;
+      const cap = xs[xs.length - 1] != null ? xs[xs.length - 1] + 1 : padded;
+      return Math.min(padded, cap);
+    }
 
     const tabsEl = document.getElementById("tabs");
     const titleEl = document.getElementById("asset-title");
@@ -600,23 +522,7 @@ export function renderTrainingDistributionsHtml({
     const survivalChartHost = document.getElementById("survival-chart");
     const survivalTooltipEl = document.getElementById("survival-tooltip");
     const survivalChartFrame = survivalChartHost.parentElement;
-    const survivalTbodyEl = document.getElementById("survival-tbody");
     let survivalChart = null;
-
-    // Rewrite the whole tbody on every call. We can't keep stable element
-    // references inside the rows (innerHTML replacement on a <tr> would
-    // detach any id we set on a child), so the tbody itself is the
-    // anchor and we re-emit its rows from scratch each time.
-    const tbodyEl = document.querySelector("table.percentiles tbody");
-    function renderTable(slice) {
-      if (!tbodyEl) return;
-      const cells = (key) => tablePs
-        .map((p) => '<td>' + formatBipsCdf(slice[key][p]) + '</td>')
-        .join("");
-      tbodyEl.innerHTML =
-        '<tr class="body"><th scope="row">body</th>' + cells("body") + '</tr>' +
-        '<tr class="wick"><th scope="row">range</th>' + cells("wick") + '</tr>';
-    }
 
     function chartHostError(msg) {
       chartHost.innerHTML = '<pre class="chart-error">' + msg + '</pre>';
@@ -776,7 +682,6 @@ export function renderTrainingDistributionsHtml({
     function renderSurvivalEmpty(message) {
       if (survivalChart) { survivalChart.destroy(); survivalChart = null; }
       survivalChartHost.innerHTML = '<div class="chart-loading">' + message + '</div>';
-      if (survivalTbodyEl) survivalTbodyEl.innerHTML = "";
       if (survivalMetaEl) survivalMetaEl.textContent = "";
     }
 
@@ -803,6 +708,10 @@ export function renderTrainingDistributionsHtml({
       const sampleArrays = survivalRemainingOrder.map(
         (rem) => survival.byRemaining[rem].sampleCount.slice(),
       );
+      // Auto-fit the x-axis to where data actually ends. The fixed-cap
+      // version left a ton of empty space on the right when even the
+      // longest line died out at ~30 bp.
+      const xMax = autoFitMaxBp({ xs: xs, yArrays: yArrays });
       const data = [xs].concat(yArrays);
       const series = [{}].concat(
         survivalRemainingOrder.map((rem) => ({
@@ -849,7 +758,7 @@ export function renderTrainingDistributionsHtml({
         legend: { show: false },
         padding: [16, 18, 8, 8],
         scales: {
-          x: { time: false },
+          x: { time: false, range: [0, xMax] },
           y: { range: [0, 100] },
         },
         cursor: {
@@ -904,31 +813,6 @@ export function renderTrainingDistributionsHtml({
       }
     }
 
-    function renderSurvivalTable(survival) {
-      if (!survivalTbodyEl) return;
-      let html = "";
-      for (const rem of survivalRemainingOrder) {
-        const winRate = survival.byRemaining[rem].winRate;
-        const sampleCount = survival.byRemaining[rem].sampleCount;
-        let row = '<tr><th scope="row">' + rem + 'm left</th>';
-        for (const target of survivalTargetWinRates) {
-          let cellBp = null;
-          for (let i = 0; i < winRate.length; i++) {
-            const wr = winRate[i];
-            if (wr == null) continue;
-            if (sampleCount[i] < survivalMinSamples) continue;
-            if (wr >= target) { cellBp = survival.distancesBp[i]; break; }
-          }
-          row += cellBp == null
-            ? '<td class="empty">—</td>'
-            : '<td>' + formatBp(cellBp) + '</td>';
-        }
-        row += '</tr>';
-        html += row;
-      }
-      survivalTbodyEl.innerHTML = html;
-    }
-
     function renderSurvival(slice) {
       const survival = slice.survival;
       if (!survival) {
@@ -939,20 +823,24 @@ export function renderTrainingDistributionsHtml({
         survivalMetaEl.textContent = survival.windowCount.toLocaleString() + " 5m windows";
       }
       renderSurvivalChart(survival);
-      renderSurvivalTable(survival);
     }
 
     // ----------------------------------------------------------------
-    // Filter sections: one per binary filter, each with a small-multiples
-    // grid of mini-charts (one per remaining-minutes bucket) plus a
-    // 12-row threshold table showing baseline vs filter-true vs
-    // filter-false with deltas.
+    // Filter sections: one per binary filter. Each section renders a
+    // single full-size chart at one remaining-minutes bucket, with a
+    // tab row above it for switching buckets. The default tab is the
+    // bucket where the filter most strongly tightens the point of no
+    // return. Tab badges show the per-bucket best improvement so the
+    // operator sees at a glance where the filter helps before clicking.
     // ----------------------------------------------------------------
 
     const filterColors = ${JSON.stringify(FILTER_COLORS)};
     const filterSectionsHost = document.getElementById("filter-sections-host");
-    // Track every mini-chart uPlot instance so the ResizeObserver and
+    // Track every filter-chart uPlot instance so the ResizeObserver and
     // window resize handler can poke them all when the viewport changes.
+    // Each entry also carries the filter slice + currently-selected
+    // remaining-minutes bucket so the tab click handler can replace the
+    // chart in place.
     const filterCharts = [];
 
     function clearFilterSections() {
@@ -969,112 +857,67 @@ export function renderTrainingDistributionsHtml({
       return pct < 10 ? pct.toFixed(1) + "%" : Math.round(pct) + "%";
     }
 
-    function formatBpDelta(filterBp, baselineBp) {
-      if (filterBp === null || filterBp === "thin") return "";
-      if (baselineBp === null || baselineBp === "thin") return "";
-      const delta = filterBp - baselineBp;
-      if (delta === 0) {
-        return ' <span class="delta-flat">·</span>';
-      }
-      if (delta < 0) {
-        return ' <span class="delta-good">↓' + Math.abs(delta) + '</span>';
-      }
-      return ' <span class="delta-bad">↑' + delta + '</span>';
+    function formatTabBadge(remainingEntry) {
+      // The tab badge surfaces "best improvement at this bucket" using
+      // the most-negative of trueBp/falseBp. Negative = good = filter
+      // tightens the threshold here. Empty when neither half is
+      // measurable above the sample-count floor.
+      const candidates = [];
+      if (remainingEntry.trueBp != null) candidates.push(remainingEntry.trueBp);
+      if (remainingEntry.falseBp != null) candidates.push(remainingEntry.falseBp);
+      if (candidates.length === 0) return "";
+      const delta = Math.min.apply(null, candidates);
+      if (delta === 0) return ' <span class="filter-tab-delta">·</span>';
+      const sign = delta < 0 ? "↓" + Math.abs(delta) : "↑" + delta;
+      const cls = delta < 0 ? "filter-tab-delta-good" : "filter-tab-delta-bad";
+      return ' <span class="filter-tab-delta ' + cls + '">' + sign + ' bp</span>';
     }
 
-    function thresholdCellHtml(cell, options) {
-      if (cell === "thin") {
-        return '<td class="thin">thin</td>';
-      }
-      if (cell === null) {
-        return '<td class="empty">—</td>';
-      }
-      const deltaHtml = options && options.baselineCell !== undefined
-        ? formatBpDelta(cell, options.baselineCell)
-        : "";
-      return '<td>' + cell + ' bp' + deltaHtml + '</td>';
-    }
-
-    function renderFilterTable(filter) {
-      const rows = [];
-      const remainingOrder = survivalRemainingOrder;
-      for (let g = 0; g < remainingOrder.length; g++) {
-        const rem = remainingOrder[g];
-        const baselineCells = filter.thresholds.baseline[rem];
-        const trueCells = filter.thresholds.whenTrue[rem];
-        const falseCells = filter.thresholds.whenFalse[rem];
-        const remainingLabel = rem + 'm left';
-        // Baseline row
-        let baselineRow = '<tr class="row-baseline"><th scope="row">' + remainingLabel + ' · baseline</th>';
-        for (let i = 0; i < baselineCells.length; i++) {
-          baselineRow += thresholdCellHtml(baselineCells[i]);
-        }
-        baselineRow += '</tr>';
-        // Filter-true row
-        let trueRow = '<tr class="row-when-true"><th scope="row">↳ ' + filter.trueLabel + '</th>';
-        for (let i = 0; i < trueCells.length; i++) {
-          trueRow += thresholdCellHtml(trueCells[i], { baselineCell: baselineCells[i] });
-        }
-        trueRow += '</tr>';
-        // Filter-false row (with group-end class on the last filter group
-        // to draw a separating border between remaining-minutes groups)
-        const isLastGroup = g === remainingOrder.length - 1;
-        const groupEndClass = isLastGroup ? "" : " row-group-end";
-        let falseRow = '<tr class="row-when-false' + groupEndClass + '"><th scope="row">↳ ' + filter.falseLabel + '</th>';
-        for (let i = 0; i < falseCells.length; i++) {
-          falseRow += thresholdCellHtml(falseCells[i], { baselineCell: baselineCells[i] });
-        }
-        falseRow += '</tr>';
-        rows.push(baselineRow, trueRow, falseRow);
-      }
-      return rows.join("");
-    }
-
-    function renderFilterMiniChart(host, filter, remaining) {
+    function buildFilterChart({ host, filter, remaining }) {
       if (typeof uPlot === "undefined") {
-        host.innerHTML = '<pre class="chart-error">uPlot global is undefined</pre>';
+        host.innerHTML = '<pre class="chart-error">uPlot global is undefined — CDN failed to load?</pre>';
         return null;
       }
-      const w = host.clientWidth || host.getBoundingClientRect().width || 480;
-      const h = host.clientHeight || 220;
+      const w = host.clientWidth || host.getBoundingClientRect().width || 800;
+      const h = host.clientHeight || 380;
       if (w === 0 || h === 0) {
-        host.innerHTML = '<pre class="chart-error">chart host has zero size</pre>';
+        host.innerHTML = '<pre class="chart-error">chart host has zero size: ' + w + 'x' + h + '</pre>';
         return null;
       }
       const xs = filter.distancesBp.slice();
       const baselineY = filter.baseline[remaining].winRate.slice();
       const trueY = filter.whenTrue[remaining].winRate.slice();
       const falseY = filter.whenFalse[remaining].winRate.slice();
+      const xMax = autoFitMaxBp({ xs: xs, yArrays: [baselineY, trueY, falseY] });
       const data = [xs, baselineY, trueY, falseY];
       const opts = {
         width: w,
         height: h,
         legend: { show: false },
-        padding: [10, 14, 6, 6],
-        scales: { x: { time: false }, y: { range: [0, 100] } },
+        padding: [16, 18, 8, 8],
+        scales: { x: { time: false, range: [0, xMax] }, y: { range: [0, 100] } },
         cursor: { points: { show: false }, drag: { setScale: false, x: false, y: false } },
         series: [
           {},
-          { label: "baseline", stroke: filterColors.baseline, width: 1.25, spanGaps: false, points: { show: false } },
-          { label: filter.trueLabel, stroke: filterColors.whenTrue, width: 2, spanGaps: false, points: { show: false } },
-          { label: filter.falseLabel, stroke: filterColors.whenFalse, width: 2, spanGaps: false, points: { show: false } },
+          { label: "baseline", stroke: filterColors.baseline, width: 1.5, spanGaps: false, points: { show: false } },
+          { label: filter.trueLabel, stroke: filterColors.whenTrue, width: 2.25, spanGaps: false, points: { show: false } },
+          { label: filter.falseLabel, stroke: filterColors.whenFalse, width: 2.25, spanGaps: false, points: { show: false } },
         ],
         axes: [
           {
             stroke: chartTokens.axisStroke,
             font: chartTokens.axisFont,
             grid: { stroke: chartTokens.gridStroke, width: 1 },
-            ticks: { stroke: chartTokens.axisTickStroke, width: 1, size: 4 },
-            values: (u, splits) => splits.map((v) => Math.round(v) + ' bp'),
-            size: 32,
+            ticks: { stroke: chartTokens.axisTickStroke, width: 1, size: 5 },
+            values: (u, splits) => splits.map(formatBp),
           },
           {
             stroke: chartTokens.axisStroke,
             font: chartTokens.axisFont,
             grid: { stroke: chartTokens.gridStroke, width: 1 },
-            ticks: { stroke: chartTokens.axisTickStroke, width: 1, size: 4 },
+            ticks: { stroke: chartTokens.axisTickStroke, width: 1, size: 5 },
             values: (u, splits) => splits.map((v) => Math.round(v) + '%'),
-            size: 44,
+            size: 60,
           },
         ],
         hooks: {
@@ -1104,8 +947,6 @@ export function renderTrainingDistributionsHtml({
     }
 
     function renderFilterSection(filter) {
-      // Build the section markup, attach to host, then construct mini
-      // charts after attach (so the chart hosts have measurable size).
       const summary = filter.summary;
       const summaryParts = [];
       if (Number.isFinite(summary.occurrenceTrue)) {
@@ -1136,38 +977,50 @@ export function renderTrainingDistributionsHtml({
         '<span class="alea-legend-item"><span class="alea-legend-swatch" style="background:' + filterColors.baseline + '"></span>baseline</span>' +
         '<span class="alea-legend-item"><span class="alea-legend-swatch" style="background:' + filterColors.whenTrue + '"></span>' + filter.trueLabel + '</span>' +
         '<span class="alea-legend-item"><span class="alea-legend-swatch" style="background:' + filterColors.whenFalse + '"></span>' + filter.falseLabel + '</span>';
-      const cellsHtml = survivalRemainingOrder.map((rem) =>
-        '<div class="filter-chart-cell">' +
-          '<div class="filter-chart-cell-label">' + rem + 'm left</div>' +
-          '<div class="chart-frame">' +
-            '<div class="chart-host" data-filter-id="' + filter.id + '" data-remaining="' + rem + '"></div>' +
-          '</div>' +
-        '</div>'
-      ).join("");
-      const tableHeader = survivalTargetWinRates.map((rate) => '<th scope="col">' + rate + '%</th>').join("");
+      const tabsHtml = survivalRemainingOrder.map((rem) => {
+        const isActive = rem === filter.defaultRemaining;
+        const badge = formatTabBadge(summary.bestImprovementByRemaining[rem]);
+        return (
+          '<button type="button" class="filter-tab' + (isActive ? ' active' : '') +
+          '" data-filter-id="' + filter.id + '" data-remaining="' + rem + '">' +
+          rem + 'm left' + badge + '</button>'
+        );
+      }).join("");
       const sectionHtml =
         '<section class="filter-section" data-filter-id="' + filter.id + '">' +
           '<div class="alea-section-rule"><h2>' + filter.displayName + '</h2></div>' +
           '<p class="survival-helper">' + filter.description + '</p>' +
           '<p class="filter-summary-line">' + summaryHtml + '</p>' +
+          '<div class="filter-tabs" role="tablist">' + tabsHtml + '</div>' +
           '<div class="alea-legend">' + legendHtml + '</div>' +
-          '<div class="filter-chart-grid">' + cellsHtml + '</div>' +
-          '<div class="alea-table-wrap">' +
-            '<table class="alea-table filter-thresholds">' +
-              '<thead><tr><th scope="col"></th>' + tableHeader + '</tr></thead>' +
-              '<tbody>' + renderFilterTable(filter) + '</tbody>' +
-            '</table>' +
+          '<div class="chart-frame">' +
+            '<div class="chart-host filter-chart-host" data-filter-id="' + filter.id + '"></div>' +
           '</div>' +
         '</section>';
       if (!filterSectionsHost) return;
       filterSectionsHost.insertAdjacentHTML('beforeend', sectionHtml);
-      // After insertion, find the four mini-chart hosts for this filter
-      // and instantiate uPlot for each.
-      const hosts = filterSectionsHost.querySelectorAll('.chart-host[data-filter-id="' + filter.id + '"]');
-      hosts.forEach((host) => {
-        const rem = Number(host.getAttribute('data-remaining'));
-        const chart = renderFilterMiniChart(host, filter, rem);
-        if (chart) filterCharts.push({ chart, host });
+      const host = filterSectionsHost.querySelector('.filter-chart-host[data-filter-id="' + filter.id + '"]');
+      if (!host) return;
+      const chart = buildFilterChart({ host: host, filter: filter, remaining: filter.defaultRemaining });
+      if (chart) {
+        filterCharts.push({ chart: chart, host: host, filter: filter, remaining: filter.defaultRemaining });
+      }
+    }
+
+    function setFilterRemaining({ filterId, remaining }) {
+      const entryIdx = filterCharts.findIndex((e) => e.filter.id === filterId);
+      if (entryIdx < 0) return;
+      const entry = filterCharts[entryIdx];
+      try { entry.chart.destroy(); } catch (e) { /* ignore */ }
+      const newChart = buildFilterChart({ host: entry.host, filter: entry.filter, remaining: remaining });
+      if (newChart) {
+        filterCharts[entryIdx] = { chart: newChart, host: entry.host, filter: entry.filter, remaining: remaining };
+      }
+      // Sync tab active state.
+      const tabs = filterSectionsHost.querySelectorAll('.filter-tab[data-filter-id="' + filterId + '"]');
+      tabs.forEach((tab) => {
+        const tabRem = Number(tab.getAttribute('data-remaining'));
+        tab.classList.toggle('active', tabRem === remaining);
       });
     }
 
@@ -1183,6 +1036,20 @@ export function renderTrainingDistributionsHtml({
       }
     }
 
+    if (filterSectionsHost) {
+      filterSectionsHost.addEventListener('click', (e) => {
+        const target = e.target instanceof HTMLElement ? e.target : null;
+        if (!target) return;
+        const tab = target.closest('.filter-tab');
+        if (!(tab instanceof HTMLElement)) return;
+        const filterId = tab.getAttribute('data-filter-id');
+        const remaining = Number(tab.getAttribute('data-remaining'));
+        if (!filterId || !Number.isFinite(remaining)) return;
+        setFilterRemaining({ filterId: filterId, remaining: remaining });
+        tab.blur();
+      });
+    }
+
     function activate(asset) {
       const slice = slices.find((s) => s.asset === asset);
       if (!slice) return;
@@ -1192,7 +1059,6 @@ export function renderTrainingDistributionsHtml({
       titleEl.textContent = slice.assetUpper;
       metaEl.textContent = slice.yearRange ?? "";
       countEl.textContent = slice.candleCount.toLocaleString() + " candles";
-      renderTable(slice);
       renderChart(slice);
       renderSurvival(slice);
       renderFilters(slice);
@@ -1239,11 +1105,12 @@ export function renderTrainingDistributionsHtml({
           if (w > 0 && h > 0) match.chart.setSize({ width: w, height: h });
         }
       });
-      // Attach a MutationObserver so that as new mini-chart hosts appear
-      // (when the user switches tabs), we begin observing them too.
+      // Attach a MutationObserver so that as new chart hosts appear
+      // (when the user switches asset tabs and we re-render), we begin
+      // observing them too.
       if (filterSectionsHost) {
         const mo = new MutationObserver(() => {
-          const hosts = filterSectionsHost.querySelectorAll('.chart-host[data-filter-id]');
+          const hosts = filterSectionsHost.querySelectorAll('.filter-chart-host');
           hosts.forEach((h) => filterRo.observe(h));
         });
         mo.observe(filterSectionsHost, { childList: true, subtree: true });
@@ -1301,11 +1168,13 @@ function toDashboardSlice({
 }
 
 /**
- * Pivots one filter result into chart-ready densified arrays plus the
- * pre-computed threshold matrix the table reads. The same densification
- * pattern as `toSurvivalSlice` runs three times — once per surface
- * (baseline / whenTrue / whenFalse) — so each mini-chart can iterate a
+ * Pivots one filter result into chart-ready densified arrays. Same
+ * densification pattern as `toSurvivalSlice`, run three times — once per
+ * surface (baseline / whenTrue / whenFalse) — so the chart can iterate a
  * shared x-axis with `null` gaps for sparse buckets.
+ *
+ * Also picks the default remaining-minutes tab: the bucket where the
+ * filter most strongly tightens the point of no return.
  */
 function toFilterSlice({
   result,
@@ -1326,11 +1195,6 @@ function toFilterSlice({
     baseline: densifySurface({ surface: result.baseline, distancesBp }),
     whenTrue: densifySurface({ surface: result.whenTrue, distancesBp }),
     whenFalse: densifySurface({ surface: result.whenFalse, distancesBp }),
-    thresholds: {
-      baseline: thresholdMatrix({ surface: result.baseline }),
-      whenTrue: thresholdMatrix({ surface: result.whenTrue }),
-      whenFalse: thresholdMatrix({ surface: result.whenFalse }),
-    },
     summary: {
       snapshotsTrue: result.summary.snapshotsTrue,
       snapshotsFalse: result.summary.snapshotsFalse,
@@ -1339,8 +1203,52 @@ function toFilterSlice({
       occurrenceFalse: result.summary.occurrenceFalse,
       bestImprovementBpTrue: result.summary.bestImprovementBpTrue,
       bestImprovementBpFalse: result.summary.bestImprovementBpFalse,
+      bestImprovementByRemaining: result.summary.bestImprovementByRemaining,
     },
+    defaultRemaining: pickDefaultRemaining({
+      byRemaining: result.summary.bestImprovementByRemaining,
+    }),
   };
+}
+
+/**
+ * Picks the remaining-minutes bucket that shows the strongest filter
+ * effect: smallest (most negative) `min(trueBp, falseBp)` improvement.
+ * Falls back to `4` (4m left) when no bucket has both halves above the
+ * sample-count floor — that keeps the default deterministic and matches
+ * the natural reading order of the tabs.
+ */
+function pickDefaultRemaining({
+  byRemaining,
+}: {
+  readonly byRemaining: Readonly<
+    Record<
+      SurvivalRemainingMinutes,
+      { readonly trueBp: number | null; readonly falseBp: number | null }
+    >
+  >;
+}): SurvivalRemainingMinutes {
+  let bestRemaining: SurvivalRemainingMinutes = 4;
+  let bestDelta: number | null = null;
+  for (const remaining of SURVIVAL_REMAINING_ORDER) {
+    const entry = byRemaining[remaining];
+    const candidates: number[] = [];
+    if (entry.trueBp !== null) {
+      candidates.push(entry.trueBp);
+    }
+    if (entry.falseBp !== null) {
+      candidates.push(entry.falseBp);
+    }
+    if (candidates.length === 0) {
+      continue;
+    }
+    const delta = Math.min(...candidates);
+    if (bestDelta === null || delta < bestDelta) {
+      bestDelta = delta;
+      bestRemaining = remaining;
+    }
+  }
+  return bestRemaining;
 }
 
 function densifySurface({
@@ -1380,50 +1288,6 @@ function densifySurface({
       winRate.push((bucket.survived / bucket.total) * 100);
     }
     out[remaining] = { winRate, sampleCount };
-  }
-  return out;
-}
-
-/**
- * Pre-computes the "first distance bucket reaching each target win rate"
- * matrix per surface. Distinguishes "never reaches in display range"
- * (`null`) from "all buckets in range are below the sample-count floor"
- * (`"thin"`) so the renderer can use different sentinels in the table.
- */
-function thresholdMatrix({
-  surface,
-}: {
-  readonly surface: SurvivalSurfaceWithCount;
-}): ThresholdMatrixSerialized {
-  const out = {} as Record<SurvivalRemainingMinutes, ThresholdCell[]>;
-  for (const remaining of SURVIVAL_REMAINING_ORDER) {
-    const buckets = surface.byRemaining[remaining];
-    const cells: ThresholdCell[] = [];
-    for (const target of SURVIVAL_TARGET_WIN_RATES) {
-      let answered: ThresholdCell = null;
-      let sawAnyBucket = false;
-      let sawTrustedBucket = false;
-      for (const bucket of buckets) {
-        if (bucket.distanceBp >= SURVIVAL_MAX_DISTANCE_BP) {
-          break;
-        }
-        sawAnyBucket = true;
-        if (bucket.total < SURVIVAL_MIN_SAMPLES) {
-          continue;
-        }
-        sawTrustedBucket = true;
-        const winRate = (bucket.survived / bucket.total) * 100;
-        if (winRate >= target) {
-          answered = bucket.distanceBp;
-          break;
-        }
-      }
-      if (answered === null && sawAnyBucket && !sawTrustedBucket) {
-        answered = "thin";
-      }
-      cells.push(answered);
-    }
-    out[remaining] = cells;
   }
   return out;
 }
