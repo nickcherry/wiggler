@@ -11,10 +11,14 @@ import { destroyDatabase } from "@alea/lib/db/destroyDatabase";
 import { openHtmlOnDarwin } from "@alea/lib/exchangePrices/openHtmlOnDarwin";
 import { computeCandleSizeDistribution } from "@alea/lib/training/computeCandleSizeDistribution";
 import { computeSurvivalDistribution } from "@alea/lib/training/computeSurvivalDistribution";
+import { computeSurvivalSnapshots } from "@alea/lib/training/computeSurvivalSnapshots";
 import { loadTrainingCandles } from "@alea/lib/training/loadTrainingCandles";
+import { applySurvivalFilters } from "@alea/lib/training/survivalFilters/applySurvivalFilters";
+import { survivalFilters } from "@alea/lib/training/survivalFilters/registry";
 import type {
   AssetSizeDistribution,
   AssetSurvivalDistribution,
+  AssetSurvivalFilters,
   TrainingDistributionsPayload,
 } from "@alea/lib/training/types";
 import { writeTrainingDistributionsArtifacts } from "@alea/lib/training/writeTrainingDistributionsArtifacts";
@@ -77,6 +81,7 @@ export const trainingDistributionsCommand = defineCommand({
     const db = createDatabase();
     const distributions: AssetSizeDistribution[] = [];
     const survivalDistributions: AssetSurvivalDistribution[] = [];
+    const survivalFilterResults: AssetSurvivalFilters[] = [];
 
     try {
       for (const asset of options.assets) {
@@ -105,13 +110,24 @@ export const trainingDistributionsCommand = defineCommand({
         });
         if (survival !== null) {
           survivalDistributions.push(survival);
+          // Filter framework needs the same 1m series plus the 5m series
+          // for MA-20 / prev-5m context. Reuse `candles` (the 5m series
+          // we already loaded for the size distribution).
+          const { perFilter } = applySurvivalFilters({
+            snapshots: computeSurvivalSnapshots({
+              candles1m,
+              candles5m: candles,
+            }),
+            filters: survivalFilters,
+          });
+          survivalFilterResults.push({ asset, results: perFilter });
         }
 
         const yearKeys = Object.keys(distribution.byYear).sort();
         const survivalLabel =
           survival === null
             ? pc.yellow("no 1m")
-            : `${pc.dim("windows=")}${survival.windowCount.toLocaleString()}`;
+            : `${pc.dim("windows=")}${survival.windowCount.toLocaleString()} ${pc.dim("filters=")}${survivalFilters.length}`;
         io.writeStdout(
           `${pc.bold(asset.toUpperCase().padEnd(5))} ` +
             `${pc.dim("rows=")}${String(distribution.candleCount).padStart(8)} ` +
@@ -144,6 +160,7 @@ export const trainingDistributionsCommand = defineCommand({
     const payload = buildPayload({
       distributions,
       survivalDistributions,
+      survivalFilterResults,
     });
     await writeTrainingDistributionsArtifacts({ payload, htmlPath, jsonPath });
 
@@ -160,9 +177,11 @@ export const trainingDistributionsCommand = defineCommand({
 function buildPayload({
   distributions,
   survivalDistributions,
+  survivalFilterResults,
 }: {
   readonly distributions: readonly AssetSizeDistribution[];
   readonly survivalDistributions: readonly AssetSurvivalDistribution[];
+  readonly survivalFilterResults: readonly AssetSurvivalFilters[];
 }): TrainingDistributionsPayload {
   return {
     command: "training:distributions",
@@ -170,6 +189,7 @@ function buildPayload({
     series: trainingCandleSeries,
     assets: distributions,
     survival: survivalDistributions,
+    survivalFilters: survivalFilterResults,
   };
 }
 

@@ -21,15 +21,32 @@ export type YearSizePercentiles = SizePercentiles & {
 };
 
 /**
+ * Body/wick frequency distribution as a fixed-width histogram. Bin `i`
+ * counts candles with size in `[i * binWidth, (i + 1) * binWidth)` (units
+ * match the percentile arrays — percent of open price). The final entry of
+ * each `body`/`wick` array — at index `binCount` — is the overflow count
+ * for any candle past the chart range, so the arrays sum to the total
+ * candle count even when the right tail is clipped from the visualization.
+ */
+export type SizeHistogram = {
+  readonly binWidth: number;
+  readonly binCount: number;
+  readonly body: readonly number[];
+  readonly wick: readonly number[];
+};
+
+/**
  * Per-asset distribution payload. Persisted into the JSON sidecar; the HTML
- * dashboard renders only the `all` slice and uses `candleCount` for the
- * header. `byYear` is keyed by UTC calendar year as a string ("2024" etc.)
- * so it round-trips cleanly through JSON.
+ * dashboard renders the `histogram` (chart) and the `all` percentiles
+ * (table tail) and uses `candleCount` for the header. `byYear` is keyed by
+ * UTC calendar year as a string ("2024" etc.) so it round-trips cleanly
+ * through JSON.
  */
 export type AssetSizeDistribution = {
   readonly asset: Asset;
   readonly candleCount: number;
   readonly all: SizePercentiles;
+  readonly histogram: SizeHistogram;
   readonly byYear: Readonly<Record<string, YearSizePercentiles>>;
 };
 
@@ -79,10 +96,59 @@ export type SurvivalSurfaceWithCount = SurvivalSurface & {
   readonly windowCount: number;
 };
 
+/**
+ * Per-asset bundle of binary filter results. Each entry corresponds to
+ * one filter in the registry, with the same baseline + true/false +
+ * summary shape so the renderer can iterate them generically.
+ *
+ * The structural type is declared in
+ * `survivalFilters/types.ts` (close to the framework code) and re-imported
+ * here as an opaque payload field — `types.ts` stays the canonical home
+ * for the JSON-sidecar shape without needing to know the filter
+ * framework's internals.
+ */
+export type AssetSurvivalFilters = {
+  readonly asset: Asset;
+  readonly results: readonly SurvivalFilterResultPayload[];
+};
+
+/**
+ * Wire-shape of one filter result on disk. Mirrors
+ * `SurvivalFilterResult` from the filter framework. We re-declare it here
+ * instead of importing to keep this module dependency-free of the filter
+ * framework (and to avoid a load-order cycle when the framework grows
+ * its own helper types).
+ */
+export type SurvivalFilterResultPayload = {
+  readonly id: string;
+  readonly displayName: string;
+  readonly description: string;
+  readonly trueLabel: string;
+  readonly falseLabel: string;
+  readonly baseline: SurvivalSurfaceWithCount;
+  readonly whenTrue: SurvivalSurfaceWithCount;
+  readonly whenFalse: SurvivalSurfaceWithCount;
+  readonly summary: SurvivalFilterSummaryPayload;
+};
+
+export type SurvivalFilterSummaryPayload = {
+  readonly snapshotsTotal: number;
+  readonly snapshotsTrue: number;
+  readonly snapshotsFalse: number;
+  readonly snapshotsSkipped: number;
+  readonly occurrenceTrue: number;
+  readonly occurrenceFalse: number;
+  readonly bestImprovementBpTrue: number | null;
+  readonly bestImprovementBpFalse: number | null;
+  readonly score: number | null;
+  readonly verdict: "strong" | "promising" | "neutral" | "weak" | "thin" | null;
+};
+
 export type TrainingDistributionsPayload = {
   readonly command: "training:distributions";
   readonly generatedAtMs: number;
   readonly series: CandleSeries;
   readonly assets: readonly AssetSizeDistribution[];
   readonly survival: readonly AssetSurvivalDistribution[];
+  readonly survivalFilters: readonly AssetSurvivalFilters[];
 };

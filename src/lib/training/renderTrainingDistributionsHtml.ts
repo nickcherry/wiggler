@@ -1,7 +1,11 @@
 import type {
   AssetSizeDistribution,
   AssetSurvivalDistribution,
+  AssetSurvivalFilters,
+  SizeHistogram,
+  SurvivalFilterResultPayload,
   SurvivalRemainingMinutes,
+  SurvivalSurfaceWithCount,
   TrainingDistributionsPayload,
 } from "@alea/lib/training/types";
 import {
@@ -77,6 +81,18 @@ const SURVIVAL_REMAINING_ORDER: readonly SurvivalRemainingMinutes[] = [
   4, 3, 2, 1,
 ];
 
+/**
+ * Three-way color scheme for filter mini-charts. Baseline is muted ivory
+ * (the reference everyone reads against). True/false leaning on the
+ * existing green/red semantics — green = aligned/positive, red = against.
+ * Same hues used in the table delta arrows.
+ */
+const FILTER_COLORS = {
+  baseline: "#b8aa8a",
+  whenTrue: "#46c37b",
+  whenFalse: "#d85a4f",
+} as const;
+
 type DashboardAssetSlice = {
   readonly asset: string;
   readonly assetUpper: string;
@@ -84,8 +100,66 @@ type DashboardAssetSlice = {
   readonly yearRange: string | null;
   readonly body: readonly number[];
   readonly wick: readonly number[];
+  readonly histogram: SizeHistogram;
   readonly survival: SurvivalSlice | null;
+  readonly filters: readonly FilterSlice[];
 };
+
+/**
+ * Chart-ready data for one filter section. Three densified surfaces
+ * (baseline / whenTrue / whenFalse) sharing the same `distancesBp`
+ * x-axis. The filter table reads the same `winRate` arrays plus the
+ * pre-computed thresholds for delta arrows. `summary` powers the
+ * per-section header line above the chart grid.
+ */
+type FilterSlice = {
+  readonly id: string;
+  readonly displayName: string;
+  readonly description: string;
+  readonly trueLabel: string;
+  readonly falseLabel: string;
+  readonly distancesBp: readonly number[];
+  readonly baseline: FilterSurfaceArrays;
+  readonly whenTrue: FilterSurfaceArrays;
+  readonly whenFalse: FilterSurfaceArrays;
+  /**
+   * Threshold matrix per surface — minimum distance (bp) at which the
+   * surface's win rate first meets each target win rate, subject to the
+   * sample-count floor. `null` for "never reaches", `"thin"` for
+   * "below sample-count floor everywhere within range". Indexed by
+   * remaining minutes → target → cell value.
+   */
+  readonly thresholds: {
+    readonly baseline: ThresholdMatrixSerialized;
+    readonly whenTrue: ThresholdMatrixSerialized;
+    readonly whenFalse: ThresholdMatrixSerialized;
+  };
+  readonly summary: {
+    readonly snapshotsTrue: number;
+    readonly snapshotsFalse: number;
+    readonly snapshotsSkipped: number;
+    readonly occurrenceTrue: number;
+    readonly occurrenceFalse: number;
+    readonly bestImprovementBpTrue: number | null;
+    readonly bestImprovementBpFalse: number | null;
+  };
+};
+
+type FilterSurfaceArrays = Readonly<
+  Record<
+    SurvivalRemainingMinutes,
+    {
+      readonly winRate: readonly (number | null)[];
+      readonly sampleCount: readonly number[];
+    }
+  >
+>;
+
+type ThresholdCell = number | null | "thin";
+
+type ThresholdMatrixSerialized = Readonly<
+  Record<SurvivalRemainingMinutes, readonly ThresholdCell[]>
+>;
 
 /**
  * Chart-ready survival data. `distancesBp` is the shared x-axis (every
@@ -117,9 +191,10 @@ type SurvivalSlice = {
 /**
  * Renders a self-contained dark-themed HTML dashboard for the
  * `training:distributions` analysis. One tab per asset; each tab has a
- * uPlot CDF chart of body/wick percentiles (x = move size in bp, y =
- * P(move <= x), in %) above a focused table that lists `p95...p50` for
- * both metrics.
+ * uPlot histogram of body/wick sizes (x = move size in bp, y = % of
+ * candles in that bin) above a focused table that lists `p95...p50` for
+ * both metrics. The chart is for shape intuition; the table is the place
+ * to read off thresholds.
  *
  * Per-year breakdowns are intentionally omitted from the HTML — they live
  * only in the JSON sidecar so the page stays scannable. The JSON is the
@@ -134,10 +209,15 @@ export function renderTrainingDistributionsHtml({
   for (const survival of payload.survival) {
     survivalByAsset.set(survival.asset, survival);
   }
+  const filtersByAsset = new Map<string, AssetSurvivalFilters>();
+  for (const filterBundle of payload.survivalFilters) {
+    filtersByAsset.set(filterBundle.asset, filterBundle);
+  }
   const slices = payload.assets.map((asset) =>
     toDashboardSlice({
       asset,
       survival: survivalByAsset.get(asset.asset) ?? null,
+      filters: filtersByAsset.get(asset.asset) ?? null,
     }),
   );
   const seriesLabel = `${payload.series.source}-${payload.series.product} ${payload.series.timeframe}`;
@@ -274,6 +354,107 @@ export function renderTrainingDistributionsHtml({
       font-weight: 400;
       font-size: 14px;
     }
+
+    /* Filter overlay sections — one per binary filter, rendered below the
+       baseline survival section. Same visual language as the survival
+       section but with small-multiples charts (one per remaining-minutes
+       bucket) and a 12-row threshold table that includes deltas vs
+       baseline. */
+    .filter-sections-host { display: flex; flex-direction: column; gap: 32px; }
+
+    .filter-section { display: flex; flex-direction: column; gap: 14px; }
+
+    .filter-summary-line {
+      margin: 0;
+      color: var(--alea-text-muted);
+      font-size: 12.5px;
+      font-variant-numeric: tabular-nums;
+      letter-spacing: 0.02em;
+    }
+
+    .filter-summary-line .filter-summary-pill {
+      display: inline-block;
+      margin-right: 14px;
+    }
+
+    .filter-summary-line .filter-summary-key {
+      color: var(--alea-text-subtle);
+      margin-right: 6px;
+    }
+
+    .filter-summary-line .filter-summary-value {
+      color: var(--alea-text);
+      font-weight: 500;
+    }
+
+    .filter-summary-line .filter-summary-good { color: var(--alea-green); }
+    .filter-summary-line .filter-summary-bad { color: var(--alea-red); }
+
+    .filter-chart-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 14px;
+    }
+
+    @media (max-width: 1080px) {
+      .filter-chart-grid { grid-template-columns: 1fr; }
+    }
+
+    .filter-chart-cell {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+
+    .filter-chart-cell-label {
+      color: var(--alea-text-muted);
+      font-size: 11.5px;
+      font-weight: 600;
+      letter-spacing: 0.18em;
+      text-transform: uppercase;
+      padding-left: 4px;
+    }
+
+    .filter-chart-cell .chart-host {
+      height: 220px;
+      min-height: 220px;
+      max-height: 220px;
+    }
+
+    /* Filter threshold table: same general look as survival-thresholds but
+       with grouping borders between remaining-minutes triples and styled
+       split rows (baseline ivory, with-filter green tint, against red
+       tint). */
+    table.filter-thresholds { min-width: 760px; table-layout: fixed; }
+    table.filter-thresholds th:first-child,
+    table.filter-thresholds td:first-child { width: 200px; }
+    table.filter-thresholds th, table.filter-thresholds td { white-space: nowrap; }
+    table.filter-thresholds tbody td {
+      font-family: var(--alea-font-display);
+      font-weight: 500;
+      font-size: 15px;
+      letter-spacing: 0.01em;
+      color: var(--alea-text);
+    }
+    table.filter-thresholds tbody tr.row-baseline th {
+      color: var(--alea-text-muted);
+    }
+    table.filter-thresholds tbody tr.row-when-true th { color: var(--alea-green); }
+    table.filter-thresholds tbody tr.row-when-false th { color: var(--alea-red); }
+    table.filter-thresholds tbody tr.row-group-end td,
+    table.filter-thresholds tbody tr.row-group-end th {
+      border-bottom: 1px solid var(--alea-border-muted);
+    }
+    table.filter-thresholds tbody td.empty,
+    table.filter-thresholds tbody td.thin {
+      color: var(--alea-text-subtle);
+      font-family: var(--alea-font-sans);
+      font-weight: 400;
+      font-size: 13px;
+    }
+    table.filter-thresholds tbody td .delta-good { color: var(--alea-green); margin-left: 6px; font-size: 12.5px; }
+    table.filter-thresholds tbody td .delta-bad { color: var(--alea-red); margin-left: 6px; font-size: 12.5px; }
+    table.filter-thresholds tbody td .delta-flat { color: var(--alea-text-subtle); margin-left: 6px; font-size: 12.5px; }
   </style>
 </head>
 <body>
@@ -298,32 +479,11 @@ export function renderTrainingDistributionsHtml({
           <p class="alea-card-meta" id="asset-meta"></p>
           <p class="alea-card-meta alea-card-meta-end" id="asset-count"></p>
         </header>
-        <div class="chart-section">
-          <div class="alea-legend">
-            <span class="alea-legend-item"><span class="alea-legend-swatch" style="background:${bodyColor}"></span>body size</span>
-            <span class="alea-legend-item"><span class="alea-legend-swatch" style="background:${wickColor}"></span>wick size</span>
-          </div>
-          <div class="chart-frame">
-            <div id="chart" class="chart-host"><div class="chart-loading">Loading chart…</div></div>
-            <div id="chart-tooltip" class="alea-tooltip"></div>
-          </div>
-        </div>
-        <div class="alea-table-wrap">
-          <table class="alea-table percentiles">
-            <thead>
-              <tr>
-                <th scope="col"></th>
-                ${tableHeaderCells}
-              </tr>
-            </thead>
-            <tbody></tbody>
-          </table>
-        </div>
 
         <div class="alea-section-rule">
           <h2>Point-of-No-Return Levels</h2>
         </div>
-        <p class="survival-helper">Minimum distance from the 5m start line needed for the current side to historically survive. Each line shows the empirical win rate at every distance bucket given the time remaining in the window. Baseline only — no volatility, wick/body, or regime filters are included. Buckets with fewer than ${SURVIVAL_MIN_SAMPLES.toLocaleString()} snapshots are hidden.</p>
+        <p class="survival-helper">Minimum distance from the 5m start line needed for the current side to historically survive. Each line shows the empirical win rate at every distance bucket given the time remaining in the window. Baseline only — no volatility, candle-shape, or regime filters are included. Buckets with fewer than ${SURVIVAL_MIN_SAMPLES.toLocaleString()} snapshots are hidden.</p>
 
         <div class="survival-section" id="survival-section">
           <p class="alea-card-meta" id="survival-meta"></p>
@@ -346,19 +506,58 @@ export function renderTrainingDistributionsHtml({
             </table>
           </div>
         </div>
+
+        <div class="alea-section-rule">
+          <h2>Simple Filter Overlays</h2>
+        </div>
+        <p class="survival-helper">Each filter splits the same survival snapshots in two, so we can ask "does this slice of context tighten the point of no return?". Mini-charts compare baseline vs filter-true vs filter-false at each remaining-time bucket; the table below shows where each split reaches the same win-rate targets, with deltas from baseline. Lower is better.</p>
+
+        <div class="filter-sections-host" id="filter-sections-host"></div>
+
+        <div class="alea-section-rule">
+          <h2>Movement Distribution</h2>
+        </div>
+        <p class="survival-helper">Distribution of 5m candle body and full high-low range. Useful for understanding normal move size, not directly a survival probability.</p>
+        <div class="chart-section">
+          <div class="alea-legend">
+            <span class="alea-legend-item"><span class="alea-legend-swatch" style="background:${bodyColor}"></span>body</span>
+            <span class="alea-legend-item"><span class="alea-legend-swatch" style="background:${wickColor}"></span>range</span>
+          </div>
+          <div class="chart-frame">
+            <div id="chart" class="chart-host"><div class="chart-loading">Loading chart…</div></div>
+            <div id="chart-tooltip" class="alea-tooltip"></div>
+          </div>
+        </div>
+        <div class="alea-table-wrap">
+          <table class="alea-table percentiles">
+            <thead>
+              <tr>
+                <th scope="col"></th>
+                ${tableHeaderCells}
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
       </section>
     </main>
   </div>
   <script>
     const slices = ${JSON.stringify(slices)};
     const tablePs = ${JSON.stringify(tableTailPercentiles)};
-    // Chart is a CDF: x = move size in bp, y = P(move <= x), in %. p100
-    // is a near-vertical spike (one flash-crash bar) that pushes the
-    // x-axis way out and crushes the rest of the curve, so the chart
-    // stops at p99. The table still includes p100.
-    const chartLastP = 99;
+    // Chart is a histogram: x = move size in bp, y = % of candles whose
+    // size falls in that 1 bp bin. The bin range is sized to p99 of the
+    // larger metric, so anything past it (the rare flash-crash tail) lives
+    // in the overflow slot of the histogram payload and isn't plotted —
+    // the table still surfaces p100 if you want it.
     const bodyColor = ${JSON.stringify(bodyColor)};
     const wickColor = ${JSON.stringify(wickColor)};
+    // Translucent line-color fills for the two histogram series. Computed
+    // here (not in the design-system tokens) since the opacity is purely a
+    // chart-rendering choice — same hue as the stroke, dim enough that two
+    // overlapping series stay readable.
+    const bodyFill = "rgba(91, 149, 255, 0.18)";
+    const wickFill = "rgba(255, 165, 102, 0.18)";
     const chartTokens = ${JSON.stringify(aleaChartTokens)};
     const survivalRemainingOrder = ${JSON.stringify(SURVIVAL_REMAINING_ORDER)};
     const survivalRemainingColors = ${JSON.stringify(SURVIVAL_REMAINING_COLORS)};
@@ -372,11 +571,19 @@ export function renderTrainingDistributionsHtml({
       if (v == null || !Number.isFinite(v)) return "—";
       return Math.round(v * 100).toLocaleString() + " bp";
     };
-    // Probability axis. y values are percentile-indices in [0, 99], so
-    // they read directly as percentages.
-    const formatProb = (v) => {
+    // Table cells are CDF readouts ("p95 = ≤ N bp" reads as "95% of
+    // candles are at or below N bp"), so prefix the bp value with ≤. The
+    // null/non-finite path drops the prefix — "≤ —" looks broken.
+    const formatBipsCdf = (v) => {
       if (v == null || !Number.isFinite(v)) return "—";
-      return Math.round(v) + "%";
+      return "≤ " + Math.round(v * 100).toLocaleString() + " bp";
+    };
+    // Histogram density axis: bin counts normalized to % of all candles.
+    // Typical heights are in the 0.1–5% range so two decimal places gives
+    // the tooltip useful resolution without going to noise.
+    const formatDensity = (v) => {
+      if (v == null || !Number.isFinite(v)) return "—";
+      return v.toFixed(2) + "%";
     };
 
     const tabsEl = document.getElementById("tabs");
@@ -404,11 +611,11 @@ export function renderTrainingDistributionsHtml({
     function renderTable(slice) {
       if (!tbodyEl) return;
       const cells = (key) => tablePs
-        .map((p) => '<td>' + formatBips(slice[key][p]) + '</td>')
+        .map((p) => '<td>' + formatBipsCdf(slice[key][p]) + '</td>')
         .join("");
       tbodyEl.innerHTML =
         '<tr class="body"><th scope="row">body</th>' + cells("body") + '</tr>' +
-        '<tr class="wick"><th scope="row">wick</th>' + cells("wick") + '</tr>';
+        '<tr class="wick"><th scope="row">range</th>' + cells("wick") + '</tr>';
     }
 
     function chartHostError(msg) {
@@ -434,52 +641,48 @@ export function renderTrainingDistributionsHtml({
         chartHostError("chart host has zero size: " + w + "x" + h);
         return;
       }
-      // Each (percentile, value) pair is a point on the CDF: at x = the
-      // p-th percentile move, F(x) = p%. Body and wick have different
-      // x-ranges, but uPlot requires a shared x-axis across series — so
-      // we merge their x-values into a single sorted array and look up
-      // each series' percentile at every shared x via cdfAt(). The
-      // result is a staircase ECDF; uPlot draws it as straight segments
-      // between the data points, which is fine at 100 points per series.
-      const bodyPts = [];
-      const wickPts = [];
-      for (let p = 0; p <= chartLastP; p++) {
-        if (Number.isFinite(slice.body[p])) bodyPts.push([slice.body[p], p]);
-        if (Number.isFinite(slice.wick[p])) wickPts.push([slice.wick[p], p]);
-      }
-      bodyPts.sort((a, b) => a[0] - b[0]);
-      wickPts.sort((a, b) => a[0] - b[0]);
-      const xsSet = new Set();
-      for (const pt of bodyPts) xsSet.add(pt[0]);
-      for (const pt of wickPts) xsSet.add(pt[0]);
-      const xs = [...xsSet].sort((a, b) => a - b);
-      // Largest p where pts[i].x <= x. Returns null if x precedes the
-      // series' minimum (the curve hasn't started yet at that x).
-      const cdfAt = (pts, x) => {
-        let lo = 0, hi = pts.length - 1, ans = null;
-        while (lo <= hi) {
-          const mid = (lo + hi) >> 1;
-          if (pts[mid][0] <= x) { ans = pts[mid][1]; lo = mid + 1; }
-          else hi = mid - 1;
+      // Histogram payload: bin i covers [i*binWidth, (i+1)*binWidth) in
+      // percent-of-open units; the trailing slot at index binCount is the
+      // overflow tail (everything past p99) and is intentionally not
+      // plotted. Convert bin width to bp for axis labels and divide each
+      // bin count by total candles to get density (% of candles per bin).
+      const hist = slice.histogram;
+      const total = slice.candleCount;
+      const binWidthBp = hist.binWidth * 100;
+      // x = bin starts in bp, with one extra "closer" point at the right
+      // edge of the last bin so uPlot's stepped path renders the trailing
+      // bar with its full width. The closer's y is null so the path ends
+      // there cleanly.
+      const xs = new Array(hist.binCount + 1);
+      for (let i = 0; i <= hist.binCount; i++) xs[i] = i * binWidthBp;
+      const toDensity = (counts) => {
+        const out = new Array(hist.binCount + 1);
+        for (let i = 0; i < hist.binCount; i++) {
+          out[i] = total > 0 ? (counts[i] / total) * 100 : 0;
         }
-        return ans;
+        out[hist.binCount] = null;
+        return out;
       };
-      const bodyData = xs.map((x) => cdfAt(bodyPts, x));
-      const wickData = xs.map((x) => cdfAt(wickPts, x));
-      const data = [xs.slice(), bodyData, wickData];
+      const bodyData = toDensity(hist.body);
+      const wickData = toDensity(hist.wick);
+      const data = [xs, bodyData, wickData];
       const updateTooltip = (u) => {
         const idx = u.cursor.idx;
-        if (idx == null || idx < 0 || idx >= xs.length) {
+        // The trailing closer (idx === binCount) is a structural point,
+        // not a real bin — suppress the tooltip there.
+        if (idx == null || idx < 0 || idx >= hist.binCount) {
           tooltipEl.classList.remove("visible");
           return;
         }
-        const x = xs[idx];
+        const xStart = xs[idx];
+        const xEnd = xs[idx + 1];
         const bodyV = bodyData[idx];
         const wickV = wickData[idx];
+        const range = Math.round(xStart).toLocaleString() + '–' + Math.round(xEnd).toLocaleString() + ' bp';
         tooltipEl.innerHTML =
-          '<div class="alea-tooltip-head">' + formatBips(x) + ' or less</div>' +
-          '<div class="alea-tooltip-row"><span class="alea-legend-swatch" style="background:' + bodyColor + '"></span><span class="name">body</span><span class="value">' + formatProb(bodyV) + '</span></div>' +
-          '<div class="alea-tooltip-row"><span class="alea-legend-swatch" style="background:' + wickColor + '"></span><span class="name">wick</span><span class="value">' + formatProb(wickV) + '</span></div>';
+          '<div class="alea-tooltip-head">' + range + '</div>' +
+          '<div class="alea-tooltip-row"><span class="alea-legend-swatch" style="background:' + bodyColor + '"></span><span class="name">body</span><span class="value">' + formatDensity(bodyV) + '</span></div>' +
+          '<div class="alea-tooltip-row"><span class="alea-legend-swatch" style="background:' + wickColor + '"></span><span class="name">range</span><span class="value">' + formatDensity(wickV) + '</span></div>';
         const cursorLeft = u.cursor.left;
         const frameW = chartFrame.getBoundingClientRect().width;
         const tooltipW = tooltipEl.offsetWidth || 200;
@@ -490,6 +693,11 @@ export function renderTrainingDistributionsHtml({
         tooltipEl.style.top = "14px";
         tooltipEl.classList.add("visible");
       };
+      // Stepped path with align: 1 means "the value at x[i] holds until
+      // x[i+1]" — exactly the histogram semantics: a flat top across each
+      // bin's [start, end) range. The translucent fill underneath gives the
+      // shape a density feel without obscuring the other series.
+      const steppedPath = uPlot.paths.stepped({ align: 1 });
       const opts = {
         width: w,
         height: h,
@@ -502,8 +710,22 @@ export function renderTrainingDistributionsHtml({
         },
         series: [
           {},
-          { label: "body", stroke: bodyColor, width: 2 },
-          { label: "wick", stroke: wickColor, width: 2 },
+          {
+            label: "body",
+            stroke: bodyColor,
+            fill: bodyFill,
+            width: 1.5,
+            paths: steppedPath,
+            points: { show: false },
+          },
+          {
+            label: "wick",
+            stroke: wickColor,
+            fill: wickFill,
+            width: 1.5,
+            paths: steppedPath,
+            points: { show: false },
+          },
         ],
         axes: [
           {
@@ -511,36 +733,19 @@ export function renderTrainingDistributionsHtml({
             font: chartTokens.axisFont,
             grid: { stroke: chartTokens.gridStroke, width: 1 },
             ticks: { stroke: chartTokens.axisTickStroke, width: 1, size: 5 },
-            values: (u, splits) => splits.map(formatBips),
+            values: (u, splits) => splits.map((v) => Math.round(v).toLocaleString() + " bp"),
           },
           {
             stroke: chartTokens.axisStroke,
             font: chartTokens.axisFont,
             grid: { stroke: chartTokens.gridStroke, width: 1 },
             ticks: { stroke: chartTokens.axisTickStroke, width: 1, size: 5 },
-            values: (u, splits) => splits.map(formatProb),
+            values: (u, splits) => splits.map((v) => v.toFixed(1) + "%"),
             size: 60,
           },
         ],
         hooks: {
           setCursor: [updateTooltip],
-          // Faint horizontal reference at P=50%. Drawn in the drawAxes
-          // hook so it sits behind the body/wick curves, not over them.
-          drawAxes: [
-            (u) => {
-              const yPos = u.valToPos(50, "y", true);
-              const ctx = u.ctx;
-              ctx.save();
-              ctx.strokeStyle = chartTokens.referenceLine;
-              ctx.lineWidth = 1;
-              ctx.setLineDash([4, 4]);
-              ctx.beginPath();
-              ctx.moveTo(u.bbox.left, yPos);
-              ctx.lineTo(u.bbox.left + u.bbox.width, yPos);
-              ctx.stroke();
-              ctx.restore();
-            },
-          ],
         },
       };
       try {
@@ -737,6 +942,247 @@ export function renderTrainingDistributionsHtml({
       renderSurvivalTable(survival);
     }
 
+    // ----------------------------------------------------------------
+    // Filter sections: one per binary filter, each with a small-multiples
+    // grid of mini-charts (one per remaining-minutes bucket) plus a
+    // 12-row threshold table showing baseline vs filter-true vs
+    // filter-false with deltas.
+    // ----------------------------------------------------------------
+
+    const filterColors = ${JSON.stringify(FILTER_COLORS)};
+    const filterSectionsHost = document.getElementById("filter-sections-host");
+    // Track every mini-chart uPlot instance so the ResizeObserver and
+    // window resize handler can poke them all when the viewport changes.
+    const filterCharts = [];
+
+    function clearFilterSections() {
+      for (const entry of filterCharts) {
+        try { entry.chart.destroy(); } catch (e) { /* ignore */ }
+      }
+      filterCharts.length = 0;
+      if (filterSectionsHost) filterSectionsHost.innerHTML = "";
+    }
+
+    function formatPercent(v) {
+      if (v == null || !Number.isFinite(v)) return "—";
+      const pct = v * 100;
+      return pct < 10 ? pct.toFixed(1) + "%" : Math.round(pct) + "%";
+    }
+
+    function formatBpDelta(filterBp, baselineBp) {
+      if (filterBp === null || filterBp === "thin") return "";
+      if (baselineBp === null || baselineBp === "thin") return "";
+      const delta = filterBp - baselineBp;
+      if (delta === 0) {
+        return ' <span class="delta-flat">·</span>';
+      }
+      if (delta < 0) {
+        return ' <span class="delta-good">↓' + Math.abs(delta) + '</span>';
+      }
+      return ' <span class="delta-bad">↑' + delta + '</span>';
+    }
+
+    function thresholdCellHtml(cell, options) {
+      if (cell === "thin") {
+        return '<td class="thin">thin</td>';
+      }
+      if (cell === null) {
+        return '<td class="empty">—</td>';
+      }
+      const deltaHtml = options && options.baselineCell !== undefined
+        ? formatBpDelta(cell, options.baselineCell)
+        : "";
+      return '<td>' + cell + ' bp' + deltaHtml + '</td>';
+    }
+
+    function renderFilterTable(filter) {
+      const rows = [];
+      const remainingOrder = survivalRemainingOrder;
+      for (let g = 0; g < remainingOrder.length; g++) {
+        const rem = remainingOrder[g];
+        const baselineCells = filter.thresholds.baseline[rem];
+        const trueCells = filter.thresholds.whenTrue[rem];
+        const falseCells = filter.thresholds.whenFalse[rem];
+        const remainingLabel = rem + 'm left';
+        // Baseline row
+        let baselineRow = '<tr class="row-baseline"><th scope="row">' + remainingLabel + ' · baseline</th>';
+        for (let i = 0; i < baselineCells.length; i++) {
+          baselineRow += thresholdCellHtml(baselineCells[i]);
+        }
+        baselineRow += '</tr>';
+        // Filter-true row
+        let trueRow = '<tr class="row-when-true"><th scope="row">↳ ' + filter.trueLabel + '</th>';
+        for (let i = 0; i < trueCells.length; i++) {
+          trueRow += thresholdCellHtml(trueCells[i], { baselineCell: baselineCells[i] });
+        }
+        trueRow += '</tr>';
+        // Filter-false row (with group-end class on the last filter group
+        // to draw a separating border between remaining-minutes groups)
+        const isLastGroup = g === remainingOrder.length - 1;
+        const groupEndClass = isLastGroup ? "" : " row-group-end";
+        let falseRow = '<tr class="row-when-false' + groupEndClass + '"><th scope="row">↳ ' + filter.falseLabel + '</th>';
+        for (let i = 0; i < falseCells.length; i++) {
+          falseRow += thresholdCellHtml(falseCells[i], { baselineCell: baselineCells[i] });
+        }
+        falseRow += '</tr>';
+        rows.push(baselineRow, trueRow, falseRow);
+      }
+      return rows.join("");
+    }
+
+    function renderFilterMiniChart(host, filter, remaining) {
+      if (typeof uPlot === "undefined") {
+        host.innerHTML = '<pre class="chart-error">uPlot global is undefined</pre>';
+        return null;
+      }
+      const w = host.clientWidth || host.getBoundingClientRect().width || 480;
+      const h = host.clientHeight || 220;
+      if (w === 0 || h === 0) {
+        host.innerHTML = '<pre class="chart-error">chart host has zero size</pre>';
+        return null;
+      }
+      const xs = filter.distancesBp.slice();
+      const baselineY = filter.baseline[remaining].winRate.slice();
+      const trueY = filter.whenTrue[remaining].winRate.slice();
+      const falseY = filter.whenFalse[remaining].winRate.slice();
+      const data = [xs, baselineY, trueY, falseY];
+      const opts = {
+        width: w,
+        height: h,
+        legend: { show: false },
+        padding: [10, 14, 6, 6],
+        scales: { x: { time: false }, y: { range: [0, 100] } },
+        cursor: { points: { show: false }, drag: { setScale: false, x: false, y: false } },
+        series: [
+          {},
+          { label: "baseline", stroke: filterColors.baseline, width: 1.25, spanGaps: false, points: { show: false } },
+          { label: filter.trueLabel, stroke: filterColors.whenTrue, width: 2, spanGaps: false, points: { show: false } },
+          { label: filter.falseLabel, stroke: filterColors.whenFalse, width: 2, spanGaps: false, points: { show: false } },
+        ],
+        axes: [
+          {
+            stroke: chartTokens.axisStroke,
+            font: chartTokens.axisFont,
+            grid: { stroke: chartTokens.gridStroke, width: 1 },
+            ticks: { stroke: chartTokens.axisTickStroke, width: 1, size: 4 },
+            values: (u, splits) => splits.map((v) => Math.round(v) + ' bp'),
+            size: 32,
+          },
+          {
+            stroke: chartTokens.axisStroke,
+            font: chartTokens.axisFont,
+            grid: { stroke: chartTokens.gridStroke, width: 1 },
+            ticks: { stroke: chartTokens.axisTickStroke, width: 1, size: 4 },
+            values: (u, splits) => splits.map((v) => Math.round(v) + '%'),
+            size: 44,
+          },
+        ],
+        hooks: {
+          drawAxes: [
+            (u) => {
+              const yPos = u.valToPos(50, "y", true);
+              const ctx = u.ctx;
+              ctx.save();
+              ctx.strokeStyle = chartTokens.referenceLine;
+              ctx.lineWidth = 1;
+              ctx.setLineDash([4, 4]);
+              ctx.beginPath();
+              ctx.moveTo(u.bbox.left, yPos);
+              ctx.lineTo(u.bbox.left + u.bbox.width, yPos);
+              ctx.stroke();
+              ctx.restore();
+            },
+          ],
+        },
+      };
+      try {
+        return new uPlot(opts, data, host);
+      } catch (err) {
+        host.innerHTML = '<pre class="chart-error">uPlot threw: ' + (err && err.message ? err.message : String(err)) + '</pre>';
+        return null;
+      }
+    }
+
+    function renderFilterSection(filter) {
+      // Build the section markup, attach to host, then construct mini
+      // charts after attach (so the chart hosts have measurable size).
+      const summary = filter.summary;
+      const summaryParts = [];
+      if (Number.isFinite(summary.occurrenceTrue)) {
+        summaryParts.push(
+          '<span class="filter-summary-pill"><span class="filter-summary-key">' + filter.trueLabel + '</span><span class="filter-summary-value">' + formatPercent(summary.occurrenceTrue) + ' of windows</span></span>'
+        );
+      }
+      if (Number.isFinite(summary.occurrenceFalse)) {
+        summaryParts.push(
+          '<span class="filter-summary-pill"><span class="filter-summary-key">' + filter.falseLabel + '</span><span class="filter-summary-value">' + formatPercent(summary.occurrenceFalse) + '</span></span>'
+        );
+      }
+      function bestImprovementHtml(label, value) {
+        if (value === null || !Number.isFinite(value)) return "";
+        const cls = value < 0 ? "filter-summary-good" : value > 0 ? "filter-summary-bad" : "";
+        const sign = value < 0 ? "↓" + Math.abs(value) : value > 0 ? "↑" + value : "·";
+        return '<span class="filter-summary-pill"><span class="filter-summary-key">best Δ ' + label + '</span><span class="filter-summary-value ' + cls + '">' + sign + ' bp</span></span>';
+      }
+      summaryParts.push(bestImprovementHtml(filter.trueLabel, summary.bestImprovementBpTrue));
+      summaryParts.push(bestImprovementHtml(filter.falseLabel, summary.bestImprovementBpFalse));
+      if (summary.snapshotsSkipped > 0) {
+        summaryParts.push(
+          '<span class="filter-summary-pill"><span class="filter-summary-key">skipped</span><span class="filter-summary-value">' + summary.snapshotsSkipped.toLocaleString() + '</span></span>'
+        );
+      }
+      const summaryHtml = summaryParts.join("");
+      const legendHtml =
+        '<span class="alea-legend-item"><span class="alea-legend-swatch" style="background:' + filterColors.baseline + '"></span>baseline</span>' +
+        '<span class="alea-legend-item"><span class="alea-legend-swatch" style="background:' + filterColors.whenTrue + '"></span>' + filter.trueLabel + '</span>' +
+        '<span class="alea-legend-item"><span class="alea-legend-swatch" style="background:' + filterColors.whenFalse + '"></span>' + filter.falseLabel + '</span>';
+      const cellsHtml = survivalRemainingOrder.map((rem) =>
+        '<div class="filter-chart-cell">' +
+          '<div class="filter-chart-cell-label">' + rem + 'm left</div>' +
+          '<div class="chart-frame">' +
+            '<div class="chart-host" data-filter-id="' + filter.id + '" data-remaining="' + rem + '"></div>' +
+          '</div>' +
+        '</div>'
+      ).join("");
+      const tableHeader = survivalTargetWinRates.map((rate) => '<th scope="col">' + rate + '%</th>').join("");
+      const sectionHtml =
+        '<section class="filter-section" data-filter-id="' + filter.id + '">' +
+          '<div class="alea-section-rule"><h2>' + filter.displayName + '</h2></div>' +
+          '<p class="survival-helper">' + filter.description + '</p>' +
+          '<p class="filter-summary-line">' + summaryHtml + '</p>' +
+          '<div class="alea-legend">' + legendHtml + '</div>' +
+          '<div class="filter-chart-grid">' + cellsHtml + '</div>' +
+          '<div class="alea-table-wrap">' +
+            '<table class="alea-table filter-thresholds">' +
+              '<thead><tr><th scope="col"></th>' + tableHeader + '</tr></thead>' +
+              '<tbody>' + renderFilterTable(filter) + '</tbody>' +
+            '</table>' +
+          '</div>' +
+        '</section>';
+      if (!filterSectionsHost) return;
+      filterSectionsHost.insertAdjacentHTML('beforeend', sectionHtml);
+      // After insertion, find the four mini-chart hosts for this filter
+      // and instantiate uPlot for each.
+      const hosts = filterSectionsHost.querySelectorAll('.chart-host[data-filter-id="' + filter.id + '"]');
+      hosts.forEach((host) => {
+        const rem = Number(host.getAttribute('data-remaining'));
+        const chart = renderFilterMiniChart(host, filter, rem);
+        if (chart) filterCharts.push({ chart, host });
+      });
+    }
+
+    function renderFilters(slice) {
+      clearFilterSections();
+      if (!filterSectionsHost) return;
+      if (!slice.filters || slice.filters.length === 0) {
+        filterSectionsHost.innerHTML = '<div class="survival-empty">No filter overlays available — needs 1m candle data.</div>';
+        return;
+      }
+      for (const filter of slice.filters) {
+        renderFilterSection(filter);
+      }
+    }
+
     function activate(asset) {
       const slice = slices.find((s) => s.asset === asset);
       if (!slice) return;
@@ -749,6 +1195,7 @@ export function renderTrainingDistributionsHtml({
       renderTable(slice);
       renderChart(slice);
       renderSurvival(slice);
+      renderFilters(slice);
     }
 
     tabsEl.addEventListener("click", (e) => {
@@ -779,10 +1226,37 @@ export function renderTrainingDistributionsHtml({
         if (w > 0 && h > 0) survivalChart.setSize({ width: w, height: h });
       });
       survivalRo.observe(survivalChartHost);
+      // Single ResizeObserver covering every filter mini-chart host;
+      // the entry list lets us only resize the affected chart instead of
+      // looping all of them on every observation.
+      const filterRo = new ResizeObserver((entries) => {
+        for (const entry of entries) {
+          const host = entry.target;
+          const match = filterCharts.find((fc) => fc.host === host);
+          if (!match) continue;
+          const w = host.clientWidth;
+          const h = host.clientHeight;
+          if (w > 0 && h > 0) match.chart.setSize({ width: w, height: h });
+        }
+      });
+      // Attach a MutationObserver so that as new mini-chart hosts appear
+      // (when the user switches tabs), we begin observing them too.
+      if (filterSectionsHost) {
+        const mo = new MutationObserver(() => {
+          const hosts = filterSectionsHost.querySelectorAll('.chart-host[data-filter-id]');
+          hosts.forEach((h) => filterRo.observe(h));
+        });
+        mo.observe(filterSectionsHost, { childList: true, subtree: true });
+      }
     }
     window.addEventListener("resize", () => {
       if (chart) chart.setSize({ width: chartHost.clientWidth, height: chartHost.clientHeight });
       if (survivalChart) survivalChart.setSize({ width: survivalChartHost.clientWidth, height: survivalChartHost.clientHeight });
+      for (const entry of filterCharts) {
+        const w = entry.host.clientWidth;
+        const h = entry.host.clientHeight;
+        if (w > 0 && h > 0) entry.chart.setSize({ width: w, height: h });
+      }
     });
 
     if (slices.length > 0) activate(slices[0].asset);
@@ -795,9 +1269,11 @@ export function renderTrainingDistributionsHtml({
 function toDashboardSlice({
   asset,
   survival,
+  filters,
 }: {
   readonly asset: AssetSizeDistribution;
   readonly survival: AssetSurvivalDistribution | null;
+  readonly filters: AssetSurvivalFilters | null;
 }): DashboardAssetSlice {
   const years = Object.keys(asset.byYear).sort();
   const first = years[0];
@@ -815,8 +1291,141 @@ function toDashboardSlice({
     yearRange,
     body: asset.all.body,
     wick: asset.all.wick,
+    histogram: asset.histogram,
     survival: survival === null ? null : toSurvivalSlice({ survival }),
+    filters:
+      filters === null
+        ? []
+        : filters.results.map((result) => toFilterSlice({ result })),
   };
+}
+
+/**
+ * Pivots one filter result into chart-ready densified arrays plus the
+ * pre-computed threshold matrix the table reads. The same densification
+ * pattern as `toSurvivalSlice` runs three times — once per surface
+ * (baseline / whenTrue / whenFalse) — so each mini-chart can iterate a
+ * shared x-axis with `null` gaps for sparse buckets.
+ */
+function toFilterSlice({
+  result,
+}: {
+  readonly result: SurvivalFilterResultPayload;
+}): FilterSlice {
+  const distancesBp: number[] = [];
+  for (let bp = 0; bp < SURVIVAL_MAX_DISTANCE_BP; bp += 1) {
+    distancesBp.push(bp);
+  }
+  return {
+    id: result.id,
+    displayName: result.displayName,
+    description: result.description,
+    trueLabel: result.trueLabel,
+    falseLabel: result.falseLabel,
+    distancesBp,
+    baseline: densifySurface({ surface: result.baseline, distancesBp }),
+    whenTrue: densifySurface({ surface: result.whenTrue, distancesBp }),
+    whenFalse: densifySurface({ surface: result.whenFalse, distancesBp }),
+    thresholds: {
+      baseline: thresholdMatrix({ surface: result.baseline }),
+      whenTrue: thresholdMatrix({ surface: result.whenTrue }),
+      whenFalse: thresholdMatrix({ surface: result.whenFalse }),
+    },
+    summary: {
+      snapshotsTrue: result.summary.snapshotsTrue,
+      snapshotsFalse: result.summary.snapshotsFalse,
+      snapshotsSkipped: result.summary.snapshotsSkipped,
+      occurrenceTrue: result.summary.occurrenceTrue,
+      occurrenceFalse: result.summary.occurrenceFalse,
+      bestImprovementBpTrue: result.summary.bestImprovementBpTrue,
+      bestImprovementBpFalse: result.summary.bestImprovementBpFalse,
+    },
+  };
+}
+
+function densifySurface({
+  surface,
+  distancesBp,
+}: {
+  readonly surface: SurvivalSurfaceWithCount;
+  readonly distancesBp: readonly number[];
+}): FilterSurfaceArrays {
+  const out = {} as Record<
+    SurvivalRemainingMinutes,
+    { winRate: (number | null)[]; sampleCount: number[] }
+  >;
+  for (const remaining of SURVIVAL_REMAINING_ORDER) {
+    const buckets = surface.byRemaining[remaining];
+    const byDistance = new Map<number, { total: number; survived: number }>();
+    for (const bucket of buckets) {
+      byDistance.set(bucket.distanceBp, {
+        total: bucket.total,
+        survived: bucket.survived,
+      });
+    }
+    const winRate: (number | null)[] = [];
+    const sampleCount: number[] = [];
+    for (const bp of distancesBp) {
+      const bucket = byDistance.get(bp);
+      if (bucket === undefined || bucket.total === 0) {
+        winRate.push(null);
+        sampleCount.push(0);
+        continue;
+      }
+      sampleCount.push(bucket.total);
+      if (bucket.total < SURVIVAL_MIN_SAMPLES) {
+        winRate.push(null);
+        continue;
+      }
+      winRate.push((bucket.survived / bucket.total) * 100);
+    }
+    out[remaining] = { winRate, sampleCount };
+  }
+  return out;
+}
+
+/**
+ * Pre-computes the "first distance bucket reaching each target win rate"
+ * matrix per surface. Distinguishes "never reaches in display range"
+ * (`null`) from "all buckets in range are below the sample-count floor"
+ * (`"thin"`) so the renderer can use different sentinels in the table.
+ */
+function thresholdMatrix({
+  surface,
+}: {
+  readonly surface: SurvivalSurfaceWithCount;
+}): ThresholdMatrixSerialized {
+  const out = {} as Record<SurvivalRemainingMinutes, ThresholdCell[]>;
+  for (const remaining of SURVIVAL_REMAINING_ORDER) {
+    const buckets = surface.byRemaining[remaining];
+    const cells: ThresholdCell[] = [];
+    for (const target of SURVIVAL_TARGET_WIN_RATES) {
+      let answered: ThresholdCell = null;
+      let sawAnyBucket = false;
+      let sawTrustedBucket = false;
+      for (const bucket of buckets) {
+        if (bucket.distanceBp >= SURVIVAL_MAX_DISTANCE_BP) {
+          break;
+        }
+        sawAnyBucket = true;
+        if (bucket.total < SURVIVAL_MIN_SAMPLES) {
+          continue;
+        }
+        sawTrustedBucket = true;
+        const winRate = (bucket.survived / bucket.total) * 100;
+        if (winRate >= target) {
+          answered = bucket.distanceBp;
+          break;
+        }
+      }
+      if (answered === null && sawAnyBucket && !sawTrustedBucket) {
+        answered = "thin";
+      }
+      cells.push(answered);
+    }
+    out[remaining] = cells;
+  }
+  return out;
 }
 
 /**
