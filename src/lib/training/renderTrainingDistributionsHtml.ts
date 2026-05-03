@@ -46,13 +46,13 @@ export function renderTrainingDistributionsHtml({
 }): string {
   const slices = payload.assets.map(toDashboardSlice);
   const seriesLabel = `${payload.series.source}-${payload.series.product} ${payload.series.timeframe}`;
-  const generatedAt = new Date(payload.generatedAtMs).toISOString();
+  const generatedAt = formatGeneratedAt(payload.generatedAtMs);
   const tableHeaderCells = tableTailPercentiles
     .map((p) => `<th scope="col">p${p}</th>`)
     .join("");
 
   return `<!doctype html>
-<html lang="en">
+<html lang="en" data-theme="light">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
@@ -73,26 +73,86 @@ export function renderTrainingDistributionsHtml({
     body > header > p { margin: 6px 0 0; color: var(--pico-muted-color); font-variant-numeric: tabular-nums; --pico-typography-spacing-vertical: 0; }
     body > main { flex: 1 1 auto; max-width: none; padding: 14px 28px 32px; display: flex; flex-direction: column; gap: 18px; }
     nav.tabs { display: flex; gap: 2px; border-bottom: 1px solid var(--pico-muted-border-color); padding: 0; margin: 0; flex-wrap: wrap; }
+    /* Pico styles <button> via CSS variables (--pico-background-color,
+       --pico-color, --pico-box-shadow, etc.); for the tab pattern we
+       override those variables rather than fight Pico's selectors. */
     nav.tabs .tab {
-      background: transparent; border: none; border-bottom: 2px solid transparent;
-      padding: 8px 16px; cursor: pointer; border-radius: 0;
-      width: auto; margin: 0 0 -1px 0; line-height: 1.4;
-      color: var(--pico-muted-color); font-weight: 500; font-size: 14px;
-      letter-spacing: 0.02em; text-transform: uppercase;
       --pico-background-color: transparent;
+      --pico-border-color: transparent;
+      --pico-color: #64748b;
+      --pico-box-shadow: none;
+      border: none;
+      border-bottom: 2px solid transparent;
+      border-radius: 0;
+      padding: 8px 16px;
+      margin: 0 0 -1px 0;
+      width: auto;
+      line-height: 1.4;
+      font-weight: 500;
+      font-size: 14px;
+      letter-spacing: 0.02em;
+      text-transform: uppercase;
+      cursor: pointer;
+      outline: none;
     }
-    nav.tabs .tab:hover { color: var(--pico-color); }
-    nav.tabs .tab.active { color: var(--pico-color); border-bottom-color: ${bodyColor}; font-weight: 600; }
-    section.asset { display: flex; flex-direction: column; gap: 18px; }
+    nav.tabs .tab:hover,
+    nav.tabs .tab:focus,
+    nav.tabs .tab:focus-visible,
+    nav.tabs .tab:active {
+      --pico-background-color: transparent;
+      --pico-border-color: transparent;
+      --pico-color: #0f172a;
+      --pico-box-shadow: none;
+      outline: none;
+    }
+    nav.tabs .tab.active {
+      --pico-color: #0f172a;
+      border-bottom-color: ${bodyColor};
+      font-weight: 600;
+    }
+    /* Block layout for the asset panel — flex was making the chart-host's
+       fixed 360px height ambiguous in some browsers and the chart was
+       stretching to fill the parent. Plain block + margin-bottom is
+       boringly predictable. */
+    section.asset { display: block; }
+    section.asset > * + * { margin-top: 18px; }
     section.asset > header { display: flex; align-items: baseline; gap: 14px; }
     section.asset > header > h2 { margin: 0; font-size: 16px; --pico-typography-spacing-vertical: 0; }
     section.asset > header > p { margin: 0; color: var(--pico-muted-color); font-size: 13px; font-variant-numeric: tabular-nums; --pico-typography-spacing-vertical: 0; }
-    .chart-card { display: flex; flex-direction: column; gap: 8px; }
-    .chart-card .legend { display: flex; gap: 18px; font-size: 13px; color: var(--pico-color); }
+    .chart-card { display: block; }
+    .chart-card .legend { display: flex; gap: 18px; font-size: 13px; color: var(--pico-color); margin-bottom: 8px; }
     .chart-card .legend .swatch { display: inline-block; width: 22px; height: 2px; vertical-align: middle; margin-right: 8px; }
-    .chart-host { position: relative; width: 100%; height: 360px; }
+    .chart-frame { position: relative; }
+    .chart-host { position: relative; width: 100%; height: 360px; min-height: 360px; max-height: 360px; }
+    .chart-loading { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: var(--pico-muted-color); font-size: 13px; }
+    .chart-tooltip {
+      position: absolute;
+      pointer-events: none;
+      background: #ffffff;
+      border: 1px solid var(--pico-muted-border-color);
+      border-radius: 6px;
+      padding: 8px 10px;
+      box-shadow: 0 4px 12px rgba(15, 23, 42, 0.08);
+      font-size: 12px;
+      font-variant-numeric: tabular-nums;
+      opacity: 0;
+      transition: opacity 0.06s ease;
+      z-index: 10;
+      min-width: 130px;
+    }
+    .chart-tooltip.visible { opacity: 1; }
+    .chart-tooltip .p { font-weight: 600; margin-bottom: 4px; padding-bottom: 4px; border-bottom: 1px solid var(--pico-muted-border-color); color: #0f172a; }
+    .chart-tooltip .row { display: grid; grid-template-columns: 12px auto 1fr; gap: 8px; align-items: center; padding: 1px 0; }
+    .chart-tooltip .swatch { width: 10px; height: 2px; }
+    .chart-tooltip .name { color: var(--pico-muted-color); }
+    .chart-tooltip .val { font-weight: 600; text-align: right; color: #0f172a; }
     .table-wrap { overflow-x: auto; }
-    table.percentiles { width: 100%; min-width: 720px; margin: 0; --pico-typography-spacing-vertical: 0; font-variant-numeric: tabular-nums; }
+    /* Min-width is 70px (label col) + 11 * 90px (percentile cols) = 1060px.
+       At narrower viewports the .table-wrap scrolls horizontally. Cells
+       set white-space: nowrap so numbers never wrap mid-cell regardless. */
+    table.percentiles { width: 100%; min-width: 1060px; margin: 0; --pico-typography-spacing-vertical: 0; font-variant-numeric: tabular-nums; table-layout: fixed; }
+    table.percentiles th:first-child, table.percentiles td:first-child { width: 70px; }
+    table.percentiles th, table.percentiles td { white-space: nowrap; }
     table.percentiles thead th { color: var(--pico-muted-color); font-weight: 500; text-align: right; }
     table.percentiles tbody th { text-align: left; text-transform: uppercase; letter-spacing: 0.04em; font-size: 13px; }
     table.percentiles tbody td { text-align: right; }
@@ -123,10 +183,13 @@ export function renderTrainingDistributionsHtml({
       </header>
       <div class="chart-card">
         <div class="legend">
-          <span><span class="swatch" style="background:${bodyColor}"></span>body — |close − open| / open</span>
-          <span><span class="swatch" style="background:${wickColor}"></span>wick — (high − low) / open</span>
+          <span><span class="swatch" style="background:${bodyColor}"></span>body size</span>
+          <span><span class="swatch" style="background:${wickColor}"></span>wick size</span>
         </div>
-        <div id="chart" class="chart-host"></div>
+        <div class="chart-frame">
+          <div id="chart" class="chart-host"><div class="chart-loading">Loading chart…</div></div>
+          <div id="chart-tooltip" class="chart-tooltip"></div>
+        </div>
       </div>
       <div class="table-wrap">
         <table class="percentiles">
@@ -136,10 +199,7 @@ export function renderTrainingDistributionsHtml({
               ${tableHeaderCells}
             </tr>
           </thead>
-          <tbody>
-            <tr class="body"><th scope="row">body</th><td colspan="${tableTailPercentiles.length}" id="body-row"></td></tr>
-            <tr class="wick"><th scope="row">wick</th><td colspan="${tableTailPercentiles.length}" id="wick-row"></td></tr>
-          </tbody>
+          <tbody></tbody>
         </table>
       </div>
     </section>
@@ -147,7 +207,11 @@ export function renderTrainingDistributionsHtml({
   <script>
     const slices = ${JSON.stringify(slices)};
     const tablePs = ${JSON.stringify(tableTailPercentiles)};
-    const xs = Array.from({ length: 101 }, (_, i) => i);
+    // Chart only renders p0..p99. p100 is a near-vertical spike (one
+    // flash-crash bar) that compresses the rest of the curve into a flat
+    // line, so we exclude it from the chart. The table still includes it.
+    const chartLastP = 99;
+    const xs = Array.from({ length: chartLastP + 1 }, (_, i) => i);
     const bodyColor = ${JSON.stringify(bodyColor)};
     const wickColor = ${JSON.stringify(wickColor)};
 
@@ -158,57 +222,127 @@ export function renderTrainingDistributionsHtml({
       if (v >= 0.1) return v.toFixed(3) + "%";
       return v.toFixed(4) + "%";
     };
+    // Fixed-precision formatter for the y-axis only. Variable-precision
+    // labels would resize per asset and shift the plot area horizontally
+    // when switching tabs. The full-precision formatter is still used in
+    // the table and the hover tooltip.
+    const formatPctAxis = (v) =>
+      Number.isFinite(v) ? v.toFixed(1) + "%" : "—";
 
     const tabsEl = document.getElementById("tabs");
     const titleEl = document.getElementById("asset-title");
     const metaEl = document.getElementById("asset-meta");
     const chartHost = document.getElementById("chart");
+    const tooltipEl = document.getElementById("chart-tooltip");
+    const chartFrame = chartHost.parentElement;
     let chart = null;
 
+    // Rewrite the whole tbody on every call. We can't keep stable element
+    // references inside the rows (innerHTML replacement on a <tr> would
+    // detach any id we set on a child), so the tbody itself is the
+    // anchor and we re-emit its rows from scratch each time.
+    const tbodyEl = document.querySelector("table.percentiles tbody");
     function renderTable(slice) {
-      const bodyRow = document.getElementById("body-row");
-      const wickRow = document.getElementById("wick-row");
-      bodyRow.parentElement.innerHTML = '<th scope="row">body</th>'
-        + tablePs.map((p) => '<td>' + formatPct(slice.body[p]) + '</td>').join("");
-      wickRow.parentElement.innerHTML = '<th scope="row">wick</th>'
-        + tablePs.map((p) => '<td>' + formatPct(slice.wick[p]) + '</td>').join("");
+      if (!tbodyEl) return;
+      const cells = (key) => tablePs
+        .map((p) => '<td>' + formatPct(slice[key][p]) + '</td>')
+        .join("");
+      tbodyEl.innerHTML =
+        '<tr class="body"><th scope="row">body</th>' + cells("body") + '</tr>' +
+        '<tr class="wick"><th scope="row">wick</th>' + cells("wick") + '</tr>';
     }
 
+    function chartHostError(msg) {
+      chartHost.innerHTML = '<pre style="color:#b91c1c;padding:12px;margin:0;white-space:pre-wrap;font-size:12px">' + msg + '</pre>';
+    }
+
+    // Render synchronously: this script runs at end of <body>, layout has
+    // happened, and .chart-host has min-height: 360px so it always has a
+    // measurable size. We deliberately do NOT use requestAnimationFrame
+    // here — RAF is paused when document.visibilityState is "hidden",
+    // which silently breaks the chart for any tab opened in the
+    // background.
     function renderChart(slice) {
       if (chart) { chart.destroy(); chart = null; }
-      const data = [xs, slice.body, slice.wick];
+      chartHost.innerHTML = "";
+      if (typeof uPlot === "undefined") {
+        chartHostError("uPlot global is undefined — CDN failed to load?");
+        return;
+      }
+      const w = chartHost.clientWidth || chartHost.getBoundingClientRect().width || 800;
+      const h = chartHost.clientHeight || 360;
+      if (w === 0 || h === 0) {
+        chartHostError("chart host has zero size: " + w + "x" + h);
+        return;
+      }
+      const sliceTo = chartLastP + 1;
+      const bodyData = Array.from({ length: sliceTo }, (_, p) =>
+        Number.isFinite(slice.body[p]) ? slice.body[p] : null,
+      );
+      const wickData = Array.from({ length: sliceTo }, (_, p) =>
+        Number.isFinite(slice.wick[p]) ? slice.wick[p] : null,
+      );
+      const data = [xs.slice(), bodyData, wickData];
+      const updateTooltip = (u) => {
+        const idx = u.cursor.idx;
+        if (idx == null || idx < 0 || idx >= xs.length) {
+          tooltipEl.classList.remove("visible");
+          return;
+        }
+        const p = xs[idx];
+        const bodyV = bodyData[idx];
+        const wickV = wickData[idx];
+        tooltipEl.innerHTML =
+          '<div class="p">p' + p + '</div>' +
+          '<div class="row"><span class="swatch" style="background:' + bodyColor + '"></span><span class="name">body</span><span class="val">' + formatPct(bodyV) + '</span></div>' +
+          '<div class="row"><span class="swatch" style="background:' + wickColor + '"></span><span class="name">wick</span><span class="val">' + formatPct(wickV) + '</span></div>';
+        const cursorLeft = u.cursor.left;
+        const frameW = chartFrame.getBoundingClientRect().width;
+        const tooltipW = tooltipEl.offsetWidth || 140;
+        const margin = 12;
+        const placeRight = cursorLeft + margin + tooltipW <= frameW;
+        const left = placeRight ? cursorLeft + margin : cursorLeft - margin - tooltipW;
+        tooltipEl.style.left = Math.max(margin, Math.min(left, frameW - tooltipW - margin)) + "px";
+        tooltipEl.style.top = "12px";
+        tooltipEl.classList.add("visible");
+      };
       const opts = {
-        width: chartHost.clientWidth,
-        height: chartHost.clientHeight,
-        padding: [12, 24, 8, 8],
-        cursor: { points: { show: true }, drag: { setScale: false } },
+        width: w,
+        height: h,
         legend: { show: false },
         scales: { x: { time: false } },
+        cursor: {
+          points: { show: false },
+          drag: { setScale: false, x: false, y: false },
+        },
         series: [
           {},
-          { label: "body", stroke: bodyColor, width: 1.75, points: { show: false } },
-          { label: "wick", stroke: wickColor, width: 1.75, points: { show: false } },
+          { label: "body", stroke: bodyColor, width: 1.75 },
+          { label: "wick", stroke: wickColor, width: 1.75 },
         ],
         axes: [
           {
             stroke: "#64748b",
-            grid: { stroke: "#f1f5f9", width: 1 },
-            ticks: { stroke: "#cbd5e1", width: 1, size: 6 },
-            font: "13px -apple-system, BlinkMacSystemFont, system-ui, sans-serif",
+            grid: { show: false },
+            ticks: { show: false },
             values: (u, splits) => splits.map((p) => "p" + Math.round(p)),
-            space: 60,
           },
           {
             stroke: "#64748b",
-            grid: { stroke: "#f1f5f9", width: 1 },
+            grid: { show: false },
             ticks: { show: false },
-            font: "13px -apple-system, BlinkMacSystemFont, system-ui, sans-serif",
-            values: (u, splits) => splits.map(formatPct),
-            size: 80,
+            values: (u, splits) => splits.map(formatPctAxis),
+            size: 64,
           },
         ],
+        hooks: { setCursor: [updateTooltip] },
       };
-      chart = new uPlot(opts, data, chartHost);
+      try {
+        chart = new uPlot(opts, data, chartHost);
+        chartHost.addEventListener("mouseleave", () => tooltipEl.classList.remove("visible"));
+      } catch (err) {
+        chartHostError("uPlot threw: " + (err && err.message ? err.message : String(err)));
+      }
     }
 
     function activate(asset) {
@@ -228,11 +362,25 @@ export function renderTrainingDistributionsHtml({
       const target = e.target;
       if (!(target instanceof HTMLElement)) return;
       const btn = target.closest(".tab");
-      if (!btn) return;
+      if (!(btn instanceof HTMLElement)) return;
       const asset = btn.getAttribute("data-asset");
-      if (asset) activate(asset);
+      if (!asset) return;
+      activate(asset);
+      // Drop focus so Pico's :focus styling does not stick after click.
+      btn.blur();
     });
 
+    // Use a ResizeObserver so the chart tracks its container even when
+    // window size is unchanged (e.g. flex-layout reflow on first paint).
+    if (typeof ResizeObserver !== "undefined") {
+      const ro = new ResizeObserver(() => {
+        if (!chart) return;
+        const w = chartHost.clientWidth;
+        const h = chartHost.clientHeight;
+        if (w > 0 && h > 0) chart.setSize({ width: w, height: h });
+      });
+      ro.observe(chartHost);
+    }
     window.addEventListener("resize", () => {
       if (chart) chart.setSize({ width: chartHost.clientWidth, height: chartHost.clientHeight });
     });
@@ -270,4 +418,24 @@ function escapeHtml(value: string): string {
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;");
+}
+
+/**
+ * Formats the run timestamp as `YYYY-MM-DD @ HH:MM` in the local timezone
+ * of the machine that ran the CLI. No timezone label — the operator opens
+ * the HTML on their own clock and doesn't need a reminder.
+ */
+function formatGeneratedAt(ms: number): string {
+  const fmt = new Intl.DateTimeFormat("en-US", {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  });
+  const parts = fmt.formatToParts(new Date(ms));
+  const get = (type: string): string =>
+    parts.find((part) => part.type === type)?.value ?? "";
+  return `${get("year")}-${get("month")}-${get("day")} @ ${get("hour")}:${get("minute")}`;
 }
