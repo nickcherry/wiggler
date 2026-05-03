@@ -87,14 +87,20 @@ function applyFrame({
   readonly lastAsk: number | null;
 }): QuoteTick | null {
   const data = JSON.parse(raw) as GeminiL2Frame;
-  if (data.type !== "l2_updates" || data.symbol !== "BTCUSD") {return null;}
+  if (data.type !== "l2_updates" || data.symbol !== "BTCUSD") {
+    return null;
+  }
   for (const change of data.changes ?? []) {
     const side = change[0];
     const price = Number(change[1]);
     const qty = Number(change[2]);
-    if (!Number.isFinite(price) || !Number.isFinite(qty)) {continue;}
+    if (!Number.isFinite(price) || !Number.isFinite(qty)) {
+      continue;
+    }
     const book = side === "buy" ? bids : side === "sell" ? asks : null;
-    if (!book) {continue;}
+    if (!book) {
+      continue;
+    }
     if (qty === 0) {
       book.delete(price);
     } else {
@@ -104,8 +110,12 @@ function applyFrame({
 
   const bestBid = topOfBook({ book: bids, kind: "buy" });
   const bestAsk = topOfBook({ book: asks, kind: "sell" });
-  if (bestBid === null || bestAsk === null) {return null;}
-  if (bestBid === lastBid && bestAsk === lastAsk) {return null;}
+  if (bestBid === null || bestAsk === null) {
+    return null;
+  }
+  if (bestBid === lastBid && bestAsk === lastAsk) {
+    return null;
+  }
 
   return {
     exchange: "gemini-spot",
@@ -124,7 +134,9 @@ function topOfBook({
   readonly book: ReadonlyMap<number, number>;
   readonly kind: "buy" | "sell";
 }): number | null {
-  if (book.size === 0) {return null;}
+  if (book.size === 0) {
+    return null;
+  }
   let best: number | null = null;
   for (const price of book.keys()) {
     if (best === null) {

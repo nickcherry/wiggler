@@ -215,7 +215,8 @@ function parseKlinesCsv({
     if (isFirstLine) {
       isFirstLine = false;
       const firstCellEnd = line.indexOf(",");
-      const firstCell = firstCellEnd === -1 ? line : line.slice(0, firstCellEnd);
+      const firstCell =
+        firstCellEnd === -1 ? line : line.slice(0, firstCellEnd);
       if (!/^\d/.test(firstCell)) {
         continue;
       }
@@ -261,11 +262,7 @@ function enumerateDayStarts({
 }
 
 function utcDayStart(date: Date): number {
-  return Date.UTC(
-    date.getUTCFullYear(),
-    date.getUTCMonth(),
-    date.getUTCDate(),
-  );
+  return Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate());
 }
 
 function formatMonth({ date }: { readonly date: Date }): string {

@@ -78,7 +78,11 @@ function describeInput({
   return "";
 }
 
-function formatOption({ option }: { readonly option: CliOptionDefinition }): string {
+function formatOption({
+  option,
+}: {
+  readonly option: CliOptionDefinition;
+}): string {
   const flag = option.short ? `${option.short}, ${option.long}` : option.long;
   if (option.kind === "flag") {
     return flag;

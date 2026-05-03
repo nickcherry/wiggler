@@ -49,20 +49,24 @@ export function renderPriceChartHtml({
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>${escapeHtml(title)}</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@picocss/pico@2/css/pico.classless.min.css" />
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/uplot@1.6.30/dist/uPlot.min.css" />
   <script src="https://cdn.jsdelivr.net/npm/uplot@1.6.30/dist/uPlot.iife.min.js" charset="utf-8"></script>
   <style>
-    :root { color-scheme: light; }
+    /* Pico provides typography + color tokens; this block only overrides
+       where the temp-dashboard needs a full-viewport flex layout instead
+       of Pico's default centered-document layout, plus chart-specific
+       custom widgets (panels, legend, tooltip, bar chart). */
+    :root { color-scheme: light; --pico-font-size: 87.5%; }
     * { box-sizing: border-box; }
-    html, body { margin: 0; padding: 0; background: #ffffff; color: #0f172a; font: 13px/1.5 -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", system-ui, sans-serif; -webkit-font-smoothing: antialiased; }
-    body { display: flex; flex-direction: column; min-height: 100vh; }
-    header { padding: 18px 28px 14px; border-bottom: 1px solid #e2e8f0; flex: 0 0 auto; }
-    header h1 { font-size: 18px; font-weight: 600; margin: 0; color: #0f172a; letter-spacing: -0.01em; }
-    header .range { margin: 6px 0 0; color: #475569; font-size: 13px; font-variant-numeric: tabular-nums; }
-    main { flex: 1 1 auto; padding: 14px 20px 32px; display: flex; flex-direction: column; gap: 14px; }
+    body { margin: 0; min-height: 100vh; display: flex; flex-direction: column; padding: 0; }
+    body > header { padding: 18px 28px 14px; max-width: none; border-bottom: 1px solid var(--pico-muted-border-color); flex: 0 0 auto; }
+    body > header > h1 { font-size: 18px; margin: 0; --pico-typography-spacing-vertical: 0; }
+    body > header .range { margin: 6px 0 0; color: var(--pico-muted-color); font-variant-numeric: tabular-nums; }
+    body > main { flex: 1 1 auto; max-width: none; padding: 14px 20px 32px; display: flex; flex-direction: column; gap: 14px; }
     section.primary { display: flex; flex-direction: column; gap: 12px; min-height: 86vh; }
-    section.secondary { padding-top: 32px; border-top: 1px solid #e2e8f0; display: flex; flex-direction: column; gap: 14px; }
-    section h2 { font-size: 14px; font-weight: 600; margin: 0; color: #0f172a; letter-spacing: 0.01em; }
+    section.secondary { padding-top: 32px; border-top: 1px solid var(--pico-muted-border-color); display: flex; flex-direction: column; gap: 14px; }
+    section > h2 { font-size: 14px; margin: 0; --pico-typography-spacing-vertical: 0; }
     .legend { display: flex; flex-wrap: wrap; gap: 10px 22px; font-size: 13px; color: #334155; user-select: none; }
     .legend-item { display: inline-flex; align-items: center; gap: 8px; cursor: pointer; line-height: 1.4; }
     .legend-item.muted { opacity: 0.4; }
@@ -505,9 +509,13 @@ function buildPanelData({
   const spotMeta: SeriesMeta[] = [];
   const spotYs: Array<readonly (number | null)[]> = [];
   for (const exchange of spotVenues) {
-    if (!ticksByExchange.has(exchange)) {continue;}
+    if (!ticksByExchange.has(exchange)) {
+      continue;
+    }
     const interp = interpolatedByExchange.get(exchange);
-    if (!interp) {continue;}
+    if (!interp) {
+      continue;
+    }
     spotMeta.push({
       label: shortLabelByExchange[exchange],
       stroke: colorByExchange[exchange],
@@ -555,9 +563,13 @@ function buildPanelData({
   const perpMeta: SeriesMeta[] = [];
   const perpYs: Array<readonly (number | null)[]> = [];
   for (const exchange of perpVenues) {
-    if (!ticksByExchange.has(exchange)) {continue;}
+    if (!ticksByExchange.has(exchange)) {
+      continue;
+    }
     const interp = interpolatedByExchange.get(exchange);
-    if (!interp) {continue;}
+    if (!interp) {
+      continue;
+    }
     perpMeta.push({
       label: shortLabelByExchange[exchange],
       stroke: colorByExchange[exchange],
@@ -613,10 +625,14 @@ function computeConsensusOnGrid({
       ExchangeId,
       number,
     ][]) {
-      if (!w || w <= 0) {continue;}
+      if (!w || w <= 0) {
+        continue;
+      }
       const series = interpolatedByExchange.get(exchange);
       const v = series?.[i];
-      if (v == null) {continue;}
+      if (v == null) {
+        continue;
+      }
       weightedSum += w * v;
       weightSum += w;
     }

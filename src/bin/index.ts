@@ -2,9 +2,10 @@
 import { candlesFillGapsCommand } from "@wiggler/bin/candles/fillGaps";
 import { candlesSyncCommand } from "@wiggler/bin/candles/sync";
 import { dbMigrateCommand } from "@wiggler/bin/db/migrate";
-import { pricesCaptureCommand } from "@wiggler/bin/prices/capture";
-import { pricesChartCommand } from "@wiggler/bin/prices/chart";
+import { latencyCaptureCommand } from "@wiggler/bin/latency/capture";
+import { latencyChartCommand } from "@wiggler/bin/latency/chart";
 import { telegramTestCommand } from "@wiggler/bin/telegram/test";
+import { trainingDistributionsCommand } from "@wiggler/bin/training/distributions";
 import { createCli } from "@wiggler/lib/cli/createCli";
 
 const cli = createCli({
@@ -14,8 +15,9 @@ const cli = createCli({
     dbMigrateCommand,
     candlesSyncCommand,
     candlesFillGapsCommand,
-    pricesCaptureCommand,
-    pricesChartCommand,
+    latencyCaptureCommand,
+    latencyChartCommand,
+    trainingDistributionsCommand,
     telegramTestCommand,
   ],
 });

@@ -25,9 +25,12 @@ Everything that matters is reachable through one non-interactive entrypoint:
   `db:migrate`
 - `candles:*`
   `candles:sync`
-- `prices:*`
-  `prices:capture`
-  `prices:chart`
+  `candles:fill-gaps`
+- `latency:*`
+  `latency:capture`
+  `latency:chart`
+- `training:*`
+  `training:distributions`
 - `telegram:*`
   `telegram:test`
 - `help`

@@ -7,7 +7,10 @@ import { productValues } from "@wiggler/constants/products";
 import { candleSourceValues } from "@wiggler/constants/sources";
 import { alignTimeframeWindow } from "@wiggler/lib/candles/alignTimeframeWindow";
 import { summarizeSyncResult } from "@wiggler/lib/candles/summarizeSyncResult";
-import { syncCandles, type SyncCandlesResult } from "@wiggler/lib/candles/syncCandles";
+import {
+  syncCandles,
+  type SyncCandlesResult,
+} from "@wiggler/lib/candles/syncCandles";
 import { defineCommand } from "@wiggler/lib/cli/defineCommand";
 import { defineValueOption } from "@wiggler/lib/cli/defineValueOption";
 import { createDatabase } from "@wiggler/lib/db/createDatabase";
@@ -207,7 +210,11 @@ function parseList(value: string | undefined): string[] | undefined {
 }
 
 function formatMs(ms: number): string {
-  if (ms < 1000) {return `${ms.toFixed(0)}ms`;}
-  if (ms < 60_000) {return `${(ms / 1000).toFixed(2)}s`;}
+  if (ms < 1000) {
+    return `${ms.toFixed(0)}ms`;
+  }
+  if (ms < 60_000) {
+    return `${(ms / 1000).toFixed(2)}s`;
+  }
   return `${Math.floor(ms / 60_000)}m${((ms % 60_000) / 1000).toFixed(0)}s`;
 }

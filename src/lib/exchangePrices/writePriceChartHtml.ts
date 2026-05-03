@@ -22,7 +22,7 @@ type WritePriceChartHtmlParams = {
  * `exhaustive` controls chart presentation:
  *   - true  → fade venue lines, emphasize polymarket, draw spot/perp VWAPs
  *   - false → uniform line styling across every series, no VWAPs (the
- *             default `prices:capture` shape).
+ *             default `latency:capture` shape).
  */
 export async function writePriceChartHtml({
   capture,

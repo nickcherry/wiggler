@@ -28,10 +28,14 @@ export function parseOkxBboFrame({
     return null;
   }
   const row = data.data?.[0];
-  if (!row) {return null;}
+  if (!row) {
+    return null;
+  }
   const bid = Number(row.bids?.[0]?.[0]);
   const ask = Number(row.asks?.[0]?.[0]);
-  if (!Number.isFinite(bid) || !Number.isFinite(ask)) {return null;}
+  if (!Number.isFinite(bid) || !Number.isFinite(ask)) {
+    return null;
+  }
   const tsExchangeMs = row.ts ? Number(row.ts) : null;
   return {
     exchange,

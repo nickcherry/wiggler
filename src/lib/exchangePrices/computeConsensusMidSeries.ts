@@ -36,12 +36,18 @@ export function computeConsensusMidSeries({
 
   for (const tick of ticks) {
     const weight = weights[tick.exchange] ?? 0;
-    if (weight <= 0) {continue;}
+    if (weight <= 0) {
+      continue;
+    }
     const list = ticksByExchange.get(tick.exchange) ?? [];
     list.push(tick);
     ticksByExchange.set(tick.exchange, list);
-    if (tick.tsReceivedMs < startMs) {startMs = tick.tsReceivedMs;}
-    if (tick.tsReceivedMs > endMs) {endMs = tick.tsReceivedMs;}
+    if (tick.tsReceivedMs < startMs) {
+      startMs = tick.tsReceivedMs;
+    }
+    if (tick.tsReceivedMs > endMs) {
+      endMs = tick.tsReceivedMs;
+    }
   }
 
   if (
@@ -65,7 +71,9 @@ export function computeConsensusMidSeries({
       let cursor = cursors.get(exchange) ?? 0;
       while (cursor < list.length) {
         const next = list[cursor];
-        if (next === undefined || next.tsReceivedMs > t) {break;}
+        if (next === undefined || next.tsReceivedMs > t) {
+          break;
+        }
         lastMid.set(exchange, next.mid);
         cursor += 1;
       }

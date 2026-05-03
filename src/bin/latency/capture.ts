@@ -8,10 +8,7 @@ import { defineValueOption } from "@wiggler/lib/cli/defineValueOption";
 import { captureAllQuoteStreams } from "@wiggler/lib/exchangePrices/captureAllQuoteStreams";
 import { openHtmlOnDarwin } from "@wiggler/lib/exchangePrices/openHtmlOnDarwin";
 import { writePriceChartHtml } from "@wiggler/lib/exchangePrices/writePriceChartHtml";
-import {
-  type ExchangeId,
-  exchangeIdSchema,
-} from "@wiggler/types/exchanges";
+import { type ExchangeId, exchangeIdSchema } from "@wiggler/types/exchanges";
 import pc from "picocolors";
 import { z } from "zod";
 
@@ -31,17 +28,19 @@ const defaultExchanges: readonly ExchangeId[] = [
 ];
 
 /**
- * Captures top-of-book mid-price ticks from every requested exchange in
- * parallel for a fixed duration, persists the raw ticks to JSON in
- * `wiggler/tmp/`, and writes an interactive HTML chart side-by-side. Both
- * paths are printed; on macOS the chart is opened automatically unless
- * `--no-open` is passed.
+ * Latency-experiment capture: records top-of-book mid-price ticks from every
+ * requested exchange in parallel for a fixed duration, persists the raw ticks
+ * to JSON in `wiggler/tmp/`, and writes an interactive HTML chart side-by-
+ * side. Both paths are printed; on macOS the chart is opened automatically
+ * unless `--no-open` is passed.
+ *
+ * The experiment this serves is documented in `doc/LATENCY_EXPERIMENT.md`.
  */
-export const pricesCaptureCommand = defineCommand({
-  name: "prices:capture",
+export const latencyCaptureCommand = defineCommand({
+  name: "latency:capture",
   summary: "Record BBO mid-price ticks across exchanges and chart them",
   description:
-    "Opens a public WebSocket to each requested exchange, accumulates every BBO update for the configured duration, then writes a JSON snapshot and an interactive ECharts chart to wiggler/tmp/. Useful for comparing how quickly different venues react to the same price move.",
+    "Opens a public WebSocket to each requested exchange, accumulates every BBO update for the configured duration, then writes a JSON snapshot and an interactive uPlot chart to wiggler/tmp/. The experiment compares how quickly different venues react to the same price move.",
   options: [
     defineValueOption({
       key: "duration",
@@ -95,11 +94,11 @@ export const pricesCaptureCommand = defineCommand({
     }),
   ],
   examples: [
-    "bun wiggler prices:capture",
-    "bun wiggler prices:capture --exhaustive",
-    "bun wiggler prices:capture --duration 30",
-    "bun wiggler prices:capture --exchanges coinbase-spot,binance-spot",
-    "bun wiggler prices:capture --no-chart",
+    "bun wiggler latency:capture",
+    "bun wiggler latency:capture --exhaustive",
+    "bun wiggler latency:capture --duration 30",
+    "bun wiggler latency:capture --exchanges coinbase-spot,binance-spot",
+    "bun wiggler latency:capture --no-chart",
   ],
   output:
     "Prints per-exchange tick counts, error summary, and the JSON + HTML output paths.",
@@ -113,7 +112,7 @@ export const pricesCaptureCommand = defineCommand({
     });
 
     io.writeStdout(
-      `${pc.bold("prices:capture")}  ${pc.dim("duration=")}${options.duration}s  ${pc.dim("exchanges=")}${exchanges.length}  ${pc.dim("mode=")}${options.exhaustive ? "exhaustive" : "default"}\n`,
+      `${pc.bold("latency:capture")}  ${pc.dim("duration=")}${options.duration}s  ${pc.dim("exchanges=")}${exchanges.length}  ${pc.dim("mode=")}${options.exhaustive ? "exhaustive" : "default"}\n`,
     );
 
     const result = await captureAllQuoteStreams({
@@ -145,8 +144,8 @@ export const pricesCaptureCommand = defineCommand({
     const stamp = new Date(result.startedAtMs)
       .toISOString()
       .replace(/[:.]/g, "-");
-    const jsonPath = resolvePath(tmpDir, `prices_${stamp}.json`);
-    const htmlPath = resolvePath(tmpDir, `prices_${stamp}.html`);
+    const jsonPath = resolvePath(tmpDir, `latency_${stamp}.json`);
+    const htmlPath = resolvePath(tmpDir, `latency_${stamp}.html`);
 
     const persisted = { ...result, exhaustive: options.exhaustive };
     await writeFile(jsonPath, JSON.stringify(persisted, null, 2));
@@ -183,7 +182,9 @@ function resolveExchanges({
 }
 
 function parseList(value: string | undefined): string[] | undefined {
-  if (value === undefined) {return undefined;}
+  if (value === undefined) {
+    return undefined;
+  }
   const parts = value
     .split(",")
     .map((entry) => entry.trim())

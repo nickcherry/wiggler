@@ -23,9 +23,7 @@ export function densifyMidsLinearly({
   if (binMs <= 0) {
     throw new Error("binMs must be positive");
   }
-  const sorted = [...ticks].sort(
-    (a, b) => a.tsReceivedMs - b.tsReceivedMs,
-  );
+  const sorted = [...ticks].sort((a, b) => a.tsReceivedMs - b.tsReceivedMs);
   if (sorted.length < 2) {
     return sorted.map((tick) => [tick.tsReceivedMs, tick.mid]);
   }
@@ -44,7 +42,9 @@ export function densifyMidsLinearly({
   for (let t = startMs; t <= endMs; t += binMs) {
     while (rightIndex < sorted.length) {
       const right = sorted[rightIndex];
-      if (right === undefined || right.tsReceivedMs >= t) {break;}
+      if (right === undefined || right.tsReceivedMs >= t) {
+        break;
+      }
       rightIndex += 1;
     }
     const right = sorted[rightIndex];

@@ -109,7 +109,7 @@ export function createCli(definition: CliAppDefinition): CliApp {
         process.exit(1);
       }
       io.writeStderr(
-        `${pc.red("error:")} ${error instanceof Error ? error.stack ?? error.message : String(error)}\n`,
+        `${pc.red("error:")} ${error instanceof Error ? (error.stack ?? error.message) : String(error)}\n`,
       );
       process.exit(1);
     }

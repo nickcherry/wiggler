@@ -48,7 +48,9 @@ export function streamPolymarketChainlinkQuotes({
   ws.addEventListener("message", (event: MessageEvent<string>) => {
     try {
       const tick = parseFrame(event.data);
-      if (tick) {onTick(tick);}
+      if (tick) {
+        onTick(tick);
+      }
     } catch (error) {
       onError(error instanceof Error ? error : new Error(String(error)));
     }
@@ -71,14 +73,20 @@ type PolymarketRtdsFrame = {
 function parseFrame(raw: string): QuoteTick | null {
   // RTDS sends occasional empty keep-alive frames; ignore them rather
   // than letting JSON.parse blow up.
-  if (raw.length === 0) {return null;}
+  if (raw.length === 0) {
+    return null;
+  }
   const frame = JSON.parse(raw) as PolymarketRtdsFrame;
   if (frame.topic !== topic || frame.type !== "update" || !frame.payload) {
     return null;
   }
-  if (frame.payload.symbol !== targetSymbol) {return null;}
+  if (frame.payload.symbol !== targetSymbol) {
+    return null;
+  }
   const value = Number(frame.payload.value);
-  if (!Number.isFinite(value) || value <= 0) {return null;}
+  if (!Number.isFinite(value) || value <= 0) {
+    return null;
+  }
   const tsExchangeMs =
     typeof frame.payload.timestamp === "number"
       ? frame.payload.timestamp

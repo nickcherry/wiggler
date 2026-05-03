@@ -76,9 +76,10 @@ export type CliCommandRunContext<
 };
 
 export type CliCommandDefinition<
-  TOptions extends readonly CliOptionDefinition[] = readonly CliOptionDefinition[],
-  TPositionals extends
-    readonly CliPositionalDefinition[] = readonly CliPositionalDefinition[],
+  TOptions extends readonly CliOptionDefinition[] =
+    readonly CliOptionDefinition[],
+  TPositionals extends readonly CliPositionalDefinition[] =
+    readonly CliPositionalDefinition[],
 > = {
   readonly name: string;
   readonly summary: string;

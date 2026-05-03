@@ -147,10 +147,7 @@ export const candlesFillGapsCommand = defineCommand({
 
     const overallMs = performance.now() - overallStart;
     const totalMissing = results.reduce((sum, r) => sum + r.missingBars, 0);
-    const totalRecovered = results.reduce(
-      (sum, r) => sum + r.recoveredBars,
-      0,
-    );
+    const totalRecovered = results.reduce((sum, r) => sum + r.recoveredBars, 0);
     io.writeStdout(
       `\n${pc.green("done")}  ${pc.dim("wall=")}${formatMs(overallMs)}  ` +
         `${pc.dim("missing=")}${totalMissing.toLocaleString()}  ` +

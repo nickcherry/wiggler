@@ -20,9 +20,7 @@ export function interpolateMidsAtTimestamps({
   ticks,
   timestampsMs,
 }: InterpolateMidsAtTimestampsParams): Array<number | null> {
-  const sorted = [...ticks].sort(
-    (a, b) => a.tsReceivedMs - b.tsReceivedMs,
-  );
+  const sorted = [...ticks].sort((a, b) => a.tsReceivedMs - b.tsReceivedMs);
   if (sorted.length === 0) {
     return timestampsMs.map(() => null);
   }
@@ -43,7 +41,9 @@ export function interpolateMidsAtTimestamps({
     }
     while (cursor + 1 < sorted.length) {
       const next = sorted[cursor + 1];
-      if (next === undefined || next.tsReceivedMs > t) {break;}
+      if (next === undefined || next.tsReceivedMs > t) {
+        break;
+      }
       cursor += 1;
     }
     const left = sorted[cursor];
