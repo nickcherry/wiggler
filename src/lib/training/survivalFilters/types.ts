@@ -34,6 +34,13 @@ export type SurvivalFilter = {
   readonly description: string;
   readonly trueLabel: string;
   readonly falseLabel: string;
+  /**
+   * Bumps when the classifier logic changes in a way that would alter
+   * the produced surfaces — different threshold, new tie-break, etc.
+   * Cache keys mix this in so a version bump invalidates only that
+   * filter's cached results, not the whole dashboard.
+   */
+  readonly version: number;
   readonly classify: (
     snapshot: SurvivalSnapshot,
     context: SurvivalSnapshotContext,

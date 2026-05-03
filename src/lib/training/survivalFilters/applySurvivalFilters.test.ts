@@ -118,6 +118,7 @@ const probeFilter: SurvivalFilter = {
   description: "Test filter",
   trueLabel: "T",
   falseLabel: "F",
+  version: 1,
   classify: (snapshot, context) => {
     if (context.prev1mDirection === null) {
       return "skip";

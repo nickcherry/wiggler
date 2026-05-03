@@ -18,6 +18,12 @@ import type { Candle } from "@alea/types/candles";
 const HISTOGRAM_BIN_WIDTH_PCT = 0.01;
 
 /**
+ * Bumps when the size-distribution output shape or computation changes.
+ * Caches keyed by this value are invalidated on any bump.
+ */
+export const SIZE_DISTRIBUTION_VERSION = 1;
+
+/**
  * Per-candle metrics, expressed as percentages of the bar's open price:
  *
  *   - `body_pct = |close - open| / open * 100`

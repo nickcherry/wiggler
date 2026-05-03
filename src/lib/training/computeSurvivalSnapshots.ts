@@ -88,6 +88,15 @@ const MS_PER_5M = 5 * 60 * 1000;
 const MS_PER_1M = 60 * 1000;
 
 /**
+ * Bumps when the snapshot enumeration's externally-visible behaviour
+ * changes — e.g. distance bucketing, a new context field, the side
+ * tie-breaker convention. Caches keyed by this value are invalidated on
+ * any bump, so don't rev it for non-semantic refactors. Standalone export
+ * so cache callers don't need to know the file's internals.
+ */
+export const SNAPSHOT_PIPELINE_VERSION = 1;
+
+/**
  * Walks the 1m candle series, emitting one `SurvivalSnapshot` per usable
  * `(window, +Nm)` pair. A "usable" window is five gap-free 1m candles
  * starting on a UTC 5-minute boundary, with a strictly positive line

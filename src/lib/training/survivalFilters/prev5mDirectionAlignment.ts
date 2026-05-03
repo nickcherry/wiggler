@@ -17,6 +17,7 @@ export const prev5mDirectionAlignmentFilter: SurvivalFilter = {
     "Splits snapshots by whether the prior 5m candle closed in the same direction as the current side.",
   trueLabel: "aligned with prev 5m",
   falseLabel: "against prev 5m",
+  version: 1,
   classify: (snapshot, context) => {
     const prev = context.prev5mDirection;
     if (prev === null) {

@@ -22,6 +22,7 @@ export const ma205mAlignmentFilter: SurvivalFilter = {
     "Splits snapshots by whether the current side agrees with the line-vs-MA20 regime at the start of the window.",
   trueLabel: "aligned with MA20",
   falseLabel: "against MA20",
+  version: 1,
   classify: (snapshot, context) => {
     const ma = context.ma20x5m;
     if (ma === null) {

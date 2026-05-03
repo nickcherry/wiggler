@@ -19,6 +19,7 @@ export const last3x1mMajorityAlignmentFilter: SurvivalFilter = {
     "Splits snapshots by whether the majority direction of the previous three 1m candles matches the current side.",
   trueLabel: "aligned with last-3 majority",
   falseLabel: "against last-3 majority",
+  version: 1,
   classify: (snapshot, context) => {
     const last3 = context.last3x1mDirections;
     if (last3 === null) {
