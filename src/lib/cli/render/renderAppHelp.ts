@@ -1,6 +1,6 @@
-import pc from "picocolors";
 import { formatTopLevelUsage } from "@wiggler/lib/cli/render/formatTopLevelUsage";
 import type { CliAppDefinition } from "@wiggler/lib/cli/types";
+import pc from "picocolors";
 
 /**
  * Top-level help: summary, usage, list of visible commands grouped by name.

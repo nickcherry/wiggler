@@ -27,7 +27,7 @@ export function streamBinancePerpQuotes({
   ws.addEventListener("message", (event: MessageEvent<string>) => {
     try {
       const tick = parseFrame(event.data);
-      if (tick) onTick(tick);
+      if (tick) {onTick(tick);}
     } catch (error) {
       onError(error instanceof Error ? error : new Error(String(error)));
     }
@@ -52,7 +52,7 @@ function parseFrame(raw: string): QuoteTick | null {
   }
   const bid = Number(data.b);
   const ask = Number(data.a);
-  if (!Number.isFinite(bid) || !Number.isFinite(ask)) return null;
+  if (!Number.isFinite(bid) || !Number.isFinite(ask)) {return null;}
   const exchangeMs = typeof data.T === "number" ? data.T : data.E ?? null;
   return {
     exchange: "binance-perp",

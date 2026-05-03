@@ -9,13 +9,22 @@
   "scripts": {
     "wiggler": "bun run src/bin/index.ts",
     "typecheck": "bun x --bun tsc --noEmit",
-    "test": "find src -name '*.test.ts' -print0 | xargs -0 bun test"
+    "test": "find src -name '*.test.ts' -print0 | xargs -0 bun test",
+    "format": "if [ -x ./.tools/node/bin/node ]; then ./.tools/node/bin/node ./node_modules/prettier/bin/prettier.cjs --write .; else node ./node_modules/prettier/bin/prettier.cjs --write .; fi",
+    "lint:fix": "if [ -x ./.tools/node/bin/node ]; then ./.tools/node/bin/node ./node_modules/eslint/bin/eslint.js --fix --cache .; else node ./node_modules/eslint/bin/eslint.js --fix --cache .; fi",
+    "lint": "if [ -x ./.tools/node/bin/node ]; then ./.tools/node/bin/node ./node_modules/eslint/bin/eslint.js --cache .; else node ./node_modules/eslint/bin/eslint.js --cache .; fi"
   },
   "devDependencies": {
+    "@eslint/js": "^9.39.1",
     "@types/bun": "latest",
     "@types/pg": "^8.20.0",
     "@types/pg-cursor": "^2.7.2",
-    "typescript": "^5.9.3"
+    "eslint": "^9.39.1",
+    "eslint-plugin-simple-import-sort": "^12.1.1",
+    "eslint-plugin-unused-imports": "^4.3.0",
+    "prettier": "^3.7.4",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.48.1"
   },
   "dependencies": {
     "kysely": "^0.28.15",

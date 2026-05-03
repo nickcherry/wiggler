@@ -1,12 +1,13 @@
 import { readdir } from "node:fs/promises";
 import { resolve as resolvePath } from "node:path";
-import pc from "picocolors";
+
 import { defineCommand } from "@wiggler/lib/cli/defineCommand";
 import { defineFlagOption } from "@wiggler/lib/cli/defineFlagOption";
 import { definePositional } from "@wiggler/lib/cli/definePositional";
 import { loadQuoteCapture } from "@wiggler/lib/exchangePrices/loadQuoteCapture";
 import { openHtmlOnDarwin } from "@wiggler/lib/exchangePrices/openHtmlOnDarwin";
 import { writePriceChartHtml } from "@wiggler/lib/exchangePrices/writePriceChartHtml";
+import pc from "picocolors";
 import { z } from "zod";
 
 const tmpDir = resolvePath(import.meta.dir, "../../../tmp");

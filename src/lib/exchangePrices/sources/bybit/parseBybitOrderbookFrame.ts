@@ -34,7 +34,7 @@ export function parseBybitOrderbookFrame({
   readonly state: BybitState;
 }): QuoteTick | null {
   const data = JSON.parse(raw) as BybitOrderbookFrame;
-  if (data.topic !== topic || !data.data) return null;
+  if (data.topic !== topic || !data.data) {return null;}
 
   const bidLevel = data.data.b?.[0];
   const askLevel = data.data.a?.[0];
@@ -53,7 +53,7 @@ export function parseBybitOrderbookFrame({
     }
   }
 
-  if (state.bid === null || state.ask === null) return null;
+  if (state.bid === null || state.ask === null) {return null;}
   return {
     exchange,
     tsReceivedMs: Date.now(),

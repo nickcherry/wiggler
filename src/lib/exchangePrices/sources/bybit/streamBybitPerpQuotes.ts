@@ -36,7 +36,7 @@ export function streamBybitPerpQuotes({
         exchange: "bybit-perp",
         state,
       });
-      if (tick) onTick(tick);
+      if (tick) {onTick(tick);}
     } catch (error) {
       onError(error instanceof Error ? error : new Error(String(error)));
     }

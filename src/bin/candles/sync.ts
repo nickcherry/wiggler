@@ -1,20 +1,20 @@
-import pc from "picocolors";
+import { assetValues } from "@wiggler/constants/assets";
 import {
   candleTimeframeValues,
   defaultCandleLookbackDays,
 } from "@wiggler/constants/candles";
-import { assetValues } from "@wiggler/constants/assets";
 import { candleSourceValues } from "@wiggler/constants/sources";
-import { defineCommand } from "@wiggler/lib/cli/defineCommand";
-import { defineValueOption } from "@wiggler/lib/cli/defineValueOption";
 import { alignTimeframeWindow } from "@wiggler/lib/candles/alignTimeframeWindow";
 import { summarizeSyncResult } from "@wiggler/lib/candles/summarizeSyncResult";
 import { syncCandles, type SyncCandlesResult } from "@wiggler/lib/candles/syncCandles";
+import { defineCommand } from "@wiggler/lib/cli/defineCommand";
+import { defineValueOption } from "@wiggler/lib/cli/defineValueOption";
 import { createDatabase } from "@wiggler/lib/db/createDatabase";
 import { destroyDatabase } from "@wiggler/lib/db/destroyDatabase";
 import { assetSchema } from "@wiggler/types/assets";
 import { candleTimeframeSchema } from "@wiggler/types/candles";
 import { candleSourceSchema } from "@wiggler/types/sources";
+import pc from "picocolors";
 import { z } from "zod";
 
 const millisecondsPerDay = 86_400_000;
@@ -152,7 +152,7 @@ function parseList(value: string | undefined): string[] | undefined {
 }
 
 function formatMs(ms: number): string {
-  if (ms < 1000) return `${ms.toFixed(0)}ms`;
-  if (ms < 60_000) return `${(ms / 1000).toFixed(2)}s`;
+  if (ms < 1000) {return `${ms.toFixed(0)}ms`;}
+  if (ms < 60_000) {return `${(ms / 1000).toFixed(2)}s`;}
   return `${Math.floor(ms / 60_000)}m${((ms % 60_000) / 1000).toFixed(0)}s`;
 }

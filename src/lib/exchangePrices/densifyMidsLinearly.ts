@@ -44,7 +44,7 @@ export function densifyMidsLinearly({
   for (let t = startMs; t <= endMs; t += binMs) {
     while (rightIndex < sorted.length) {
       const right = sorted[rightIndex];
-      if (right === undefined || right.tsReceivedMs >= t) break;
+      if (right === undefined || right.tsReceivedMs >= t) {break;}
       rightIndex += 1;
     }
     const right = sorted[rightIndex];

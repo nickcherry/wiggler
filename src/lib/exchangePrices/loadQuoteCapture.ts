@@ -1,6 +1,7 @@
 import { readFile } from "node:fs/promises";
+
 import { exchangeIdValues } from "@wiggler/constants/exchanges";
-import { quoteCaptureSchema, type QuoteCapture } from "@wiggler/types/exchanges";
+import { type QuoteCapture,quoteCaptureSchema } from "@wiggler/types/exchanges";
 
 const knownExchanges = new Set<string>(exchangeIdValues);
 
@@ -31,7 +32,7 @@ function dropUnknownExchanges({
 }): Record<string, unknown> {
   const ticks = Array.isArray(raw["ticks"]) ? raw["ticks"] : [];
   const filteredTicks = ticks.filter((tick): tick is Record<string, unknown> => {
-    if (typeof tick !== "object" || tick === null) return false;
+    if (typeof tick !== "object" || tick === null) {return false;}
     const exchange = (tick as Record<string, unknown>)["exchange"];
     return typeof exchange === "string" && knownExchanges.has(exchange);
   });
@@ -50,7 +51,7 @@ function dropUnknownExchanges({
   const errors = Array.isArray(raw["errors"]) ? raw["errors"] : [];
   const filteredErrors = errors.filter(
     (entry): entry is Record<string, unknown> => {
-      if (typeof entry !== "object" || entry === null) return false;
+      if (typeof entry !== "object" || entry === null) {return false;}
       const exchange = (entry as Record<string, unknown>)["exchange"];
       return typeof exchange === "string" && knownExchanges.has(exchange);
     },

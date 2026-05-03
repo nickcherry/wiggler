@@ -8,19 +8,16 @@ import type {
 } from "@wiggler/lib/exchangePrices/types";
 
 const url = "wss://advanced-trade-ws.coinbase.com";
-const productId = "BTC-USD";
+// `BTC-PERP-INTX` is the BTC perpetual on Coinbase International Exchange,
+// surfaced through the same Advanced Trade WebSocket as spot.
+const productId = "BTC-PERP-INTX";
 
 /**
- * Subscribes to the Coinbase Advanced Trade `level2` channel for BTC-USD.
- * The previous `ticker` channel only fired on trades (~2-5 Hz on BTC) so it
- * lagged any BBO move that wasn't accompanied by a print; the level2 channel
- * fires on every order-book change, giving us 50+ Hz on the same instrument.
- *
- * Each frame carries a snapshot or incremental updates; we maintain a small
- * book and only emit a `QuoteTick` when the best bid or best ask actually
- * moves — the rest of the depth churn is noise we don't care about.
+ * Subscribes to the Coinbase Advanced Trade `level2` channel for the BTC
+ * perpetual on Coinbase International. Same book-maintenance protocol as
+ * spot — emits a `QuoteTick` only when the BBO actually moves.
  */
-export function streamCoinbaseSpotQuotes({
+export function streamCoinbasePerpQuotes({
   onTick,
   onError,
   onOpen,
@@ -41,14 +38,14 @@ export function streamCoinbaseSpotQuotes({
   });
   ws.addEventListener("close", () => onClose?.());
   ws.addEventListener("error", () =>
-    onError(new Error("coinbase-spot websocket error")),
+    onError(new Error("coinbase-perp websocket error")),
   );
   ws.addEventListener("message", (event: MessageEvent<string>) => {
     try {
       const tick = applyCoinbaseLevel2Frame({
         raw: event.data,
         productId,
-        exchange: "coinbase-spot",
+        exchange: "coinbase-perp",
         state,
       });
       if (tick) {

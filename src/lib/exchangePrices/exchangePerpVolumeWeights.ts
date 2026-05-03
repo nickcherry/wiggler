@@ -10,7 +10,8 @@ import type { ExchangeId } from "@wiggler/types/exchanges";
  * weighted perpetual price.
  */
 export const exchangePerpVolumeWeights: Partial<Record<ExchangeId, number>> = {
-  "binance-perp": 0.65,
+  "binance-perp": 0.63,
   "bybit-perp": 0.2,
   "okx-swap": 0.15,
+  "coinbase-perp": 0.02,
 };

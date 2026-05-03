@@ -36,7 +36,7 @@ export function streamBitstampSpotQuotes({
   ws.addEventListener("message", (event: MessageEvent<string>) => {
     try {
       const tick = parseFrame(event.data);
-      if (tick) onTick(tick);
+      if (tick) {onTick(tick);}
     } catch (error) {
       onError(error instanceof Error ? error : new Error(String(error)));
     }
@@ -66,10 +66,10 @@ function parseFrame(raw: string): QuoteTick | null {
   }
   const topBid = data.data.bids?.[0]?.[0];
   const topAsk = data.data.asks?.[0]?.[0];
-  if (typeof topBid !== "string" || typeof topAsk !== "string") return null;
+  if (typeof topBid !== "string" || typeof topAsk !== "string") {return null;}
   const bid = Number(topBid);
   const ask = Number(topAsk);
-  if (!Number.isFinite(bid) || !Number.isFinite(ask)) return null;
+  if (!Number.isFinite(bid) || !Number.isFinite(ask)) {return null;}
   const tsExchangeMs = data.data.microtimestamp
     ? Math.floor(Number(data.data.microtimestamp) / 1000)
     : null;

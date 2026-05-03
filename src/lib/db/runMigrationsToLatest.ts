@@ -18,7 +18,10 @@ export async function runMigrationsToLatest(): Promise<RunMigrationsToLatestResu
     const { error, results } = await migrator.migrateToLatest();
 
     if (error) {
-      throw error instanceof Error ? error : new Error(String(error));
+      if (error instanceof Error) {
+        throw error;
+      }
+      throw new Error(`migration error: ${JSON.stringify(error)}`);
     }
 
     const applied = results ?? [];

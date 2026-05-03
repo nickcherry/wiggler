@@ -1,7 +1,7 @@
 import {
   telegramErrorSchema,
-  telegramSendMessageSuccessSchema,
   type TelegramMessageFormat,
+  telegramSendMessageSuccessSchema,
 } from "@wiggler/types/telegram";
 
 const telegramApiBaseUrl = "https://api.telegram.org";

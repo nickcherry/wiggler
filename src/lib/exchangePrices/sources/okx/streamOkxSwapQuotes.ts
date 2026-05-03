@@ -39,7 +39,7 @@ export function streamOkxSwapQuotes({
         instId,
         exchange: "okx-swap",
       });
-      if (tick) onTick(tick);
+      if (tick) {onTick(tick);}
     } catch (error) {
       onError(error instanceof Error ? error : new Error(String(error)));
     }

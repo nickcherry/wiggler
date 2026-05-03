@@ -1,9 +1,9 @@
-import pc from "picocolors";
 import { env } from "@wiggler/constants/env";
 import { defineCommand } from "@wiggler/lib/cli/defineCommand";
 import { defineValueOption } from "@wiggler/lib/cli/defineValueOption";
 import { sendTelegramMessage } from "@wiggler/lib/telegram/sendTelegramMessage";
 import { telegramMessageFormatSchema } from "@wiggler/types/telegram";
+import pc from "picocolors";
 import { z } from "zod";
 
 const defaultText = "wiggler telegram test ✅";

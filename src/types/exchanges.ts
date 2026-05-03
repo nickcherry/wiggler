@@ -33,10 +33,15 @@ export const quoteCaptureSchema = z.object({
   endedAtMs: z.number(),
   durationMs: z.number(),
   ticks: z.array(quoteTickSchema),
-  tickCounts: z.record(exchangeIdSchema, z.number().int().nonnegative()),
+  tickCounts: z.partialRecord(exchangeIdSchema, z.number().int().nonnegative()),
   errors: z.array(
     z.object({ exchange: exchangeIdSchema, error: z.string() }),
   ),
+  // Records whether the capture was run in `--exhaustive` mode. When true,
+  // the chart renders extra emphasis (faded venues, bold polymarket, VWAP
+  // overlays); when false, every series renders with uniform styling.
+  // Optional for backward compatibility with older captures.
+  exhaustive: z.boolean().optional(),
 });
 
 export type QuoteCapture = z.infer<typeof quoteCaptureSchema>;

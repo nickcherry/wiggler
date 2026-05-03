@@ -1,6 +1,6 @@
-import pc from "picocolors";
 import { defineCommand } from "@wiggler/lib/cli/defineCommand";
 import { runMigrationsToLatest } from "@wiggler/lib/db/runMigrationsToLatest";
+import pc from "picocolors";
 
 /**
  * Applies all pending Kysely database migrations.

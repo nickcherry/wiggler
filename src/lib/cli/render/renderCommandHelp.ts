@@ -1,10 +1,10 @@
-import pc from "picocolors";
 import { formatCommandUsage } from "@wiggler/lib/cli/render/formatCommandUsage";
 import type {
   CliAnyCommandDefinition,
   CliOptionDefinition,
   CliPositionalDefinition,
 } from "@wiggler/lib/cli/types";
+import pc from "picocolors";
 
 /**
  * Renders detailed help for one command: summary, usage, options, positionals,

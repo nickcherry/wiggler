@@ -4,6 +4,7 @@
  */
 export const exchangeIdValues = [
   "coinbase-spot",
+  "coinbase-perp",
   "bitstamp-spot",
   "gemini-spot",
   "binance-spot",

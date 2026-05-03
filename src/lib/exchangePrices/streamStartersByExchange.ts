@@ -3,6 +3,7 @@ import { streamBinanceSpotQuotes } from "@wiggler/lib/exchangePrices/sources/bin
 import { streamBitstampSpotQuotes } from "@wiggler/lib/exchangePrices/sources/bitstamp/streamBitstampSpotQuotes";
 import { streamBybitPerpQuotes } from "@wiggler/lib/exchangePrices/sources/bybit/streamBybitPerpQuotes";
 import { streamBybitSpotQuotes } from "@wiggler/lib/exchangePrices/sources/bybit/streamBybitSpotQuotes";
+import { streamCoinbasePerpQuotes } from "@wiggler/lib/exchangePrices/sources/coinbase/streamCoinbasePerpQuotes";
 import { streamCoinbaseSpotQuotes } from "@wiggler/lib/exchangePrices/sources/coinbase/streamCoinbaseSpotQuotes";
 import { streamGeminiSpotQuotes } from "@wiggler/lib/exchangePrices/sources/gemini/streamGeminiSpotQuotes";
 import { streamOkxSpotQuotes } from "@wiggler/lib/exchangePrices/sources/okx/streamOkxSpotQuotes";
@@ -25,6 +26,7 @@ export type StartQuoteStream = (params: StreamQuotesParams) => StreamHandle;
  */
 export const streamStartersByExchange: Record<ExchangeId, StartQuoteStream> = {
   "coinbase-spot": streamCoinbaseSpotQuotes,
+  "coinbase-perp": streamCoinbasePerpQuotes,
   "bitstamp-spot": streamBitstampSpotQuotes,
   "gemini-spot": streamGeminiSpotQuotes,
   "binance-spot": streamBinanceSpotQuotes,

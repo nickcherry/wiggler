@@ -33,7 +33,7 @@ export function streamBinanceSpotQuotes({
   ws.addEventListener("message", (event: MessageEvent<string>) => {
     try {
       const tick = parseFrame(event.data);
-      if (tick) onTick(tick);
+      if (tick) {onTick(tick);}
     } catch (error) {
       onError(error instanceof Error ? error : new Error(String(error)));
     }
@@ -53,7 +53,7 @@ function parseFrame(raw: string): QuoteTick | null {
   }
   const bid = Number(data.b);
   const ask = Number(data.a);
-  if (!Number.isFinite(bid) || !Number.isFinite(ask)) return null;
+  if (!Number.isFinite(bid) || !Number.isFinite(ask)) {return null;}
   return {
     exchange: "binance-spot",
     tsReceivedMs: Date.now(),

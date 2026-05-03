@@ -1,5 +1,5 @@
-import type { CandleSource } from "@wiggler/types/sources";
 import type { CandleTimeframe } from "@wiggler/types/candles";
+import type { CandleSource } from "@wiggler/types/sources";
 import type { ColumnType, Kysely } from "kysely";
 
 export type DatabaseTimestamp = ColumnType<Date, Date | string, Date | string>;

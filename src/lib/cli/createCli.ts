@@ -1,4 +1,3 @@
-import pc from "picocolors";
 import { CliUsageError } from "@wiggler/lib/cli/CliUsageError";
 import { defineCommand } from "@wiggler/lib/cli/defineCommand";
 import { definePositional } from "@wiggler/lib/cli/definePositional";
@@ -12,6 +11,7 @@ import type {
   CliAppDefinition,
   CliIo,
 } from "@wiggler/lib/cli/types";
+import pc from "picocolors";
 import { z } from "zod";
 
 const defaultIo: CliIo = {
