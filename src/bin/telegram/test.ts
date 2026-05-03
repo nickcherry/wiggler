@@ -1,12 +1,12 @@
-import { env } from "@wiggler/constants/env";
-import { defineCommand } from "@wiggler/lib/cli/defineCommand";
-import { defineValueOption } from "@wiggler/lib/cli/defineValueOption";
-import { sendTelegramMessage } from "@wiggler/lib/telegram/sendTelegramMessage";
-import { telegramMessageFormatSchema } from "@wiggler/types/telegram";
+import { env } from "@alea/constants/env";
+import { defineCommand } from "@alea/lib/cli/defineCommand";
+import { defineValueOption } from "@alea/lib/cli/defineValueOption";
+import { sendTelegramMessage } from "@alea/lib/telegram/sendTelegramMessage";
+import { telegramMessageFormatSchema } from "@alea/types/telegram";
 import pc from "picocolors";
 import { z } from "zod";
 
-const defaultText = "wiggler telegram test ✅";
+const defaultText = "alea telegram test ✅";
 
 /**
  * Sends a single test message to the configured Telegram chat to verify the
@@ -40,9 +40,9 @@ export const telegramTestCommand = defineCommand({
     }),
   ],
   examples: [
-    "bun wiggler telegram:test",
-    'bun wiggler telegram:test --text "hi from wiggler"',
-    'bun wiggler telegram:test --format markdown --text "*bold* and _italic_"',
+    "bun alea telegram:test",
+    'bun alea telegram:test --text "hi from alea"',
+    'bun alea telegram:test --format markdown --text "*bold* and _italic_"',
   ],
   output: "Prints the resulting Telegram message id on success.",
   sideEffects:

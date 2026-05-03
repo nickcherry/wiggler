@@ -1,7 +1,7 @@
-import type { Asset } from "@wiggler/types/assets";
+import type { Asset } from "@alea/types/assets";
 
 /**
- * Maps a wiggler asset code to the Binance USDT-margined perpetual swap
+ * Maps a alea asset code to the Binance USDT-margined perpetual swap
  * symbol used on the Binance Futures (UM) market.
  */
 export function binancePerpSymbol({

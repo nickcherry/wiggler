@@ -1,7 +1,7 @@
 import { writeFile } from "node:fs/promises";
 
-import { renderPriceChartHtml } from "@wiggler/lib/exchangePrices/renderPriceChartHtml";
-import type { ExchangeId, QuoteTick } from "@wiggler/types/exchanges";
+import { renderPriceChartHtml } from "@alea/lib/exchangePrices/renderPriceChartHtml";
+import type { ExchangeId, QuoteTick } from "@alea/types/exchanges";
 
 type WritePriceChartHtmlParams = {
   readonly capture: {

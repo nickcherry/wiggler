@@ -1,8 +1,8 @@
-import { coinbaseGranularity } from "@wiggler/lib/candles/sources/coinbase/coinbaseGranularity";
-import { coinbaseCandlesResponseSchema } from "@wiggler/lib/candles/sources/coinbase/schemas";
-import type { Asset } from "@wiggler/types/assets";
-import type { Candle, CandleTimeframe } from "@wiggler/types/candles";
-import type { Product } from "@wiggler/types/products";
+import { coinbaseGranularity } from "@alea/lib/candles/sources/coinbase/coinbaseGranularity";
+import { coinbaseCandlesResponseSchema } from "@alea/lib/candles/sources/coinbase/schemas";
+import type { Asset } from "@alea/types/assets";
+import type { Candle, CandleTimeframe } from "@alea/types/candles";
+import type { Product } from "@alea/types/products";
 
 const baseUrl = "https://api.coinbase.com";
 
@@ -38,7 +38,7 @@ export async function fetchCoinbaseAdvancedTradeCandles({
 
   const url = `${baseUrl}/api/v3/brokerage/market/products/${productId}/candles?start=${startSec}&end=${endSec}&granularity=${granularity}`;
   const response = await fetch(url, {
-    headers: { "User-Agent": "wiggler/1.0" },
+    headers: { "User-Agent": "alea/1.0" },
   });
 
   if (!response.ok) {

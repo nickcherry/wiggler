@@ -1,11 +1,11 @@
-import { CliUsageError } from "@wiggler/lib/cli/CliUsageError";
-import { getInputLabel } from "@wiggler/lib/cli/parser/getInputLabel";
-import { formatCommandUsage } from "@wiggler/lib/cli/render/formatCommandUsage";
+import { CliUsageError } from "@alea/lib/cli/CliUsageError";
+import { getInputLabel } from "@alea/lib/cli/parser/getInputLabel";
+import { formatCommandUsage } from "@alea/lib/cli/render/formatCommandUsage";
 import type {
   CliAnyCommandDefinition,
   CliOptionDefinition,
   CliPositionalDefinition,
-} from "@wiggler/lib/cli/types";
+} from "@alea/lib/cli/types";
 import { ZodError } from "zod";
 
 /**

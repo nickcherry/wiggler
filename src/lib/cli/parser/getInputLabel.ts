@@ -1,7 +1,7 @@
 import type {
   CliOptionDefinition,
   CliPositionalDefinition,
-} from "@wiggler/lib/cli/types";
+} from "@alea/lib/cli/types";
 
 /**
  * Human-readable label for an option or positional, used in error messages.

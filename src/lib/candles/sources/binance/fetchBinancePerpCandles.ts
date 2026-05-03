@@ -1,7 +1,7 @@
-import { binanceInterval } from "@wiggler/lib/candles/sources/binance/binanceInterval";
-import { binancePerpSymbol } from "@wiggler/lib/candles/sources/binance/binancePerpSymbol";
-import type { Asset } from "@wiggler/types/assets";
-import type { Candle, CandleTimeframe } from "@wiggler/types/candles";
+import { binanceInterval } from "@alea/lib/candles/sources/binance/binanceInterval";
+import { binancePerpSymbol } from "@alea/lib/candles/sources/binance/binancePerpSymbol";
+import type { Asset } from "@alea/types/assets";
+import type { Candle, CandleTimeframe } from "@alea/types/candles";
 
 /**
  * Binance USDT-margined perpetual klines published as zip archives on
@@ -158,7 +158,7 @@ async function downloadAndParse({
   readonly timeframe: CandleTimeframe;
 }): Promise<readonly Candle[]> {
   const response = await fetch(spec.url, {
-    headers: { "User-Agent": "wiggler/1.0" },
+    headers: { "User-Agent": "alea/1.0" },
   });
   if (!response.ok) {
     const body = await response.text();

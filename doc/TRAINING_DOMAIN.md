@@ -7,7 +7,7 @@ out of the local database and study them to figure out where live-trading
 thresholds should sit. It is intentionally separate from the trading bot
 itself — these scripts never place orders, never hit external APIs, and never
 mutate the candles table. They read, compute, and write artifacts to
-`wiggler/tmp/`.
+`alea/tmp/`.
 
 The dashboards under this domain are temp pages, not product pages. The
 visual pattern they share is documented in
@@ -31,9 +31,9 @@ from the existing `candleSourceSchema`, `productSchema`, and
 
 ### `training:distributions`
 
-`bun wiggler training:distributions` computes percentile distributions of two
+`bun alea training:distributions` computes percentile distributions of two
 per-candle metrics for every requested asset, then writes a paired HTML
-dashboard and JSON sidecar to `wiggler/tmp/`.
+dashboard and JSON sidecar to `alea/tmp/`.
 
 Metrics:
 
@@ -57,7 +57,7 @@ So `p99 body = 0.18%` reads as "99% of 5-minute bars have a body smaller than
 
 ### Output
 
-Two files per run, written next to each other in `wiggler/tmp/`:
+Two files per run, written next to each other in `alea/tmp/`:
 
 - `training-distributions_<UTC-iso>.html` — the dashboard.
 - `training-distributions_<UTC-iso>.json` — the raw payload.

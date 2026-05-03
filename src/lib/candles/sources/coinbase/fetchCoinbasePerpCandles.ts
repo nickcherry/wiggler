@@ -1,7 +1,7 @@
-import { coinbasePerpProductId } from "@wiggler/lib/candles/sources/coinbase/coinbasePerpProductId";
-import { fetchCoinbaseAdvancedTradeCandles } from "@wiggler/lib/candles/sources/coinbase/fetchCoinbaseAdvancedTradeCandles";
-import type { Asset } from "@wiggler/types/assets";
-import type { Candle, CandleTimeframe } from "@wiggler/types/candles";
+import { coinbasePerpProductId } from "@alea/lib/candles/sources/coinbase/coinbasePerpProductId";
+import { fetchCoinbaseAdvancedTradeCandles } from "@alea/lib/candles/sources/coinbase/fetchCoinbaseAdvancedTradeCandles";
+import type { Asset } from "@alea/types/assets";
+import type { Candle, CandleTimeframe } from "@alea/types/candles";
 
 type FetchCoinbasePerpCandlesParams = {
   readonly asset: Asset;

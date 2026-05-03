@@ -1,7 +1,7 @@
 # Temporary Dashboards
 
 This is the design contract for the standalone HTML pages we drop into
-`wiggler/tmp/` from CLI commands like `latency:capture` and
+`alea/tmp/` from CLI commands like `latency:capture` and
 `training:distributions`. These pages are not product surfaces and are not
 shipped anywhere — they exist for one operator (or one agent) to read a
 particular analysis result quickly. The contract below exists so each new
@@ -9,7 +9,7 @@ page slots into the same visual language without bikeshedding.
 
 ## What "temp dashboard" means
 
-- A single self-contained `.html` file written to `wiggler/tmp/`.
+- A single self-contained `.html` file written to `alea/tmp/`.
 - All assets (CSS, JS, data) inlined or pulled from a public CDN. No build
   step, no asset pipeline. The file should still render correctly if you
   open it from disk a year from now.

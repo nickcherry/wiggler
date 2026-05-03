@@ -1,22 +1,22 @@
-import { assetValues } from "@wiggler/constants/assets";
-import { candleTimeframeValues } from "@wiggler/constants/candles";
-import { productValues } from "@wiggler/constants/products";
-import { candleSourceValues } from "@wiggler/constants/sources";
+import { assetValues } from "@alea/constants/assets";
+import { candleTimeframeValues } from "@alea/constants/candles";
+import { productValues } from "@alea/constants/products";
+import { candleSourceValues } from "@alea/constants/sources";
 import {
   fillCandleGaps,
   type FillCandleGapsResult,
-} from "@wiggler/lib/candles/fillCandleGaps";
-import { defineCommand } from "@wiggler/lib/cli/defineCommand";
-import { defineValueOption } from "@wiggler/lib/cli/defineValueOption";
-import { createDatabase } from "@wiggler/lib/db/createDatabase";
-import { destroyDatabase } from "@wiggler/lib/db/destroyDatabase";
-import type { Asset } from "@wiggler/types/assets";
-import { assetSchema } from "@wiggler/types/assets";
-import { candleTimeframeSchema } from "@wiggler/types/candles";
-import type { Product } from "@wiggler/types/products";
-import { productSchema } from "@wiggler/types/products";
-import type { CandleSource } from "@wiggler/types/sources";
-import { candleSourceSchema } from "@wiggler/types/sources";
+} from "@alea/lib/candles/fillCandleGaps";
+import { defineCommand } from "@alea/lib/cli/defineCommand";
+import { defineValueOption } from "@alea/lib/cli/defineValueOption";
+import { createDatabase } from "@alea/lib/db/createDatabase";
+import { destroyDatabase } from "@alea/lib/db/destroyDatabase";
+import type { Asset } from "@alea/types/assets";
+import { assetSchema } from "@alea/types/assets";
+import { candleTimeframeSchema } from "@alea/types/candles";
+import type { Product } from "@alea/types/products";
+import { productSchema } from "@alea/types/products";
+import type { CandleSource } from "@alea/types/sources";
+import { candleSourceSchema } from "@alea/types/sources";
 import pc from "picocolors";
 import { z } from "zod";
 
@@ -80,9 +80,9 @@ export const candlesFillGapsCommand = defineCommand({
     }),
   ],
   examples: [
-    "bun wiggler candles:fill-gaps",
-    "bun wiggler candles:fill-gaps --sources coinbase",
-    "bun wiggler candles:fill-gaps --assets btc --products spot",
+    "bun alea candles:fill-gaps",
+    "bun alea candles:fill-gaps --sources coinbase",
+    "bun alea candles:fill-gaps --assets btc --products spot",
   ],
   output:
     "Per-(source, asset, product) gap counts, missing bars, recovered bars, and elapsed time.",
@@ -90,7 +90,7 @@ export const candlesFillGapsCommand = defineCommand({
     "Hits Coinbase Advanced Trade and Binance public market data; upserts into the candles table.",
   async run({ io, options }) {
     io.writeStdout(
-      `${pc.bold("wiggler candles:fill-gaps")} ${pc.cyan(options.timeframe)}\n`,
+      `${pc.bold("alea candles:fill-gaps")} ${pc.cyan(options.timeframe)}\n`,
     );
     io.writeStdout(
       `${pc.dim("assets:")} ${options.assets.join(",")}  ${pc.dim("sources:")} ${options.sources.join(",")}  ${pc.dim("products:")} ${options.products.join(",")}\n\n`,

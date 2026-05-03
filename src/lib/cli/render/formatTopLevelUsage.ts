@@ -1,5 +1,5 @@
 /**
- * One-line top-level usage: `wiggler <command> [options]`.
+ * One-line top-level usage: `alea <command> [options]`.
  */
 export function formatTopLevelUsage({
   appName,

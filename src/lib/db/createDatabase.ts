@@ -1,5 +1,5 @@
-import { env } from "@wiggler/constants/env";
-import type { Database, DatabaseClient } from "@wiggler/lib/db/types";
+import { env } from "@alea/constants/env";
+import type { Database, DatabaseClient } from "@alea/lib/db/types";
 import { Kysely, PostgresDialect } from "kysely";
 import { Pool, type PoolConfig } from "pg";
 import Cursor from "pg-cursor";

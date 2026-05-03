@@ -1,16 +1,16 @@
-import { CliUsageError } from "@wiggler/lib/cli/CliUsageError";
-import { defineCommand } from "@wiggler/lib/cli/defineCommand";
-import { definePositional } from "@wiggler/lib/cli/definePositional";
-import { parseCommandArgv } from "@wiggler/lib/cli/parser/parseCommandArgv";
-import { formatTopLevelUsage } from "@wiggler/lib/cli/render/formatTopLevelUsage";
-import { renderAppHelp } from "@wiggler/lib/cli/render/renderAppHelp";
-import { renderCommandHelp } from "@wiggler/lib/cli/render/renderCommandHelp";
+import { CliUsageError } from "@alea/lib/cli/CliUsageError";
+import { defineCommand } from "@alea/lib/cli/defineCommand";
+import { definePositional } from "@alea/lib/cli/definePositional";
+import { parseCommandArgv } from "@alea/lib/cli/parser/parseCommandArgv";
+import { formatTopLevelUsage } from "@alea/lib/cli/render/formatTopLevelUsage";
+import { renderAppHelp } from "@alea/lib/cli/render/renderAppHelp";
+import { renderCommandHelp } from "@alea/lib/cli/render/renderCommandHelp";
 import type {
   CliAnyCommandDefinition,
   CliApp,
   CliAppDefinition,
   CliIo,
-} from "@wiggler/lib/cli/types";
+} from "@alea/lib/cli/types";
 import pc from "picocolors";
 import { z } from "zod";
 

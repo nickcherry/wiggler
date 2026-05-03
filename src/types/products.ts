@@ -1,4 +1,4 @@
-import { productValues } from "@wiggler/constants/products";
+import { productValues } from "@alea/constants/products";
 import { z } from "zod";
 
 /**

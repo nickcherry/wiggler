@@ -1,4 +1,4 @@
-import type { QuoteTick } from "@wiggler/types/exchanges";
+import type { QuoteTick } from "@alea/types/exchanges";
 
 /**
  * Callbacks every per-exchange stream function uses to surface quotes and

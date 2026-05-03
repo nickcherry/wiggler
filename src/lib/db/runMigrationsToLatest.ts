@@ -1,6 +1,6 @@
-import { createDatabase } from "@wiggler/lib/db/createDatabase";
-import { createMigrator } from "@wiggler/lib/db/createMigrator";
-import { destroyDatabase } from "@wiggler/lib/db/destroyDatabase";
+import { createDatabase } from "@alea/lib/db/createDatabase";
+import { createMigrator } from "@alea/lib/db/createMigrator";
+import { destroyDatabase } from "@alea/lib/db/destroyDatabase";
 import type { MigrationResult } from "kysely";
 
 export type RunMigrationsToLatestResult = {

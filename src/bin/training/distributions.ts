@@ -1,22 +1,22 @@
 import { mkdir } from "node:fs/promises";
 import { resolve as resolvePath } from "node:path";
 
-import { assetValues } from "@wiggler/constants/assets";
-import { trainingCandleSeries } from "@wiggler/constants/training";
-import { defineCommand } from "@wiggler/lib/cli/defineCommand";
-import { defineFlagOption } from "@wiggler/lib/cli/defineFlagOption";
-import { defineValueOption } from "@wiggler/lib/cli/defineValueOption";
-import { createDatabase } from "@wiggler/lib/db/createDatabase";
-import { destroyDatabase } from "@wiggler/lib/db/destroyDatabase";
-import { openHtmlOnDarwin } from "@wiggler/lib/exchangePrices/openHtmlOnDarwin";
-import { computeCandleSizeDistribution } from "@wiggler/lib/training/computeCandleSizeDistribution";
-import { loadTrainingCandles } from "@wiggler/lib/training/loadTrainingCandles";
+import { assetValues } from "@alea/constants/assets";
+import { trainingCandleSeries } from "@alea/constants/training";
+import { defineCommand } from "@alea/lib/cli/defineCommand";
+import { defineFlagOption } from "@alea/lib/cli/defineFlagOption";
+import { defineValueOption } from "@alea/lib/cli/defineValueOption";
+import { createDatabase } from "@alea/lib/db/createDatabase";
+import { destroyDatabase } from "@alea/lib/db/destroyDatabase";
+import { openHtmlOnDarwin } from "@alea/lib/exchangePrices/openHtmlOnDarwin";
+import { computeCandleSizeDistribution } from "@alea/lib/training/computeCandleSizeDistribution";
+import { loadTrainingCandles } from "@alea/lib/training/loadTrainingCandles";
 import type {
   AssetSizeDistribution,
   TrainingDistributionsPayload,
-} from "@wiggler/lib/training/types";
-import { writeTrainingDistributionsArtifacts } from "@wiggler/lib/training/writeTrainingDistributionsArtifacts";
-import { assetSchema } from "@wiggler/types/assets";
+} from "@alea/lib/training/types";
+import { writeTrainingDistributionsArtifacts } from "@alea/lib/training/writeTrainingDistributionsArtifacts";
+import { assetSchema } from "@alea/types/assets";
 import pc from "picocolors";
 import { z } from "zod";
 
@@ -26,7 +26,7 @@ const tmpDir = resolvePath(import.meta.dir, "../../../tmp");
  * Computes the distribution of 5-minute candle body and wick sizes (each
  * expressed as a percentage of the bar's open price) for every requested
  * asset in the local Postgres, then writes a paired HTML dashboard and JSON
- * sidecar to `wiggler/tmp/`.
+ * sidecar to `alea/tmp/`.
  *
  * The series studied is fixed by `trainingCandleSeries` (today: binance-perp
  * 5m). The HTML page tabs across assets and shows the totals only; the JSON
@@ -59,14 +59,14 @@ export const trainingDistributionsCommand = defineCommand({
     }),
   ],
   examples: [
-    "bun wiggler training:distributions",
-    "bun wiggler training:distributions --assets btc,eth",
-    "bun wiggler training:distributions --no-open",
+    "bun alea training:distributions",
+    "bun alea training:distributions --assets btc,eth",
+    "bun alea training:distributions --no-open",
   ],
   output:
     "Prints per-asset row counts and the paths of the HTML + JSON artifacts.",
   sideEffects:
-    "Reads the candles table; writes one HTML and one JSON file to wiggler/tmp/.",
+    "Reads the candles table; writes one HTML and one JSON file to alea/tmp/.",
   async run({ io, options }) {
     io.writeStdout(
       `${pc.bold("training:distributions")}  ${pc.dim("series=")}${trainingCandleSeries.source}-${trainingCandleSeries.product}  ${pc.dim("timeframe=")}${trainingCandleSeries.timeframe}  ${pc.dim("assets=")}${options.assets.join(",")}\n\n`,

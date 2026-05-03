@@ -1,9 +1,9 @@
-import { timeframeMs } from "@wiggler/lib/candles/timeframeMs";
-import type { DatabaseClient } from "@wiggler/lib/db/types";
-import type { Asset } from "@wiggler/types/assets";
-import type { CandleTimeframe } from "@wiggler/types/candles";
-import type { Product } from "@wiggler/types/products";
-import type { CandleSource } from "@wiggler/types/sources";
+import { timeframeMs } from "@alea/lib/candles/timeframeMs";
+import type { DatabaseClient } from "@alea/lib/db/types";
+import type { Asset } from "@alea/types/assets";
+import type { CandleTimeframe } from "@alea/types/candles";
+import type { Product } from "@alea/types/products";
+import type { CandleSource } from "@alea/types/sources";
 import { sql } from "kysely";
 
 type FindCandleGapsParams = {

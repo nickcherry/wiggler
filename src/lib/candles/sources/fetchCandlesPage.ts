@@ -1,11 +1,11 @@
-import { fetchBinanceCandles } from "@wiggler/lib/candles/sources/binance/fetchBinanceCandles";
-import { fetchBinancePerpCandles } from "@wiggler/lib/candles/sources/binance/fetchBinancePerpCandles";
-import { fetchCoinbaseCandles } from "@wiggler/lib/candles/sources/coinbase/fetchCoinbaseCandles";
-import { fetchCoinbasePerpCandles } from "@wiggler/lib/candles/sources/coinbase/fetchCoinbasePerpCandles";
-import type { Asset } from "@wiggler/types/assets";
-import type { Candle, CandleTimeframe } from "@wiggler/types/candles";
-import type { Product } from "@wiggler/types/products";
-import type { CandleSource } from "@wiggler/types/sources";
+import { fetchBinanceCandles } from "@alea/lib/candles/sources/binance/fetchBinanceCandles";
+import { fetchBinancePerpCandles } from "@alea/lib/candles/sources/binance/fetchBinancePerpCandles";
+import { fetchCoinbaseCandles } from "@alea/lib/candles/sources/coinbase/fetchCoinbaseCandles";
+import { fetchCoinbasePerpCandles } from "@alea/lib/candles/sources/coinbase/fetchCoinbasePerpCandles";
+import type { Asset } from "@alea/types/assets";
+import type { Candle, CandleTimeframe } from "@alea/types/candles";
+import type { Product } from "@alea/types/products";
+import type { CandleSource } from "@alea/types/sources";
 
 type FetchCandlesPageParams = {
   readonly source: CandleSource;

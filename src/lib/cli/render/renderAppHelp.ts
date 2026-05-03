@@ -1,5 +1,5 @@
-import { formatTopLevelUsage } from "@wiggler/lib/cli/render/formatTopLevelUsage";
-import type { CliAppDefinition } from "@wiggler/lib/cli/types";
+import { formatTopLevelUsage } from "@alea/lib/cli/render/formatTopLevelUsage";
+import type { CliAppDefinition } from "@alea/lib/cli/types";
 import pc from "picocolors";
 
 /**

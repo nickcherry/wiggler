@@ -1,7 +1,7 @@
-import type { CliAnyCommandDefinition } from "@wiggler/lib/cli/types";
+import type { CliAnyCommandDefinition } from "@alea/lib/cli/types";
 
 /**
- * One-line usage string: `wiggler candles:sync [options] <SYMBOL>`.
+ * One-line usage string: `alea candles:sync [options] <SYMBOL>`.
  */
 export function formatCommandUsage({
   appName,

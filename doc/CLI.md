@@ -1,18 +1,18 @@
 # CLI
 
-The CLI is the operator-facing contract for Wiggler.
+The CLI is the operator-facing contract for Alea.
 
 Everything that matters is reachable through one non-interactive entrypoint:
 
-`bun wiggler`
+`bun alea`
 
-(or, when the `bin` is on PATH, just `wiggler`).
+(or, when the `bin` is on PATH, just `alea`).
 
 ## Core Rules
 
-- Use one entrypoint: `bun wiggler`.
-- Operator workflows belong under `bun wiggler <command>`, not ad hoc package scripts.
-- `package.json` scripts are for repo maintenance only: typecheck, test, format, and the `wiggler` wrapper.
+- Use one entrypoint: `bun alea`.
+- Operator workflows belong under `bun alea <command>`, not ad hoc package scripts.
+- `package.json` scripts are for repo maintenance only: typecheck, test, format, and the `alea` wrapper.
 - Commands must stay non-interactive by default.
 - Help output must be enough for a human or agent to understand side effects before running the command.
 - Parsing and validation belong in the command definition (Zod schemas on every option/positional), not in downstream business logic.
@@ -34,7 +34,7 @@ Everything that matters is reachable through one non-interactive entrypoint:
 - `telegram:*`
   `telegram:test`
 - `help`
-  Built-in. `wiggler help <command>` prints detailed help; `wiggler help` is equivalent to `wiggler` with no arguments.
+  Built-in. `alea help <command>` prints detailed help; `alea help` is equivalent to `alea` with no arguments.
 
 This list is expected to grow as the simplification progresses. Update this section whenever a new family or command is registered in `src/bin/index.ts`.
 
@@ -67,8 +67,8 @@ CLI output is a product surface — humans (and human-like agents) read it. Aim 
 
 ## Help Output
 
-- `bun wiggler` and `bun wiggler help` print the top-level command list.
-- `bun wiggler <command> --help`, `bun wiggler <command> -h`, and `bun wiggler help <command>` all print detailed help for one command.
+- `bun alea` and `bun alea help` print the top-level command list.
+- `bun alea <command> --help`, `bun alea <command> -h`, and `bun alea help <command>` all print detailed help for one command.
 - Detailed help shows summary, usage, description, arguments, options (with descriptions pulled from each input's Zod `.describe(...)` text), examples, output description, and side effects.
 
 ## Error Handling

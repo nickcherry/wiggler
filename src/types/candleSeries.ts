@@ -1,6 +1,6 @@
-import { candleTimeframeSchema } from "@wiggler/types/candles";
-import { productSchema } from "@wiggler/types/products";
-import { candleSourceSchema } from "@wiggler/types/sources";
+import { candleTimeframeSchema } from "@alea/types/candles";
+import { productSchema } from "@alea/types/products";
+import { candleSourceSchema } from "@alea/types/sources";
 import { z } from "zod";
 
 /**

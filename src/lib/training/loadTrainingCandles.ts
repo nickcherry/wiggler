@@ -1,7 +1,7 @@
-import { trainingCandleSeries } from "@wiggler/constants/training";
-import type { DatabaseClient } from "@wiggler/lib/db/types";
-import type { Asset } from "@wiggler/types/assets";
-import type { Candle } from "@wiggler/types/candles";
+import { trainingCandleSeries } from "@alea/constants/training";
+import type { DatabaseClient } from "@alea/lib/db/types";
+import type { Asset } from "@alea/types/assets";
+import type { Candle } from "@alea/types/candles";
 
 /**
  * Reads every candle for one asset out of the local Postgres, filtered to

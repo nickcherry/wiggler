@@ -1,5 +1,5 @@
-import type { DatabaseClient } from "@wiggler/lib/db/types";
-import type { Candle } from "@wiggler/types/candles";
+import type { DatabaseClient } from "@alea/lib/db/types";
+import type { Candle } from "@alea/types/candles";
 import { sql } from "kysely";
 
 /**

@@ -1,4 +1,4 @@
-import type { Database } from "@wiggler/lib/db/types";
+import type { Database } from "@alea/lib/db/types";
 import { type Kysely, sql } from "kysely";
 
 /**

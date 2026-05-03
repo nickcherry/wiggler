@@ -1,10 +1,10 @@
 import { readFile } from "node:fs/promises";
 
-import { exchangeIdValues } from "@wiggler/constants/exchanges";
+import { exchangeIdValues } from "@alea/constants/exchanges";
 import {
   type QuoteCapture,
   quoteCaptureSchema,
-} from "@wiggler/types/exchanges";
+} from "@alea/types/exchanges";
 
 const knownExchanges = new Set<string>(exchangeIdValues);
 

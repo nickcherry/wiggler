@@ -1,4 +1,4 @@
-import { assetValues } from "@wiggler/constants/assets";
+import { assetValues } from "@alea/constants/assets";
 import { z } from "zod";
 
 /**

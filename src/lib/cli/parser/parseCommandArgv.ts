@@ -1,9 +1,9 @@
-import { CliUsageError } from "@wiggler/lib/cli/CliUsageError";
-import { parseOptionToken } from "@wiggler/lib/cli/parser/parseOptionToken";
-import { validateOptions } from "@wiggler/lib/cli/parser/validateOptions";
-import { validatePositionals } from "@wiggler/lib/cli/parser/validatePositionals";
-import { formatCommandUsage } from "@wiggler/lib/cli/render/formatCommandUsage";
-import type { CliAnyCommandDefinition } from "@wiggler/lib/cli/types";
+import { CliUsageError } from "@alea/lib/cli/CliUsageError";
+import { parseOptionToken } from "@alea/lib/cli/parser/parseOptionToken";
+import { validateOptions } from "@alea/lib/cli/parser/validateOptions";
+import { validatePositionals } from "@alea/lib/cli/parser/validatePositionals";
+import { formatCommandUsage } from "@alea/lib/cli/render/formatCommandUsage";
+import type { CliAnyCommandDefinition } from "@alea/lib/cli/types";
 
 export type ParsedCommandInput = {
   readonly options: Record<string, unknown>;

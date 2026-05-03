@@ -1,8 +1,8 @@
-import { parseBybitOrderbookFrame } from "@wiggler/lib/exchangePrices/sources/bybit/parseBybitOrderbookFrame";
+import { parseBybitOrderbookFrame } from "@alea/lib/exchangePrices/sources/bybit/parseBybitOrderbookFrame";
 import type {
   StreamHandle,
   StreamQuotesParams,
-} from "@wiggler/lib/exchangePrices/types";
+} from "@alea/lib/exchangePrices/types";
 
 const url = "wss://stream.bybit.com/v5/public/spot";
 const topic = "orderbook.1.BTCUSDT";

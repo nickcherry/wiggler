@@ -1,21 +1,21 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import { resolve as resolvePath } from "node:path";
 
-import { exchangeIdValues } from "@wiggler/constants/exchanges";
-import { defineCommand } from "@wiggler/lib/cli/defineCommand";
-import { defineFlagOption } from "@wiggler/lib/cli/defineFlagOption";
-import { defineValueOption } from "@wiggler/lib/cli/defineValueOption";
-import { captureAllQuoteStreams } from "@wiggler/lib/exchangePrices/captureAllQuoteStreams";
-import { openHtmlOnDarwin } from "@wiggler/lib/exchangePrices/openHtmlOnDarwin";
-import { writePriceChartHtml } from "@wiggler/lib/exchangePrices/writePriceChartHtml";
-import { type ExchangeId, exchangeIdSchema } from "@wiggler/types/exchanges";
+import { exchangeIdValues } from "@alea/constants/exchanges";
+import { defineCommand } from "@alea/lib/cli/defineCommand";
+import { defineFlagOption } from "@alea/lib/cli/defineFlagOption";
+import { defineValueOption } from "@alea/lib/cli/defineValueOption";
+import { captureAllQuoteStreams } from "@alea/lib/exchangePrices/captureAllQuoteStreams";
+import { openHtmlOnDarwin } from "@alea/lib/exchangePrices/openHtmlOnDarwin";
+import { writePriceChartHtml } from "@alea/lib/exchangePrices/writePriceChartHtml";
+import { type ExchangeId, exchangeIdSchema } from "@alea/types/exchanges";
 import pc from "picocolors";
 import { z } from "zod";
 
 const tmpDir = resolvePath(import.meta.dir, "../../../tmp");
 
 /**
- * Default capture: focused set covering the venues the wiggler trading bot
+ * Default capture: focused set covering the venues the alea trading bot
  * actually depends on. Use `--exhaustive` for the full cross-venue
  * comparison set (all sources plus VWAP overlays).
  */
@@ -30,7 +30,7 @@ const defaultExchanges: readonly ExchangeId[] = [
 /**
  * Latency-experiment capture: records top-of-book mid-price ticks from every
  * requested exchange in parallel for a fixed duration, persists the raw ticks
- * to JSON in `wiggler/tmp/`, and writes an interactive HTML chart side-by-
+ * to JSON in `alea/tmp/`, and writes an interactive HTML chart side-by-
  * side. Both paths are printed; on macOS the chart is opened automatically
  * unless `--no-open` is passed.
  *
@@ -40,7 +40,7 @@ export const latencyCaptureCommand = defineCommand({
   name: "latency:capture",
   summary: "Record BBO mid-price ticks across exchanges and chart them",
   description:
-    "Opens a public WebSocket to each requested exchange, accumulates every BBO update for the configured duration, then writes a JSON snapshot and an interactive uPlot chart to wiggler/tmp/. The experiment compares how quickly different venues react to the same price move.",
+    "Opens a public WebSocket to each requested exchange, accumulates every BBO update for the configured duration, then writes a JSON snapshot and an interactive uPlot chart to alea/tmp/. The experiment compares how quickly different venues react to the same price move.",
   options: [
     defineValueOption({
       key: "duration",
@@ -94,16 +94,16 @@ export const latencyCaptureCommand = defineCommand({
     }),
   ],
   examples: [
-    "bun wiggler latency:capture",
-    "bun wiggler latency:capture --exhaustive",
-    "bun wiggler latency:capture --duration 30",
-    "bun wiggler latency:capture --exchanges coinbase-spot,binance-spot",
-    "bun wiggler latency:capture --no-chart",
+    "bun alea latency:capture",
+    "bun alea latency:capture --exhaustive",
+    "bun alea latency:capture --duration 30",
+    "bun alea latency:capture --exchanges coinbase-spot,binance-spot",
+    "bun alea latency:capture --no-chart",
   ],
   output:
     "Prints per-exchange tick counts, error summary, and the JSON + HTML output paths.",
   sideEffects:
-    "Opens public WebSocket connections to each requested exchange and writes files to wiggler/tmp/.",
+    "Opens public WebSocket connections to each requested exchange and writes files to alea/tmp/.",
   async run({ io, options }) {
     const durationMs = Math.round(options.duration * 1000);
     const exchanges = resolveExchanges({

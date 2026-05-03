@@ -1,8 +1,8 @@
 import type {
   StreamHandle,
   StreamQuotesParams,
-} from "@wiggler/lib/exchangePrices/types";
-import type { QuoteTick } from "@wiggler/types/exchanges";
+} from "@alea/lib/exchangePrices/types";
+import type { QuoteTick } from "@alea/types/exchanges";
 
 // `stream.binance.com` is geo-blocked from many residential IPs; the
 // `data-stream.binance.vision` mirror serves the same public market-data

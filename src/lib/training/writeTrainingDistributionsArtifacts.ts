@@ -1,7 +1,7 @@
 import { writeFile } from "node:fs/promises";
 
-import { renderTrainingDistributionsHtml } from "@wiggler/lib/training/renderTrainingDistributionsHtml";
-import type { TrainingDistributionsPayload } from "@wiggler/lib/training/types";
+import { renderTrainingDistributionsHtml } from "@alea/lib/training/renderTrainingDistributionsHtml";
+import type { TrainingDistributionsPayload } from "@alea/lib/training/types";
 
 /**
  * Writes the dashboard HTML and the raw-data JSON sidecar in one shot. The

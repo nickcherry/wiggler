@@ -1,7 +1,7 @@
-import type { CandleTimeframe } from "@wiggler/types/candles";
+import type { CandleTimeframe } from "@alea/types/candles";
 
 /**
- * Maps a wiggler timeframe to the granularity string accepted by the Coinbase
+ * Maps a alea timeframe to the granularity string accepted by the Coinbase
  * Advanced Trade candles endpoint.
  */
 export function coinbaseGranularity({

@@ -1,8 +1,8 @@
-import { parseOkxBboFrame } from "@wiggler/lib/exchangePrices/sources/okx/parseOkxBboFrame";
+import { parseOkxBboFrame } from "@alea/lib/exchangePrices/sources/okx/parseOkxBboFrame";
 import type {
   StreamHandle,
   StreamQuotesParams,
-} from "@wiggler/lib/exchangePrices/types";
+} from "@alea/lib/exchangePrices/types";
 
 const url = "wss://ws.okx.com:8443/ws/v5/public";
 const instId = "BTC-USDT";

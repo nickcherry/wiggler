@@ -1,4 +1,4 @@
-import type { CandleTimeframe } from "@wiggler/types/candles";
+import type { CandleTimeframe } from "@alea/types/candles";
 
 /**
  * Bar duration in milliseconds for a given candle timeframe.

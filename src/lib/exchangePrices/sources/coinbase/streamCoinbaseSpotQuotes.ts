@@ -1,11 +1,11 @@
 import {
   applyCoinbaseLevel2Frame,
   createCoinbaseLevel2State,
-} from "@wiggler/lib/exchangePrices/sources/coinbase/applyCoinbaseLevel2Frame";
+} from "@alea/lib/exchangePrices/sources/coinbase/applyCoinbaseLevel2Frame";
 import type {
   StreamHandle,
   StreamQuotesParams,
-} from "@wiggler/lib/exchangePrices/types";
+} from "@alea/lib/exchangePrices/types";
 
 const url = "wss://advanced-trade-ws.coinbase.com";
 const productId = "BTC-USD";

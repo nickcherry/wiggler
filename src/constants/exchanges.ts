@@ -1,5 +1,5 @@
 /**
- * Stable identifiers for each exchange feed wiggler can subscribe to.
+ * Stable identifiers for each exchange feed alea can subscribe to.
  * `<venue>-<product>` form so spot vs perp/swap stays unambiguous.
  */
 export const exchangeIdValues = [

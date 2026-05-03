@@ -1,4 +1,4 @@
-import type { ExchangeId, QuoteTick } from "@wiggler/types/exchanges";
+import type { ExchangeId, QuoteTick } from "@alea/types/exchanges";
 
 type OkxBboFrame = {
   arg?: { channel?: string; instId?: string };

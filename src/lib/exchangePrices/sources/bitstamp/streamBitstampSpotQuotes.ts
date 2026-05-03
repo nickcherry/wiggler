@@ -1,8 +1,8 @@
 import type {
   StreamHandle,
   StreamQuotesParams,
-} from "@wiggler/lib/exchangePrices/types";
-import type { QuoteTick } from "@wiggler/types/exchanges";
+} from "@alea/lib/exchangePrices/types";
+import type { QuoteTick } from "@alea/types/exchanges";
 
 const url = "wss://ws.bitstamp.net";
 const channel = "order_book_btcusd";

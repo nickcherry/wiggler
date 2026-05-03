@@ -1,4 +1,4 @@
-import type { QuoteTick } from "@wiggler/types/exchanges";
+import type { QuoteTick } from "@alea/types/exchanges";
 
 type InterpolateMidsAtTimestampsParams = {
   readonly ticks: readonly QuoteTick[];

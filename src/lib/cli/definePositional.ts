@@ -1,4 +1,4 @@
-import type { CliPositionalDefinition } from "@wiggler/lib/cli/types";
+import type { CliPositionalDefinition } from "@alea/lib/cli/types";
 import type { ZodTypeAny } from "zod";
 
 /**

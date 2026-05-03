@@ -1,14 +1,14 @@
 {
-  "name": "wiggler",
+  "name": "alea",
   "description": "Probabilistic trader for Polymarket's 5-minute crypto up/down markets, fed by leading-indicator price feeds from Binance, Coinbase, and the Chainlink oracle Polymarket settles on.",
   "type": "module",
   "private": true,
   "bin": {
-    "wiggler": "src/bin/index.ts"
+    "alea": "src/bin/index.ts"
   },
   "module": "src/bin/index.ts",
   "scripts": {
-    "wiggler": "bun run src/bin/index.ts",
+    "alea": "bun run src/bin/index.ts",
     "typecheck": "bun x --bun tsc --noEmit",
     "test": "find src -name '*.test.ts' -print0 | xargs -0 bun test",
     "format": "if [ -x ./.tools/node/bin/node ]; then ./.tools/node/bin/node ./node_modules/prettier/bin/prettier.cjs --write .; else node ./node_modules/prettier/bin/prettier.cjs --write .; fi",

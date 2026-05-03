@@ -1,4 +1,4 @@
-# Wiggler
+# Alea
 
 Probabilistic trader for Polymarket's 5-minute crypto up/down markets. We model the conditional distribution of where the underlying ends up by the close of each window, compare that to Polymarket's current odds, and only take the bet when our edge over the market is real.
 

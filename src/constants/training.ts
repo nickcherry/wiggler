@@ -1,4 +1,4 @@
-import type { CandleSeries } from "@wiggler/types/candleSeries";
+import type { CandleSeries } from "@alea/types/candleSeries";
 
 /**
  * The single candle series the training domain currently studies. Every

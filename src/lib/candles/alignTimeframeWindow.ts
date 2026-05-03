@@ -1,5 +1,5 @@
-import { timeframeMs } from "@wiggler/lib/candles/timeframeMs";
-import type { CandleTimeframe } from "@wiggler/types/candles";
+import { timeframeMs } from "@alea/lib/candles/timeframeMs";
+import type { CandleTimeframe } from "@alea/types/candles";
 
 /**
  * Floors `date` to the most recently completed timeframe boundary so that

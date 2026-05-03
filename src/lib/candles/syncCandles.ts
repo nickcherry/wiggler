@@ -1,12 +1,12 @@
-import { candlesPerFetchPage } from "@wiggler/constants/candles";
-import { fetchCandlesPage } from "@wiggler/lib/candles/sources/fetchCandlesPage";
-import { timeframeMs } from "@wiggler/lib/candles/timeframeMs";
-import { upsertCandles } from "@wiggler/lib/candles/upsertCandles";
-import type { DatabaseClient } from "@wiggler/lib/db/types";
-import type { Asset } from "@wiggler/types/assets";
-import type { CandleTimeframe } from "@wiggler/types/candles";
-import type { Product } from "@wiggler/types/products";
-import type { CandleSource } from "@wiggler/types/sources";
+import { candlesPerFetchPage } from "@alea/constants/candles";
+import { fetchCandlesPage } from "@alea/lib/candles/sources/fetchCandlesPage";
+import { timeframeMs } from "@alea/lib/candles/timeframeMs";
+import { upsertCandles } from "@alea/lib/candles/upsertCandles";
+import type { DatabaseClient } from "@alea/lib/db/types";
+import type { Asset } from "@alea/types/assets";
+import type { CandleTimeframe } from "@alea/types/candles";
+import type { Product } from "@alea/types/products";
+import type { CandleSource } from "@alea/types/sources";
 
 type SyncCandlesParams = {
   readonly db: DatabaseClient;

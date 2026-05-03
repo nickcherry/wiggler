@@ -1,4 +1,4 @@
-import type { ExchangeId } from "@wiggler/types/exchanges";
+import type { ExchangeId } from "@alea/types/exchanges";
 
 /**
  * Static venue weights for the spot consensus VWAP line. Approximations of

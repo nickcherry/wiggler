@@ -12,7 +12,7 @@ This isn't the trading model itself. It's the upstream choice of "which sensor g
 
 ## Tooling
 
-`bun wiggler latency:capture` opens public WebSocket connections to a roster of exchanges, records every BBO mid update for the configured duration, and emits both a JSON snapshot and an interactive HTML chart to `wiggler/tmp/`.
+`bun alea latency:capture` opens public WebSocket connections to a roster of exchanges, records every BBO mid update for the configured duration, and emits both a JSON snapshot and an interactive HTML chart to `alea/tmp/`.
 
 - **Default mode** (no flag): focused 5-source roster. The four candidate leading indicators plus the Chainlink baseline:
   - `binance-spot`, `binance-perp` — by far the deepest BTC venues; bookTicker fires on every BBO price-or-quantity change
@@ -21,7 +21,7 @@ This isn't the trading model itself. It's the upstream choice of "which sensor g
 - `--exhaustive`: adds every other supported venue (bitstamp, gemini, okx spot+swap, bybit spot+perp) and overlays spot/perp VWAP consensus lines. Used for the broader cross-venue sanity check.
 - `--duration <seconds>`: capture window length (default 120). Use `--duration 300` for a 5-minute window matching one Polymarket settlement interval.
 
-`bun wiggler latency:chart [path]` re-renders the HTML chart from a saved JSON capture. Default picks the most recent file under `wiggler/tmp/`.
+`bun alea latency:chart [path]` re-renders the HTML chart from a saved JSON capture. Default picks the most recent file under `alea/tmp/`.
 
 ## What the chart shows
 

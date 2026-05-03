@@ -1,7 +1,7 @@
 import type {
   AssetSizeDistribution,
   TrainingDistributionsPayload,
-} from "@wiggler/lib/training/types";
+} from "@alea/lib/training/types";
 
 /**
  * Brand colors reused from the latency dashboard's palette so the two

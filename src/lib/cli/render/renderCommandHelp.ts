@@ -1,9 +1,9 @@
-import { formatCommandUsage } from "@wiggler/lib/cli/render/formatCommandUsage";
+import { formatCommandUsage } from "@alea/lib/cli/render/formatCommandUsage";
 import type {
   CliAnyCommandDefinition,
   CliOptionDefinition,
   CliPositionalDefinition,
-} from "@wiggler/lib/cli/types";
+} from "@alea/lib/cli/types";
 import pc from "picocolors";
 
 /**

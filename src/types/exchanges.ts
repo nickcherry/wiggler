@@ -1,4 +1,4 @@
-import { exchangeIdValues } from "@wiggler/constants/exchanges";
+import { exchangeIdValues } from "@alea/constants/exchanges";
 import { z } from "zod";
 
 /**

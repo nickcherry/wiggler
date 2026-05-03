@@ -1,8 +1,8 @@
-import { validateInputValue } from "@wiggler/lib/cli/parser/validateInputValue";
+import { validateInputValue } from "@alea/lib/cli/parser/validateInputValue";
 import type {
   CliAnyCommandDefinition,
   CliOptionDefinition,
-} from "@wiggler/lib/cli/types";
+} from "@alea/lib/cli/types";
 
 /**
  * Validates and coerces all option values for a parsed command. Returns a

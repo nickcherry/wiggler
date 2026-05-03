@@ -1,7 +1,7 @@
 import {
   computeAllPercentiles,
   computePercentile,
-} from "@wiggler/lib/training/computePercentiles";
+} from "@alea/lib/training/computePercentiles";
 import { describe, expect, it } from "bun:test";
 
 describe("computePercentile", () => {

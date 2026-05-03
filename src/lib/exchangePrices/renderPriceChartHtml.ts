@@ -1,7 +1,7 @@
-import { exchangePerpVolumeWeights } from "@wiggler/lib/exchangePrices/exchangePerpVolumeWeights";
-import { exchangeSpotVolumeWeights } from "@wiggler/lib/exchangePrices/exchangeSpotVolumeWeights";
-import { interpolateMidsAtTimestamps } from "@wiggler/lib/exchangePrices/interpolateMidsAtTimestamps";
-import type { ExchangeId, QuoteTick } from "@wiggler/types/exchanges";
+import { exchangePerpVolumeWeights } from "@alea/lib/exchangePrices/exchangePerpVolumeWeights";
+import { exchangeSpotVolumeWeights } from "@alea/lib/exchangePrices/exchangeSpotVolumeWeights";
+import { interpolateMidsAtTimestamps } from "@alea/lib/exchangePrices/interpolateMidsAtTimestamps";
+import type { ExchangeId, QuoteTick } from "@alea/types/exchanges";
 
 type RenderPriceChartHtmlParams = {
   readonly ticks: readonly QuoteTick[];
@@ -224,7 +224,7 @@ export function renderPriceChartHtml({
 
     const spotData = [xs].concat(spotPanel.ys);
     const perpData = [xs].concat(perpPanel.ys);
-    const syncKey = "wiggler-prices";
+    const syncKey = "alea-prices";
 
     const spotOpts = {
       width: spotHost.clientWidth,

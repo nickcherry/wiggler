@@ -1,5 +1,5 @@
-import { computeCandleSizeDistribution } from "@wiggler/lib/training/computeCandleSizeDistribution";
-import type { Candle } from "@wiggler/types/candles";
+import { computeCandleSizeDistribution } from "@alea/lib/training/computeCandleSizeDistribution";
+import type { Candle } from "@alea/types/candles";
 import { describe, expect, it } from "bun:test";
 
 function buildCandle({

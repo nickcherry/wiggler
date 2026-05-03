@@ -1,4 +1,4 @@
-import type { CliFlagOptionDefinition } from "@wiggler/lib/cli/types";
+import type { CliFlagOptionDefinition } from "@alea/lib/cli/types";
 import type { ZodTypeAny } from "zod";
 
 /**

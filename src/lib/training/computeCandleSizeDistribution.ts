@@ -1,11 +1,11 @@
-import { computeAllPercentiles } from "@wiggler/lib/training/computePercentiles";
+import { computeAllPercentiles } from "@alea/lib/training/computePercentiles";
 import type {
   AssetSizeDistribution,
   SizePercentiles,
   YearSizePercentiles,
-} from "@wiggler/lib/training/types";
-import type { Asset } from "@wiggler/types/assets";
-import type { Candle } from "@wiggler/types/candles";
+} from "@alea/lib/training/types";
+import type { Asset } from "@alea/types/assets";
+import type { Candle } from "@alea/types/candles";
 
 /**
  * Per-candle metrics, expressed as percentages of the bar's open price:

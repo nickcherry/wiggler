@@ -36,8 +36,8 @@
 - Prefer one exported function per file. Multiple exported constants in one file are fine when they belong together (for example, an enum-like list of values).
 - Name files after the primary exported symbol when practical. For exported-function files, use camelCase filenames that match the exported symbol.
 - Keep imports static and at the top of the file. Do not use dynamic `import()`.
-- Prefer absolute internal imports via `@wiggler/*` instead of deep relative paths.
-- Group imports by source: third-party first, then `@wiggler/*`, then local relatives if any. The TypeScript and Bun toolchain will tolerate either ordering, but consistency makes diffs cleaner.
+- Prefer absolute internal imports via `@alea/*` instead of deep relative paths.
+- Group imports by source: third-party first, then `@alea/*`, then local relatives if any. The TypeScript and Bun toolchain will tolerate either ordering, but consistency makes diffs cleaner.
 
 ## Function And API Design
 
@@ -89,7 +89,7 @@
 
 See [CLI.md](./CLI.md) for the full command-authoring contract. Highlights:
 
-- One entrypoint: `bun wiggler`.
+- One entrypoint: `bun alea`.
 - Every command is a `defineCommand({ ... })` value with summary, description, options, examples, output, and side-effects.
 - Every option and positional carries a Zod schema; that schema is the only place coercion lives.
 - Command files stay thin. Domain logic lives in `src/lib/`.

@@ -1,4 +1,4 @@
-const defaultDatabaseUrl = "postgres://localhost:5432/wiggler";
+const defaultDatabaseUrl = "postgres://localhost:5432/alea";
 
 /**
  * Canonical environment dependency access for the application. All env-var

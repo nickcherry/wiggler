@@ -1,15 +1,15 @@
 #!/usr/bin/env bun
-import { candlesFillGapsCommand } from "@wiggler/bin/candles/fillGaps";
-import { candlesSyncCommand } from "@wiggler/bin/candles/sync";
-import { dbMigrateCommand } from "@wiggler/bin/db/migrate";
-import { latencyCaptureCommand } from "@wiggler/bin/latency/capture";
-import { latencyChartCommand } from "@wiggler/bin/latency/chart";
-import { telegramTestCommand } from "@wiggler/bin/telegram/test";
-import { trainingDistributionsCommand } from "@wiggler/bin/training/distributions";
-import { createCli } from "@wiggler/lib/cli/createCli";
+import { candlesFillGapsCommand } from "@alea/bin/candles/fillGaps";
+import { candlesSyncCommand } from "@alea/bin/candles/sync";
+import { dbMigrateCommand } from "@alea/bin/db/migrate";
+import { latencyCaptureCommand } from "@alea/bin/latency/capture";
+import { latencyChartCommand } from "@alea/bin/latency/chart";
+import { telegramTestCommand } from "@alea/bin/telegram/test";
+import { trainingDistributionsCommand } from "@alea/bin/training/distributions";
+import { createCli } from "@alea/lib/cli/createCli";
 
 const cli = createCli({
-  name: "wiggler",
+  name: "alea",
   summary: "Polymarket crypto up/down monitor and gated trader",
   commands: [
     dbMigrateCommand,

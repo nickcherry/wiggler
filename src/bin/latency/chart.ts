@@ -1,12 +1,12 @@
 import { readdir } from "node:fs/promises";
 import { resolve as resolvePath } from "node:path";
 
-import { defineCommand } from "@wiggler/lib/cli/defineCommand";
-import { defineFlagOption } from "@wiggler/lib/cli/defineFlagOption";
-import { definePositional } from "@wiggler/lib/cli/definePositional";
-import { loadQuoteCapture } from "@wiggler/lib/exchangePrices/loadQuoteCapture";
-import { openHtmlOnDarwin } from "@wiggler/lib/exchangePrices/openHtmlOnDarwin";
-import { writePriceChartHtml } from "@wiggler/lib/exchangePrices/writePriceChartHtml";
+import { defineCommand } from "@alea/lib/cli/defineCommand";
+import { defineFlagOption } from "@alea/lib/cli/defineFlagOption";
+import { definePositional } from "@alea/lib/cli/definePositional";
+import { loadQuoteCapture } from "@alea/lib/exchangePrices/loadQuoteCapture";
+import { openHtmlOnDarwin } from "@alea/lib/exchangePrices/openHtmlOnDarwin";
+import { writePriceChartHtml } from "@alea/lib/exchangePrices/writePriceChartHtml";
 import pc from "picocolors";
 import { z } from "zod";
 
@@ -18,13 +18,13 @@ const tmpDir = resolvePath(import.meta.dir, "../../../tmp");
  * re-styled with the latest visualization.
  *
  * If no path is supplied, the most recently modified `latency_*.json` in
- * `wiggler/tmp/` is used.
+ * `alea/tmp/` is used.
  */
 export const latencyChartCommand = defineCommand({
   name: "latency:chart",
   summary: "Re-render the HTML chart from a saved capture JSON",
   description:
-    "Reads a `latency:capture` JSON snapshot and writes a fresh HTML chart next to it. With no argument, picks the most recently modified `latency_*.json` in wiggler/tmp/.",
+    "Reads a `latency:capture` JSON snapshot and writes a fresh HTML chart next to it. With no argument, picks the most recently modified `latency_*.json` in alea/tmp/.",
   positionals: [
     definePositional({
       key: "jsonPath",
@@ -33,7 +33,7 @@ export const latencyChartCommand = defineCommand({
         .string()
         .optional()
         .describe(
-          "Path to a latency_*.json file. Defaults to the latest in wiggler/tmp/.",
+          "Path to a latency_*.json file. Defaults to the latest in alea/tmp/.",
         ),
     }),
   ],
@@ -48,9 +48,9 @@ export const latencyChartCommand = defineCommand({
     }),
   ],
   examples: [
-    "bun wiggler latency:chart",
-    "bun wiggler latency:chart tmp/latency_2026-05-02T22-59-19-835Z.json",
-    "bun wiggler latency:chart --no-open tmp/latency_2026-05-02T22-59-19-835Z.json",
+    "bun alea latency:chart",
+    "bun alea latency:chart tmp/latency_2026-05-02T22-59-19-835Z.json",
+    "bun alea latency:chart --no-open tmp/latency_2026-05-02T22-59-19-835Z.json",
   ],
   output: "Prints the path of the rendered HTML file.",
   sideEffects: "Writes one HTML file next to the input JSON.",

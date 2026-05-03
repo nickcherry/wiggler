@@ -1,5 +1,5 @@
-import { streamStartersByExchange } from "@wiggler/lib/exchangePrices/streamStartersByExchange";
-import type { ExchangeId, QuoteTick } from "@wiggler/types/exchanges";
+import { streamStartersByExchange } from "@alea/lib/exchangePrices/streamStartersByExchange";
+import type { ExchangeId, QuoteTick } from "@alea/types/exchanges";
 
 type CaptureAllQuoteStreamsParams = {
   readonly exchanges: readonly ExchangeId[];

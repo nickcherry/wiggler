@@ -1,9 +1,9 @@
-import { candlesPerFetchPage } from "@wiggler/constants/candles";
-import { binanceInterval } from "@wiggler/lib/candles/sources/binance/binanceInterval";
-import { binanceSymbol } from "@wiggler/lib/candles/sources/binance/binanceSymbol";
-import { binanceKlinesResponseSchema } from "@wiggler/lib/candles/sources/binance/schemas";
-import type { Asset } from "@wiggler/types/assets";
-import type { Candle, CandleTimeframe } from "@wiggler/types/candles";
+import { candlesPerFetchPage } from "@alea/constants/candles";
+import { binanceInterval } from "@alea/lib/candles/sources/binance/binanceInterval";
+import { binanceSymbol } from "@alea/lib/candles/sources/binance/binanceSymbol";
+import { binanceKlinesResponseSchema } from "@alea/lib/candles/sources/binance/schemas";
+import type { Asset } from "@alea/types/assets";
+import type { Candle, CandleTimeframe } from "@alea/types/candles";
 
 const baseUrl = "https://data-api.binance.vision";
 
@@ -39,7 +39,7 @@ export async function fetchBinanceCandles({
     `${baseUrl}/api/v3/klines?symbol=${symbol}&interval=${interval}` +
     `&startTime=${startMs}&endTime=${endMs}&limit=${limit}`;
   const response = await fetch(url, {
-    headers: { "User-Agent": "wiggler/1.0" },
+    headers: { "User-Agent": "alea/1.0" },
   });
 
   if (!response.ok) {

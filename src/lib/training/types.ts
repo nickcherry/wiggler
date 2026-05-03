@@ -1,5 +1,5 @@
-import type { Asset } from "@wiggler/types/assets";
-import type { CandleSeries } from "@wiggler/types/candleSeries";
+import type { Asset } from "@alea/types/assets";
+import type { CandleSeries } from "@alea/types/candleSeries";
 
 /**
  * Per-percentile values for the two metrics the candle-size analysis

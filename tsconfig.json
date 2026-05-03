@@ -7,7 +7,7 @@
     "allowJs": true,
     "baseUrl": ".",
     "paths": {
-      "@wiggler/*": ["src/*"]
+      "@alea/*": ["src/*"]
     },
     "ignoreDeprecations": "5.0",
 

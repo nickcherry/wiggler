@@ -1,4 +1,4 @@
-import type { SyncCandlesResult } from "@wiggler/lib/candles/syncCandles";
+import type { SyncCandlesResult } from "@alea/lib/candles/syncCandles";
 
 export type SyncCandlesPageStats = {
   readonly count: number;

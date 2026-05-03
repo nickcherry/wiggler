@@ -1,4 +1,4 @@
-import { candleSourceValues } from "@wiggler/constants/sources";
+import { candleSourceValues } from "@alea/constants/sources";
 import { z } from "zod";
 
 /**

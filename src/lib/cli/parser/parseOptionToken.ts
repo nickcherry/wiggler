@@ -1,4 +1,4 @@
-import type { CliOptionDefinition } from "@wiggler/lib/cli/types";
+import type { CliOptionDefinition } from "@alea/lib/cli/types";
 
 export type ParsedOptionToken = {
   readonly option: CliOptionDefinition | undefined;

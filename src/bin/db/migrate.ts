@@ -1,5 +1,5 @@
-import { defineCommand } from "@wiggler/lib/cli/defineCommand";
-import { runMigrationsToLatest } from "@wiggler/lib/db/runMigrationsToLatest";
+import { defineCommand } from "@alea/lib/cli/defineCommand";
+import { runMigrationsToLatest } from "@alea/lib/db/runMigrationsToLatest";
 import pc from "picocolors";
 
 /**
@@ -11,8 +11,8 @@ export const dbMigrateCommand = defineCommand({
   description:
     "Run all pending PostgreSQL schema migrations against the configured database.",
   examples: [
-    "bun wiggler db:migrate",
-    "DATABASE_URL=postgres://localhost:5432/wiggler bun wiggler db:migrate",
+    "bun alea db:migrate",
+    "DATABASE_URL=postgres://localhost:5432/alea bun alea db:migrate",
   ],
   output: "Prints each applied migration name, or `no migrations pending`.",
   sideEffects:

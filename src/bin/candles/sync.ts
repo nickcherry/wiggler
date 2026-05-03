@@ -1,27 +1,27 @@
-import { assetValues } from "@wiggler/constants/assets";
+import { assetValues } from "@alea/constants/assets";
 import {
   candleTimeframeValues,
   defaultCandleLookbackDays,
-} from "@wiggler/constants/candles";
-import { productValues } from "@wiggler/constants/products";
-import { candleSourceValues } from "@wiggler/constants/sources";
-import { alignTimeframeWindow } from "@wiggler/lib/candles/alignTimeframeWindow";
-import { summarizeSyncResult } from "@wiggler/lib/candles/summarizeSyncResult";
+} from "@alea/constants/candles";
+import { productValues } from "@alea/constants/products";
+import { candleSourceValues } from "@alea/constants/sources";
+import { alignTimeframeWindow } from "@alea/lib/candles/alignTimeframeWindow";
+import { summarizeSyncResult } from "@alea/lib/candles/summarizeSyncResult";
 import {
   syncCandles,
   type SyncCandlesResult,
-} from "@wiggler/lib/candles/syncCandles";
-import { defineCommand } from "@wiggler/lib/cli/defineCommand";
-import { defineValueOption } from "@wiggler/lib/cli/defineValueOption";
-import { createDatabase } from "@wiggler/lib/db/createDatabase";
-import { destroyDatabase } from "@wiggler/lib/db/destroyDatabase";
-import type { Asset } from "@wiggler/types/assets";
-import { assetSchema } from "@wiggler/types/assets";
-import { candleTimeframeSchema } from "@wiggler/types/candles";
-import type { Product } from "@wiggler/types/products";
-import { productSchema } from "@wiggler/types/products";
-import type { CandleSource } from "@wiggler/types/sources";
-import { candleSourceSchema } from "@wiggler/types/sources";
+} from "@alea/lib/candles/syncCandles";
+import { defineCommand } from "@alea/lib/cli/defineCommand";
+import { defineValueOption } from "@alea/lib/cli/defineValueOption";
+import { createDatabase } from "@alea/lib/db/createDatabase";
+import { destroyDatabase } from "@alea/lib/db/destroyDatabase";
+import type { Asset } from "@alea/types/assets";
+import { assetSchema } from "@alea/types/assets";
+import { candleTimeframeSchema } from "@alea/types/candles";
+import type { Product } from "@alea/types/products";
+import { productSchema } from "@alea/types/products";
+import type { CandleSource } from "@alea/types/sources";
+import { candleSourceSchema } from "@alea/types/sources";
 import pc from "picocolors";
 import { z } from "zod";
 
@@ -101,10 +101,10 @@ export const candlesSyncCommand = defineCommand({
     }),
   ],
   examples: [
-    "bun wiggler candles:sync",
-    "bun wiggler candles:sync --timeframe 5m --days 730",
-    "bun wiggler candles:sync --assets btc,eth --sources binance",
-    "bun wiggler candles:sync --products spot",
+    "bun alea candles:sync",
+    "bun alea candles:sync --timeframe 5m --days 730",
+    "bun alea candles:sync --assets btc,eth --sources binance",
+    "bun alea candles:sync --products spot",
   ],
   output:
     "Prints per-(source, asset) row counts and page-latency stats, then the overall total.",
@@ -118,7 +118,7 @@ export const candlesSyncCommand = defineCommand({
     const start = new Date(end.getTime() - options.days * millisecondsPerDay);
 
     io.writeStdout(
-      `${pc.bold("wiggler candles:sync")} ${pc.cyan(options.timeframe)} ${pc.dim(start.toISOString())} → ${pc.dim(end.toISOString())}\n`,
+      `${pc.bold("alea candles:sync")} ${pc.cyan(options.timeframe)} ${pc.dim(start.toISOString())} → ${pc.dim(end.toISOString())}\n`,
     );
     io.writeStdout(
       `${pc.dim("assets:")} ${options.assets.join(",")}  ${pc.dim("sources:")} ${options.sources.join(",")}  ${pc.dim("products:")} ${options.products.join(",")}\n\n`,

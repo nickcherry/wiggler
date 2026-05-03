@@ -1,4 +1,4 @@
-import type { DatabaseClient } from "@wiggler/lib/db/types";
+import type { DatabaseClient } from "@alea/lib/db/types";
 
 /**
  * Closes all pooled database connections owned by a Kysely client.
