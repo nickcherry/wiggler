@@ -1,4 +1,4 @@
-# Temporary Dashboards
+# Dashboards
 
 This is the design contract for the standalone HTML pages we drop into
 `alea/tmp/` from CLI commands like `latency:capture` and
@@ -85,21 +85,21 @@ canonical palette lives in
 [renderPriceChartHtml.ts](../src/lib/exchangePrices/renderPriceChartHtml.ts)
 under `colorByExchange`:
 
-| Color                  | Hex       | Reserved for                                      |
-| ---------------------- | --------- | ------------------------------------------------- |
-| Coinbase spot          | `#2a8bff` | Coinbase spot venues                              |
-| Coinbase perp          | `#5fa8ff` | Coinbase perp venues                              |
-| Binance spot           | `#f0b90b` | Binance spot venues                               |
-| Binance perp           | `#d99d2c` | Binance perp venues                               |
-| Bybit spot             | `#ff8533` | Bybit spot venues                                 |
-| Bybit perp             | `#ffa75e` | Bybit perp venues                                 |
-| OKX spot               | `#cbd5e1` | OKX spot venues                                   |
-| OKX swap               | `#94a3b8` | OKX perp/swap venues                              |
-| Bitstamp               | `#27d18e` | Bitstamp                                          |
-| Gemini                 | `#34d2d4` | Gemini                                            |
-| Polymarket / Chainlink | `#ff5470` | Settlement-feed line; emphasized in both modes    |
-| Spot VWAP (marble)     | `#e8dec4` | Volume-weighted spot consensus, dashed            |
-| Perp VWAP (gold)       | `#d7aa45` | Volume-weighted perp consensus, dashed            |
+| Color                  | Hex       | Reserved for                                   |
+| ---------------------- | --------- | ---------------------------------------------- |
+| Coinbase spot          | `#2a8bff` | Coinbase spot venues                           |
+| Coinbase perp          | `#5fa8ff` | Coinbase perp venues                           |
+| Binance spot           | `#f0b90b` | Binance spot venues                            |
+| Binance perp           | `#d99d2c` | Binance perp venues                            |
+| Bybit spot             | `#ff8533` | Bybit spot venues                              |
+| Bybit perp             | `#ffa75e` | Bybit perp venues                              |
+| OKX spot               | `#cbd5e1` | OKX spot venues                                |
+| OKX swap               | `#94a3b8` | OKX perp/swap venues                           |
+| Bitstamp               | `#27d18e` | Bitstamp                                       |
+| Gemini                 | `#34d2d4` | Gemini                                         |
+| Polymarket / Chainlink | `#ff5470` | Settlement-feed line; emphasized in both modes |
+| Spot VWAP (marble)     | `#e8dec4` | Volume-weighted spot consensus, dashed         |
+| Perp VWAP (gold)       | `#d7aa45` | Volume-weighted perp consensus, dashed         |
 
 For non-venue series (e.g. body vs. wick on the training distributions
 chart), use the chart accents from

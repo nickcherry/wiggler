@@ -9,5 +9,5 @@ Probabilistic trader for Polymarket's 5-minute crypto up/down markets. We model 
 3. [CLI](./doc/CLI.md)
 4. [Latency Experiment](./doc/LATENCY_EXPERIMENT.md) — picking the leading-indicator feeds the model conditions on
 5. [Training Domain](./doc/TRAINING_DOMAIN.md) — exploring historic candles to find live-trading thresholds
-6. [Temporary Dashboards](./doc/TEMP_DASHBOARDS.md) — design language shared across the HTML pages we drop into `tmp/`
+6. [Dashboards](./doc/DASHBOARDS.md) — design language shared across the HTML pages we drop into `tmp/`
 7. [Documentation](./doc/DOCUMENTATION.md)

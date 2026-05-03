@@ -11,7 +11,7 @@ mutate the candles table. They read, compute, and write artifacts to
 
 The dashboards under this domain are temp pages, not product pages. The
 visual pattern they share is documented in
-[TEMP_DASHBOARDS.md](./TEMP_DASHBOARDS.md).
+[DASHBOARDS.md](./DASHBOARDS.md).
 
 ## Candle series under study
 

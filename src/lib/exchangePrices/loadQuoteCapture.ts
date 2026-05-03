@@ -1,10 +1,7 @@
 import { readFile } from "node:fs/promises";
 
 import { exchangeIdValues } from "@alea/constants/exchanges";
-import {
-  type QuoteCapture,
-  quoteCaptureSchema,
-} from "@alea/types/exchanges";
+import { type QuoteCapture, quoteCaptureSchema } from "@alea/types/exchanges";
 
 const knownExchanges = new Set<string>(exchangeIdValues);
 
