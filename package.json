@@ -1,5 +1,6 @@
 {
   "name": "wiggler",
+  "description": "Probabilistic trader for Polymarket's 5-minute crypto up/down markets, fed by leading-indicator price feeds from Binance, Coinbase, and the Chainlink oracle Polymarket settles on.",
   "type": "module",
   "private": true,
   "bin": {
