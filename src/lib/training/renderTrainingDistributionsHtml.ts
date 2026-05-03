@@ -17,7 +17,7 @@ const wickColor = "#ff8533";
  * distribution where threshold decisions get made.
  */
 const tableTailPercentiles: readonly number[] = [
-  100, 95, 90, 85, 80, 75, 70, 65, 60, 55, 50,
+  95, 90, 85, 80, 75, 70, 65, 60, 55, 50,
 ];
 
 type DashboardAssetSlice = {
@@ -147,10 +147,10 @@ export function renderTrainingDistributionsHtml({
     .chart-tooltip .name { color: var(--pico-muted-color); }
     .chart-tooltip .val { font-weight: 600; text-align: right; color: #0f172a; }
     .table-wrap { overflow-x: auto; }
-    /* Min-width is 70px (label col) + 11 * 90px (percentile cols) = 1060px.
+    /* Min-width is 70px (label col) + 10 * 90px (percentile cols) = 970px.
        At narrower viewports the .table-wrap scrolls horizontally. Cells
        set white-space: nowrap so numbers never wrap mid-cell regardless. */
-    table.percentiles { width: 100%; min-width: 1060px; margin: 0; --pico-typography-spacing-vertical: 0; font-variant-numeric: tabular-nums; table-layout: fixed; }
+    table.percentiles { width: 100%; min-width: 970px; margin: 0; --pico-typography-spacing-vertical: 0; font-variant-numeric: tabular-nums; table-layout: fixed; }
     table.percentiles th:first-child, table.percentiles td:first-child { width: 70px; }
     table.percentiles th, table.percentiles td { white-space: nowrap; }
     table.percentiles thead th { color: var(--pico-muted-color); font-weight: 500; text-align: right; }
@@ -207,27 +207,27 @@ export function renderTrainingDistributionsHtml({
   <script>
     const slices = ${JSON.stringify(slices)};
     const tablePs = ${JSON.stringify(tableTailPercentiles)};
-    // Chart only renders p0..p99. p100 is a near-vertical spike (one
-    // flash-crash bar) that compresses the rest of the curve into a flat
-    // line, so we exclude it from the chart. The table still includes it.
+    // Chart is a CDF: x = move size in bp, y = P(move <= x), in %. p100
+    // is a near-vertical spike (one flash-crash bar) that pushes the
+    // x-axis way out and crushes the rest of the curve, so the chart
+    // stops at p99. The table still includes p100.
     const chartLastP = 99;
-    const xs = Array.from({ length: chartLastP + 1 }, (_, i) => i);
     const bodyColor = ${JSON.stringify(bodyColor)};
     const wickColor = ${JSON.stringify(wickColor)};
 
-    const formatPct = (v) => {
+    // Source values are in percent (e.g. 0.05 = 0.05%). Display in basis
+    // points: 1% = 100 bp, rounded to the nearest integer. Same numbers,
+    // just a tidier unit for the sub-1% range we care about.
+    const formatBips = (v) => {
       if (v == null || !Number.isFinite(v)) return "—";
-      if (v >= 10) return v.toFixed(1) + "%";
-      if (v >= 1) return v.toFixed(2) + "%";
-      if (v >= 0.1) return v.toFixed(3) + "%";
-      return v.toFixed(4) + "%";
+      return Math.round(v * 100).toLocaleString() + " bp";
     };
-    // Fixed-precision formatter for the y-axis only. Variable-precision
-    // labels would resize per asset and shift the plot area horizontally
-    // when switching tabs. The full-precision formatter is still used in
-    // the table and the hover tooltip.
-    const formatPctAxis = (v) =>
-      Number.isFinite(v) ? v.toFixed(1) + "%" : "—";
+    // Probability axis. y values are percentile-indices in [0, 99], so
+    // they read directly as percentages.
+    const formatProb = (v) => {
+      if (v == null || !Number.isFinite(v)) return "—";
+      return Math.round(v) + "%";
+    };
 
     const tabsEl = document.getElementById("tabs");
     const titleEl = document.getElementById("asset-title");
@@ -245,7 +245,7 @@ export function renderTrainingDistributionsHtml({
     function renderTable(slice) {
       if (!tbodyEl) return;
       const cells = (key) => tablePs
-        .map((p) => '<td>' + formatPct(slice[key][p]) + '</td>')
+        .map((p) => '<td>' + formatBips(slice[key][p]) + '</td>')
         .join("");
       tbodyEl.innerHTML =
         '<tr class="body"><th scope="row">body</th>' + cells("body") + '</tr>' +
@@ -275,13 +275,38 @@ export function renderTrainingDistributionsHtml({
         chartHostError("chart host has zero size: " + w + "x" + h);
         return;
       }
-      const sliceTo = chartLastP + 1;
-      const bodyData = Array.from({ length: sliceTo }, (_, p) =>
-        Number.isFinite(slice.body[p]) ? slice.body[p] : null,
-      );
-      const wickData = Array.from({ length: sliceTo }, (_, p) =>
-        Number.isFinite(slice.wick[p]) ? slice.wick[p] : null,
-      );
+      // Each (percentile, value) pair is a point on the CDF: at x = the
+      // p-th percentile move, F(x) = p%. Body and wick have different
+      // x-ranges, but uPlot requires a shared x-axis across series — so
+      // we merge their x-values into a single sorted array and look up
+      // each series' percentile at every shared x via cdfAt(). The
+      // result is a staircase ECDF; uPlot draws it as straight segments
+      // between the data points, which is fine at 100 points per series.
+      const bodyPts = [];
+      const wickPts = [];
+      for (let p = 0; p <= chartLastP; p++) {
+        if (Number.isFinite(slice.body[p])) bodyPts.push([slice.body[p], p]);
+        if (Number.isFinite(slice.wick[p])) wickPts.push([slice.wick[p], p]);
+      }
+      bodyPts.sort((a, b) => a[0] - b[0]);
+      wickPts.sort((a, b) => a[0] - b[0]);
+      const xsSet = new Set();
+      for (const pt of bodyPts) xsSet.add(pt[0]);
+      for (const pt of wickPts) xsSet.add(pt[0]);
+      const xs = [...xsSet].sort((a, b) => a - b);
+      // Largest p where pts[i].x <= x. Returns null if x precedes the
+      // series' minimum (the curve hasn't started yet at that x).
+      const cdfAt = (pts, x) => {
+        let lo = 0, hi = pts.length - 1, ans = null;
+        while (lo <= hi) {
+          const mid = (lo + hi) >> 1;
+          if (pts[mid][0] <= x) { ans = pts[mid][1]; lo = mid + 1; }
+          else hi = mid - 1;
+        }
+        return ans;
+      };
+      const bodyData = xs.map((x) => cdfAt(bodyPts, x));
+      const wickData = xs.map((x) => cdfAt(wickPts, x));
       const data = [xs.slice(), bodyData, wickData];
       const updateTooltip = (u) => {
         const idx = u.cursor.idx;
@@ -289,13 +314,13 @@ export function renderTrainingDistributionsHtml({
           tooltipEl.classList.remove("visible");
           return;
         }
-        const p = xs[idx];
+        const x = xs[idx];
         const bodyV = bodyData[idx];
         const wickV = wickData[idx];
         tooltipEl.innerHTML =
-          '<div class="p">p' + p + '</div>' +
-          '<div class="row"><span class="swatch" style="background:' + bodyColor + '"></span><span class="name">body</span><span class="val">' + formatPct(bodyV) + '</span></div>' +
-          '<div class="row"><span class="swatch" style="background:' + wickColor + '"></span><span class="name">wick</span><span class="val">' + formatPct(wickV) + '</span></div>';
+          '<div class="p">' + formatBips(x) + ' or less</div>' +
+          '<div class="row"><span class="swatch" style="background:' + bodyColor + '"></span><span class="name">body</span><span class="val">' + formatProb(bodyV) + '</span></div>' +
+          '<div class="row"><span class="swatch" style="background:' + wickColor + '"></span><span class="name">wick</span><span class="val">' + formatProb(wickV) + '</span></div>';
         const cursorLeft = u.cursor.left;
         const frameW = chartFrame.getBoundingClientRect().width;
         const tooltipW = tooltipEl.offsetWidth || 140;
@@ -325,17 +350,36 @@ export function renderTrainingDistributionsHtml({
             stroke: "#64748b",
             grid: { show: false },
             ticks: { show: false },
-            values: (u, splits) => splits.map((p) => "p" + Math.round(p)),
+            values: (u, splits) => splits.map(formatBips),
           },
           {
             stroke: "#64748b",
             grid: { show: false },
             ticks: { show: false },
-            values: (u, splits) => splits.map(formatPctAxis),
-            size: 64,
+            values: (u, splits) => splits.map(formatProb),
+            size: 56,
           },
         ],
-        hooks: { setCursor: [updateTooltip] },
+        hooks: {
+          setCursor: [updateTooltip],
+          // Faint horizontal reference at P=50%. Drawn in `drawAxes` so
+          // it sits behind the body/wick curves rather than crossing them.
+          drawAxes: [
+            (u) => {
+              const yPos = u.valToPos(50, "y", true);
+              const ctx = u.ctx;
+              ctx.save();
+              ctx.strokeStyle = "#94a3b8";
+              ctx.lineWidth = 1;
+              ctx.setLineDash([4, 4]);
+              ctx.beginPath();
+              ctx.moveTo(u.bbox.left, yPos);
+              ctx.lineTo(u.bbox.left + u.bbox.width, yPos);
+              ctx.stroke();
+              ctx.restore();
+            },
+          ],
+        },
       };
       try {
         chart = new uPlot(opts, data, chartHost);
