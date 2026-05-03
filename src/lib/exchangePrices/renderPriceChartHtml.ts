@@ -167,11 +167,17 @@ export function renderPriceChartHtml({
       })));
     }
 
-    const easternTimeFormatter = new Intl.DateTimeFormat("en-US", {
+    const easternHmsFormatter = new Intl.DateTimeFormat("en-US", {
       timeZone: "America/New_York",
       hour: "2-digit",
       minute: "2-digit",
       second: "2-digit",
+      hour12: false,
+    });
+    const easternHmFormatter = new Intl.DateTimeFormat("en-US", {
+      timeZone: "America/New_York",
+      hour: "2-digit",
+      minute: "2-digit",
       hour12: false,
     });
 
@@ -183,7 +189,23 @@ export function renderPriceChartHtml({
           grid: { show: false },
           ticks: { stroke: "#cbd5e1", width: 1, size: 6 },
           show: showXLabels,
-          values: (u, splits) => splits.map((s) => easternTimeFormatter.format(new Date(s * 1000))),
+          // Minimum pixel gap between x-axis ticks. uPlot picks a tick
+          // density that keeps adjacent labels at least this far apart, so
+          // longer captures naturally end up with fewer (less cramped)
+          // labels rather than crammed HH:MM:SS strings on top of each
+          // other. uPlot doesn't natively rotate labels.
+          space: 110,
+          values: (u, splits) => {
+            // If ticks are at least a minute apart, drop the seconds —
+            // "13:55" reads cleaner than "13:55:00" at lower density.
+            const incr = splits.length > 1
+              ? splits[1] - splits[0]
+              : Number.POSITIVE_INFINITY;
+            const formatter = incr >= 60
+              ? easternHmFormatter
+              : easternHmsFormatter;
+            return splits.map((s) => formatter.format(new Date(s * 1000)));
+          },
         },
         {
           stroke: "#64748b",
