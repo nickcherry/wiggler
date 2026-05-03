@@ -362,8 +362,8 @@ export function renderTrainingDistributionsHtml({
         ],
         hooks: {
           setCursor: [updateTooltip],
-          // Faint horizontal reference at P=50%. Drawn in `drawAxes` so
-          // it sits behind the body/wick curves rather than crossing them.
+          // Faint horizontal reference at P=50%. Drawn in the drawAxes
+          // hook so it sits behind the body/wick curves, not over them.
           drawAxes: [
             (u) => {
               const yPos = u.valToPos(50, "y", true);
