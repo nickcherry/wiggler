@@ -10,7 +10,6 @@ import { createDatabase } from "@alea/lib/db/createDatabase";
 import { destroyDatabase } from "@alea/lib/db/destroyDatabase";
 import { openHtmlOnDarwin } from "@alea/lib/exchangePrices/openHtmlOnDarwin";
 import { computeCandleSizeDistribution } from "@alea/lib/training/computeCandleSizeDistribution";
-import { computeSurvivalDistribution } from "@alea/lib/training/computeSurvivalDistribution";
 import { computeSurvivalSnapshots } from "@alea/lib/training/computeSurvivalSnapshots";
 import { loadTrainingCandles } from "@alea/lib/training/loadTrainingCandles";
 import { applySurvivalFilters } from "@alea/lib/training/survivalFilters/applySurvivalFilters";
@@ -104,22 +103,27 @@ export const trainingDistributionsCommand = defineCommand({
           asset,
           timeframe: "1m",
         });
-        const survival = computeSurvivalDistribution({
-          asset,
-          candles: candles1m,
+        // One enumeration: produces baseline (with byYear) + every filter
+        // result in a single sweep. The 5m series powers `prev5m` and
+        // `ma20x5m` context fields the filters read.
+        const { baseline, baselineByYear, perFilter } = applySurvivalFilters({
+          snapshots: computeSurvivalSnapshots({
+            candles1m,
+            candles5m: candles,
+          }),
+          filters: survivalFilters,
         });
+        const survival: AssetSurvivalDistribution | null =
+          baseline.windowCount === 0
+            ? null
+            : {
+                asset,
+                windowCount: baseline.windowCount,
+                all: { byRemaining: baseline.byRemaining },
+                byYear: baselineByYear,
+              };
         if (survival !== null) {
           survivalDistributions.push(survival);
-          // Filter framework needs the same 1m series plus the 5m series
-          // for MA-20 / prev-5m context. Reuse `candles` (the 5m series
-          // we already loaded for the size distribution).
-          const { perFilter } = applySurvivalFilters({
-            snapshots: computeSurvivalSnapshots({
-              candles1m,
-              candles5m: candles,
-            }),
-            filters: survivalFilters,
-          });
           survivalFilterResults.push({ asset, results: perFilter });
         }
 

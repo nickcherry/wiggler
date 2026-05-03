@@ -36,10 +36,11 @@ const REMAINING_VALUES: readonly SurvivalRemainingMinutes[] = [4, 3, 2, 1];
 
 /**
  * Single-pass aggregator: walks the snapshot stream once, accumulates the
- * baseline surface, and for each filter accumulates its `whenTrue` and
- * `whenFalse` surfaces. Returns one `SurvivalFilterResult` per filter
- * plus the shared baseline surface so callers (the renderer, the
- * dashboard payload) don't have to re-derive it.
+ * baseline surface (with per-year breakdown), and for each filter
+ * accumulates its `whenTrue` and `whenFalse` surfaces. Returns the
+ * baseline + byYear plus one `SurvivalFilterResult` per filter so callers
+ * don't have to re-iterate the stream just to derive the per-year
+ * breakdown.
  *
  * Memory: surfaces are sparse-by-distance (one entry per observed bp
  * bucket per remaining-minutes slot), so per-filter cost is bounded by
@@ -54,15 +55,17 @@ export function applySurvivalFilters({
   readonly filters: readonly SurvivalFilter[];
 }): {
   readonly baseline: SurvivalSurfaceWithCount;
+  readonly baselineByYear: Readonly<Record<string, SurvivalSurfaceWithCount>>;
   readonly perFilter: readonly SurvivalFilterResult[];
 } {
   const baselineRaw = createRawSurface();
+  const byYearRaw = new Map<string, RawSurface>();
+  const yearWindows = new Map<string, Set<number>>();
   const perFilterRaw = filters.map(() => ({
     whenTrue: createRawSurface(),
     whenFalse: createRawSurface(),
     counts: { trueCount: 0, falseCount: 0, skipCount: 0 },
   }));
-  let totalSnapshots = 0;
   // Track distinct windows separately from snapshots: each window
   // contributes exactly four snapshots, but we report `windowCount` on
   // the surface so the per-section header reads consistently with the
@@ -74,7 +77,6 @@ export function applySurvivalFilters({
   }));
 
   for (const snapshot of snapshots) {
-    totalSnapshots += 1;
     baselineWindows.add(snapshot.windowStartMs);
     record({
       raw: baselineRaw,
@@ -82,6 +84,23 @@ export function applySurvivalFilters({
       distanceBp: snapshot.distanceBp,
       survived: snapshot.survived,
     });
+    let yearRaw = byYearRaw.get(snapshot.year);
+    if (yearRaw === undefined) {
+      yearRaw = createRawSurface();
+      byYearRaw.set(snapshot.year, yearRaw);
+    }
+    record({
+      raw: yearRaw,
+      remaining: snapshot.remaining,
+      distanceBp: snapshot.distanceBp,
+      survived: snapshot.survived,
+    });
+    let yearWindowSet = yearWindows.get(snapshot.year);
+    if (yearWindowSet === undefined) {
+      yearWindowSet = new Set<number>();
+      yearWindows.set(snapshot.year, yearWindowSet);
+    }
+    yearWindowSet.add(snapshot.windowStartMs);
     for (let i = 0; i < filters.length; i += 1) {
       const filter = filters[i];
       const slot = perFilterRaw[i];
@@ -124,6 +143,18 @@ export function applySurvivalFilters({
     windowCount: baselineWindows.size,
     ...materializeSurface({ raw: baselineRaw }),
   };
+  const baselineByYear: Record<string, SurvivalSurfaceWithCount> = {};
+  for (const year of [...byYearRaw.keys()].sort()) {
+    const raw = byYearRaw.get(year);
+    const windows = yearWindows.get(year);
+    if (raw === undefined || windows === undefined || windows.size === 0) {
+      continue;
+    }
+    baselineByYear[year] = {
+      windowCount: windows.size,
+      ...materializeSurface({ raw }),
+    };
+  }
   const baselineThresholds = computeThresholdMatrix({ surface: baseline });
 
   const perFilter: SurvivalFilterResult[] = [];
@@ -160,12 +191,8 @@ export function applySurvivalFilters({
       summary,
     });
   }
-  // Suppress unused-variable lint: totalSnapshots is the count we use to
-  // sanity-check `trueCount + falseCount + skipCount` per filter; not
-  // surfaced in the result but useful at debug time.
-  void totalSnapshots;
 
-  return { baseline, perFilter };
+  return { baseline, baselineByYear, perFilter };
 }
 
 // ----------------------------------------------------------------

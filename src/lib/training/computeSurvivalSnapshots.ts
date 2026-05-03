@@ -290,34 +290,22 @@ function build5mLookback({
     number,
     { readonly direction: SurvivalSide; readonly close: number }
   >();
-  // For MA-20 at window start S, we need the sum of the 20 most recent 5m
-  // closes that ended at or before S - 5m. Cache the running prefix sum
-  // keyed by the 5m candle's start timestamp, then answer point queries.
-  const byStartMs = new Map<number, { readonly closeSumUpTo: number }>();
-  let runningSum = 0;
-  const closes: number[] = [];
+  // Single O(n) pass over the 5m series (already sorted ascending by the
+  // loader): build the prev-5m direction/close lookup, the chronological
+  // start-time array for binary search, and the running cumulative-close
+  // prefix sum used to answer MA-20 in O(1).
+  const startTimes: number[] = [];
+  const closeAtStart = new Map<number, number>();
+  let cumulative = 0;
   for (const candle of candles5m) {
     const startMs = candle.timestamp.getTime();
     const endMs = startMs + MS_PER_5M;
-    const direction: SurvivalSide = candle.close >= candle.open ? "up" : "down";
-    byEndMs.set(endMs, { direction, close: candle.close });
-    closes.push(candle.close);
-    runningSum += candle.close;
-    byStartMs.set(startMs, { closeSumUpTo: runningSum });
-  }
-  // Sort the start timestamps to enable a binary-search "most recent 5m
-  // candle starting strictly before S" lookup.
-  const startTimes = [...byStartMs.keys()].sort((a, b) => a - b);
-  const closeAtStart = new Map<number, number>();
-  let cumulative = 0;
-  for (const startMs of startTimes) {
-    const candleClose = candles5m.find(
-      (c) => c.timestamp.getTime() === startMs,
-    )?.close;
-    if (candleClose === undefined) {
-      continue;
-    }
-    cumulative += candleClose;
+    byEndMs.set(endMs, {
+      direction: candle.close >= candle.open ? "up" : "down",
+      close: candle.close,
+    });
+    cumulative += candle.close;
+    startTimes.push(startMs);
     closeAtStart.set(startMs, cumulative);
   }
 
@@ -348,10 +336,6 @@ function build5mLookback({
       // candle, then take the 20-sample window ending there.
       const lastIdx = indexAtOrBefore(windowStartMs);
       if (lastIdx < MA20_PERIOD - 1) {
-        return null;
-      }
-      const startTimeAtFirst = startTimes[lastIdx - MA20_PERIOD + 1];
-      if (startTimeAtFirst === undefined) {
         return null;
       }
       const tail = closeAtStart.get(startTimes[lastIdx] ?? -1);
