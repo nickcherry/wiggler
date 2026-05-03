@@ -32,6 +32,7 @@ export async function upsertCandles({
         batch.map((candle) => ({
           source: candle.source,
           asset: candle.asset,
+          product: candle.product,
           timeframe: candle.timeframe,
           timestamp: candle.timestamp,
           open: candle.open,
@@ -43,7 +44,7 @@ export async function upsertCandles({
       )
       .onConflict((conflict) =>
         conflict
-          .columns(["source", "asset", "timeframe", "timestamp"])
+          .columns(["source", "asset", "product", "timeframe", "timestamp"])
           .doUpdateSet({
             open: sql`excluded.open`,
             high: sql`excluded.high`,

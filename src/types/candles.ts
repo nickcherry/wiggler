@@ -1,4 +1,5 @@
 import { candleTimeframeValues } from "@wiggler/constants/candles";
+import { productSchema } from "@wiggler/types/products";
 import { candleSourceSchema } from "@wiggler/types/sources";
 import { z } from "zod";
 
@@ -20,6 +21,7 @@ export type CandleTimeframe = z.infer<typeof candleTimeframeSchema>;
 export const candleSchema = z.object({
   source: candleSourceSchema,
   asset: z.string(),
+  product: productSchema,
   timeframe: candleTimeframeSchema,
   timestamp: z.date(),
   open: z.number().finite(),

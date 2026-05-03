@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+import { candlesFillGapsCommand } from "@wiggler/bin/candles/fillGaps";
 import { candlesSyncCommand } from "@wiggler/bin/candles/sync";
 import { dbMigrateCommand } from "@wiggler/bin/db/migrate";
 import { pricesCaptureCommand } from "@wiggler/bin/prices/capture";
@@ -12,6 +13,7 @@ const cli = createCli({
   commands: [
     dbMigrateCommand,
     candlesSyncCommand,
+    candlesFillGapsCommand,
     pricesCaptureCommand,
     pricesChartCommand,
     telegramTestCommand,

@@ -56,6 +56,7 @@ export async function fetchBinanceCandles({
   return klines.map((k) => ({
     source: "binance" as const,
     asset,
+    product: "spot" as const,
     timeframe,
     timestamp: new Date(k[0]),
     open: Number(k[1]),

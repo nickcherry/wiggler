@@ -5,12 +5,14 @@ import { upsertCandles } from "@wiggler/lib/candles/upsertCandles";
 import type { DatabaseClient } from "@wiggler/lib/db/types";
 import type { Asset } from "@wiggler/types/assets";
 import type { CandleTimeframe } from "@wiggler/types/candles";
+import type { Product } from "@wiggler/types/products";
 import type { CandleSource } from "@wiggler/types/sources";
 
 type SyncCandlesParams = {
   readonly db: DatabaseClient;
   readonly source: CandleSource;
   readonly asset: Asset;
+  readonly product: Product;
   readonly timeframe: CandleTimeframe;
   readonly start: Date;
   readonly end: Date;
@@ -26,6 +28,7 @@ export type SyncCandlesPageMetric = {
 export type SyncCandlesResult = {
   readonly source: CandleSource;
   readonly asset: Asset;
+  readonly product: Product;
   readonly timeframe: CandleTimeframe;
   readonly start: Date;
   readonly end: Date;
@@ -37,15 +40,16 @@ export type SyncCandlesResult = {
 };
 
 /**
- * Pages through `[start, end)` for one (source, asset, timeframe) series,
- * fetching `candlesPerFetchPage` candles per call. Each page is upserted
- * before the next is fetched so a long sync can be interrupted without
- * losing all progress. Per-page latency is recorded for the caller.
+ * Pages through `[start, end)` for one (source, asset, product, timeframe)
+ * series, fetching `candlesPerFetchPage` candles per call. Each page is
+ * upserted before the next is fetched so a long sync can be interrupted
+ * without losing all progress. Per-page latency is recorded for the caller.
  */
 export async function syncCandles({
   db,
   source,
   asset,
+  product,
   timeframe,
   start,
   end,
@@ -70,6 +74,7 @@ export async function syncCandles({
     const candles = await fetchCandlesPage({
       source,
       asset,
+      product,
       timeframe,
       start: pageStart,
       end: pageEnd,
@@ -96,6 +101,7 @@ export async function syncCandles({
   return {
     source,
     asset,
+    product,
     timeframe,
     start,
     end,
@@ -106,3 +112,4 @@ export async function syncCandles({
     upsertTotalMs,
   };
 }
+

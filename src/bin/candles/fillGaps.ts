@@ -1,13 +1,11 @@
 import { assetValues } from "@wiggler/constants/assets";
-import {
-  candleTimeframeValues,
-  defaultCandleLookbackDays,
-} from "@wiggler/constants/candles";
+import { candleTimeframeValues } from "@wiggler/constants/candles";
 import { productValues } from "@wiggler/constants/products";
 import { candleSourceValues } from "@wiggler/constants/sources";
-import { alignTimeframeWindow } from "@wiggler/lib/candles/alignTimeframeWindow";
-import { summarizeSyncResult } from "@wiggler/lib/candles/summarizeSyncResult";
-import { syncCandles, type SyncCandlesResult } from "@wiggler/lib/candles/syncCandles";
+import {
+  fillCandleGaps,
+  type FillCandleGapsResult,
+} from "@wiggler/lib/candles/fillCandleGaps";
 import { defineCommand } from "@wiggler/lib/cli/defineCommand";
 import { defineValueOption } from "@wiggler/lib/cli/defineValueOption";
 import { createDatabase } from "@wiggler/lib/db/createDatabase";
@@ -22,25 +20,20 @@ import { candleSourceSchema } from "@wiggler/types/sources";
 import pc from "picocolors";
 import { z } from "zod";
 
-const millisecondsPerDay = 86_400_000;
+const fillConcurrency = 8;
 
 /**
- * Concurrent series in flight. Sized so each provider sees at most half the
- * load when the iteration order alternates Coinbase / Binance evenly — eight
- * workers across two providers means roughly four concurrent requests per
- * provider, which stays comfortably below either's public rate limits.
+ * Re-queries each configured (source, asset, product, timeframe) series for
+ * any missing 5-min bars between the persisted min and max, upserting
+ * whatever the source returns now. Useful after a large historical sync
+ * when one or two venues had transient outages whose data has since been
+ * backfilled by the venue.
  */
-const syncConcurrency = 8;
-
-/**
- * Backfills 5-minute (or 1-minute) candles into Postgres for a configurable
- * window, asset list, and source list.
- */
-export const candlesSyncCommand = defineCommand({
-  name: "candles:sync",
-  summary: "Backfill candles into Postgres",
+export const candlesFillGapsCommand = defineCommand({
+  name: "candles:fill-gaps",
+  summary: "Refetch missing candle bars from each source",
   description:
-    "Page through the historical candle window for each (source, asset) and upsert into the local Postgres database. Per-page latency is recorded so slow pages stay visible.",
+    "Identify per-series gaps (timestamps between min and max with no row) and re-pull each gap window from the source, upserting any rows the API now returns. Some venue outages get backfilled later and become recoverable on a follow-up pull.",
   options: [
     defineValueOption({
       key: "timeframe",
@@ -50,18 +43,7 @@ export const candlesSyncCommand = defineCommand({
       choices: candleTimeframeValues,
       schema: candleTimeframeSchema
         .default("5m")
-        .describe("Candle timeframe to fetch."),
-    }),
-    defineValueOption({
-      key: "days",
-      long: "--days",
-      valueName: "N",
-      schema: z.coerce
-        .number()
-        .int()
-        .positive()
-        .default(defaultCandleLookbackDays)
-        .describe("Lookback window in days."),
+        .describe("Candle timeframe to repair."),
     }),
     defineValueOption({
       key: "assets",
@@ -98,38 +80,23 @@ export const candlesSyncCommand = defineCommand({
     }),
   ],
   examples: [
-    "bun wiggler candles:sync",
-    "bun wiggler candles:sync --timeframe 5m --days 730",
-    "bun wiggler candles:sync --assets btc,eth --sources binance",
-    "bun wiggler candles:sync --products spot",
+    "bun wiggler candles:fill-gaps",
+    "bun wiggler candles:fill-gaps --sources coinbase",
+    "bun wiggler candles:fill-gaps --assets btc --products spot",
   ],
   output:
-    "Prints per-(source, asset) row counts and page-latency stats, then the overall total.",
+    "Per-(source, asset, product) gap counts, missing bars, recovered bars, and elapsed time.",
   sideEffects:
     "Hits Coinbase Advanced Trade and Binance public market data; upserts into the candles table.",
   async run({ io, options }) {
-    const end = alignTimeframeWindow({
-      date: new Date(),
-      timeframe: options.timeframe,
-    });
-    const start = new Date(end.getTime() - options.days * millisecondsPerDay);
-
     io.writeStdout(
-      `${pc.bold("wiggler candles:sync")} ${pc.cyan(options.timeframe)} ${pc.dim(start.toISOString())} → ${pc.dim(end.toISOString())}\n`,
+      `${pc.bold("wiggler candles:fill-gaps")} ${pc.cyan(options.timeframe)}\n`,
     );
     io.writeStdout(
       `${pc.dim("assets:")} ${options.assets.join(",")}  ${pc.dim("sources:")} ${options.sources.join(",")}  ${pc.dim("products:")} ${options.products.join(",")}\n\n`,
     );
 
-    const db = createDatabase();
-    const results: SyncCandlesResult[] = [];
-    const overallStart = performance.now();
-
-    // Iterate `asset → product → source` so the queue alternates providers
-    // every other task. With concurrency 8 that lands ~4 requests on each
-    // provider at any moment — well below both Coinbase Advanced Trade's and
-    // Binance Vision's public rate limits.
-    const tasks: SyncTask[] = [];
+    const tasks: FillTask[] = [];
     for (const asset of options.assets) {
       for (const product of options.products) {
         for (const source of options.sources) {
@@ -137,6 +104,10 @@ export const candlesSyncCommand = defineCommand({
         }
       }
     }
+
+    const db = createDatabase();
+    const results: FillCandleGapsResult[] = [];
+    const overallStart = performance.now();
 
     try {
       let cursor = 0;
@@ -147,33 +118,26 @@ export const candlesSyncCommand = defineCommand({
           if (task === undefined) {
             continue;
           }
-          const result = await syncCandles({
+          const result = await fillCandleGaps({
             db,
             source: task.source,
             asset: task.asset,
             product: task.product,
             timeframe: options.timeframe,
-            start,
-            end,
           });
           results.push(result);
-          const stats = summarizeSyncResult({ result });
           io.writeStdout(
             `${pc.bold(task.asset.toUpperCase().padEnd(5))} ` +
               `${pc.cyan(task.source.padEnd(8))} ${pc.magenta(task.product.padEnd(4))} ` +
-              `${pc.dim("pages")}=${String(stats.count).padStart(4)} ` +
-              `${pc.dim("rows")}=${String(result.fetched).padStart(8)} ` +
-              `${pc.dim("fetch")}=${formatMs(result.fetchTotalMs).padStart(8)} ` +
-              `${pc.dim("mean")}=${formatMs(stats.meanMs)} ` +
-              `${pc.dim("p50")}=${formatMs(stats.p50Ms)} ` +
-              `${pc.dim("p95")}=${formatMs(stats.p95Ms)} ` +
-              `${pc.dim("max")}=${formatMs(stats.maxMs)} ` +
-              `${pc.dim("upsert")}=${formatMs(result.upsertTotalMs)}\n`,
+              `${pc.dim("gaps")}=${String(result.gaps.length).padStart(4)} ` +
+              `${pc.dim("missing")}=${String(result.missingBars).padStart(5)} ` +
+              `${pc.dim("recovered")}=${String(result.recoveredBars).padStart(5)} ` +
+              `${pc.dim("elapsed")}=${formatMs(result.elapsedMs)}\n`,
           );
         }
       };
       await Promise.all(
-        Array.from({ length: Math.min(syncConcurrency, tasks.length) }, () =>
+        Array.from({ length: Math.min(fillConcurrency, tasks.length) }, () =>
           worker(),
         ),
       );
@@ -182,14 +146,21 @@ export const candlesSyncCommand = defineCommand({
     }
 
     const overallMs = performance.now() - overallStart;
-    const totalRows = results.reduce((sum, r) => sum + r.fetched, 0);
+    const totalMissing = results.reduce((sum, r) => sum + r.missingBars, 0);
+    const totalRecovered = results.reduce(
+      (sum, r) => sum + r.recoveredBars,
+      0,
+    );
     io.writeStdout(
-      `\n${pc.green("done")}  ${pc.dim("wall=")}${formatMs(overallMs)}  ${pc.dim("rows=")}${totalRows.toLocaleString()}  ${pc.dim("series=")}${results.length}\n`,
+      `\n${pc.green("done")}  ${pc.dim("wall=")}${formatMs(overallMs)}  ` +
+        `${pc.dim("missing=")}${totalMissing.toLocaleString()}  ` +
+        `${pc.dim("recovered=")}${totalRecovered.toLocaleString()}  ` +
+        `${pc.dim("series=")}${results.length}\n`,
     );
   },
 });
 
-type SyncTask = {
+type FillTask = {
   readonly asset: Asset;
   readonly product: Product;
   readonly source: CandleSource;
@@ -207,7 +178,11 @@ function parseList(value: string | undefined): string[] | undefined {
 }
 
 function formatMs(ms: number): string {
-  if (ms < 1000) {return `${ms.toFixed(0)}ms`;}
-  if (ms < 60_000) {return `${(ms / 1000).toFixed(2)}s`;}
+  if (ms < 1000) {
+    return `${ms.toFixed(0)}ms`;
+  }
+  if (ms < 60_000) {
+    return `${(ms / 1000).toFixed(2)}s`;
+  }
   return `${Math.floor(ms / 60_000)}m${((ms % 60_000) / 1000).toFixed(0)}s`;
 }
