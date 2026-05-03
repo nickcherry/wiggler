@@ -10,9 +10,11 @@ import { createDatabase } from "@alea/lib/db/createDatabase";
 import { destroyDatabase } from "@alea/lib/db/destroyDatabase";
 import { openHtmlOnDarwin } from "@alea/lib/exchangePrices/openHtmlOnDarwin";
 import { computeCandleSizeDistribution } from "@alea/lib/training/computeCandleSizeDistribution";
+import { computeSurvivalDistribution } from "@alea/lib/training/computeSurvivalDistribution";
 import { loadTrainingCandles } from "@alea/lib/training/loadTrainingCandles";
 import type {
   AssetSizeDistribution,
+  AssetSurvivalDistribution,
   TrainingDistributionsPayload,
 } from "@alea/lib/training/types";
 import { writeTrainingDistributionsArtifacts } from "@alea/lib/training/writeTrainingDistributionsArtifacts";
@@ -74,6 +76,7 @@ export const trainingDistributionsCommand = defineCommand({
 
     const db = createDatabase();
     const distributions: AssetSizeDistribution[] = [];
+    const survivalDistributions: AssetSurvivalDistribution[] = [];
 
     try {
       for (const asset of options.assets) {
@@ -86,11 +89,34 @@ export const trainingDistributionsCommand = defineCommand({
           continue;
         }
         distributions.push(distribution);
+
+        // Survival surface needs 1m candles for the same asset. The 1m
+        // backfill is independent of the 5m one — if it isn't ready yet
+        // for this asset, we skip the survival computation but still emit
+        // the size distribution.
+        const candles1m = await loadTrainingCandles({
+          db,
+          asset,
+          timeframe: "1m",
+        });
+        const survival = computeSurvivalDistribution({
+          asset,
+          candles: candles1m,
+        });
+        if (survival !== null) {
+          survivalDistributions.push(survival);
+        }
+
         const yearKeys = Object.keys(distribution.byYear).sort();
+        const survivalLabel =
+          survival === null
+            ? pc.yellow("no 1m")
+            : `${pc.dim("windows=")}${survival.windowCount.toLocaleString()}`;
         io.writeStdout(
           `${pc.bold(asset.toUpperCase().padEnd(5))} ` +
             `${pc.dim("rows=")}${String(distribution.candleCount).padStart(8)} ` +
-            `${pc.dim("years=")}${yearKeys.length > 0 ? yearKeys.join(",") : "—"}\n`,
+            `${pc.dim("years=")}${yearKeys.length > 0 ? yearKeys.join(",") : "—"} ` +
+            `${survivalLabel}\n`,
         );
       }
     } finally {
@@ -115,7 +141,10 @@ export const trainingDistributionsCommand = defineCommand({
       `training-distributions_${stamp}.json`,
     );
 
-    const payload = buildPayload({ distributions });
+    const payload = buildPayload({
+      distributions,
+      survivalDistributions,
+    });
     await writeTrainingDistributionsArtifacts({ payload, htmlPath, jsonPath });
 
     io.writeStdout(
@@ -130,14 +159,17 @@ export const trainingDistributionsCommand = defineCommand({
 
 function buildPayload({
   distributions,
+  survivalDistributions,
 }: {
   readonly distributions: readonly AssetSizeDistribution[];
+  readonly survivalDistributions: readonly AssetSurvivalDistribution[];
 }): TrainingDistributionsPayload {
   return {
     command: "training:distributions",
     generatedAtMs: Date.now(),
     series: trainingCandleSeries,
     assets: distributions,
+    survival: survivalDistributions,
   };
 }
 

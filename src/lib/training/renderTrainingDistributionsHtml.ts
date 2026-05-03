@@ -1,5 +1,7 @@
 import type {
   AssetSizeDistribution,
+  AssetSurvivalDistribution,
+  SurvivalRemainingMinutes,
   TrainingDistributionsPayload,
 } from "@alea/lib/training/types";
 import {
@@ -25,6 +27,56 @@ const tableTailPercentiles: readonly number[] = [
   95, 90, 85, 80, 75, 70, 65, 60, 55, 50,
 ];
 
+/**
+ * Minimum snapshot count required for a `(remaining, distance)` survival
+ * bucket to be considered trustworthy: rendered as a chart point and
+ * eligible to fill a threshold-table cell. Buckets below this floor are
+ * hidden from the chart and shown as "—" in the table. 500 is conservative
+ * enough given a few years of 1m candles (~100k+ snapshots per
+ * remaining-minutes bucket per asset) without hiding too much useful data.
+ */
+const SURVIVAL_MIN_SAMPLES = 500;
+
+/**
+ * x-axis range for the survival chart, in basis points. Matches the upper
+ * end of the body/wick CDF so the two charts read at the same visual
+ * scale.
+ */
+const SURVIVAL_MAX_DISTANCE_BP = 75;
+
+/**
+ * Target win rates (percent) for the threshold-table columns. Each cell
+ * is the minimum distance bucket whose win rate meets/exceeds the target
+ * while also clearing `SURVIVAL_MIN_SAMPLES`.
+ */
+const SURVIVAL_TARGET_WIN_RATES: readonly number[] = [
+  60, 65, 70, 75, 80, 85, 90, 95,
+];
+
+/**
+ * Color per remaining-minutes line. Cooler/blue for 4m-left (far from
+ * settlement, where survival is hardest to call) → warmer/gold for 1m-left
+ * (sharp "point of no return"). Matches the visual intuition that less
+ * time = more decisive curve.
+ */
+const SURVIVAL_REMAINING_COLORS: Readonly<
+  Record<SurvivalRemainingMinutes, string>
+> = {
+  4: "#5b95ff",
+  3: "#46c37b",
+  2: "#ffa566",
+  1: "#d7aa45",
+};
+
+/**
+ * Order in which the remaining-minutes lines are stacked in the chart's
+ * series array, the legend, and the table rows. Chart series are drawn
+ * later-on-top, so 1m-left (the most decisive curve) ends up on top.
+ */
+const SURVIVAL_REMAINING_ORDER: readonly SurvivalRemainingMinutes[] = [
+  4, 3, 2, 1,
+];
+
 type DashboardAssetSlice = {
   readonly asset: string;
   readonly assetUpper: string;
@@ -32,6 +84,34 @@ type DashboardAssetSlice = {
   readonly yearRange: string | null;
   readonly body: readonly number[];
   readonly wick: readonly number[];
+  readonly survival: SurvivalSlice | null;
+};
+
+/**
+ * Chart-ready survival data. `distancesBp` is the shared x-axis (every
+ * integer bp from 0 to `SURVIVAL_MAX_DISTANCE_BP - 1`). For each remaining
+ * bucket we carry parallel arrays:
+ *
+ *   - `winRate[i]` ∈ [0, 100] or `null` when the bucket is empty/sparse
+ *     (below `SURVIVAL_MIN_SAMPLES`). uPlot draws nulls as gaps.
+ *   - `sampleCount[i]` is the raw bucket size (always present, even when
+ *     below the floor — used in tooltips so the operator can see why a
+ *     point was hidden).
+ *
+ * `windowCount` powers the per-section header.
+ */
+type SurvivalSlice = {
+  readonly windowCount: number;
+  readonly distancesBp: readonly number[];
+  readonly byRemaining: Readonly<
+    Record<
+      SurvivalRemainingMinutes,
+      {
+        readonly winRate: readonly (number | null)[];
+        readonly sampleCount: readonly number[];
+      }
+    >
+  >;
 };
 
 /**
@@ -50,12 +130,28 @@ export function renderTrainingDistributionsHtml({
 }: {
   readonly payload: TrainingDistributionsPayload;
 }): string {
-  const slices = payload.assets.map(toDashboardSlice);
+  const survivalByAsset = new Map<string, AssetSurvivalDistribution>();
+  for (const survival of payload.survival) {
+    survivalByAsset.set(survival.asset, survival);
+  }
+  const slices = payload.assets.map((asset) =>
+    toDashboardSlice({
+      asset,
+      survival: survivalByAsset.get(asset.asset) ?? null,
+    }),
+  );
   const seriesLabel = `${payload.series.source}-${payload.series.product} ${payload.series.timeframe}`;
   const generatedAt = formatGeneratedAt(payload.generatedAtMs);
   const tableHeaderCells = tableTailPercentiles
     .map((p) => `<th scope="col">p${p}</th>`)
     .join("");
+  const survivalTableHeaderCells = SURVIVAL_TARGET_WIN_RATES.map(
+    (rate) => `<th scope="col">${rate}%</th>`,
+  ).join("");
+  const survivalLegendItems = SURVIVAL_REMAINING_ORDER.map(
+    (rem) =>
+      `<span class="alea-legend-item"><span class="alea-legend-swatch" style="background:${SURVIVAL_REMAINING_COLORS[rem]}"></span>${rem}m left</span>`,
+  ).join("");
 
   return `<!doctype html>
 <html lang="en" data-theme="dark">
@@ -134,6 +230,50 @@ export function renderTrainingDistributionsHtml({
       letter-spacing: 0.01em;
       color: var(--alea-text);
     }
+
+    /* Survival section: a second chart + table inside the same asset
+       panel. Spacing matches the body/wick block above so the two read as
+       siblings rather than a new card. */
+    .survival-section { display: flex; flex-direction: column; gap: 14px; }
+
+    .survival-helper {
+      margin: 0;
+      color: var(--alea-text-muted);
+      font-size: 12.5px;
+      line-height: 1.5;
+      max-width: 760px;
+    }
+
+    .survival-empty {
+      margin: 0;
+      padding: 24px;
+      color: var(--alea-text-subtle);
+      font-size: 13px;
+      text-align: center;
+      border: 1px dashed var(--alea-border-muted);
+      border-radius: 10px;
+      background: rgba(15, 22, 16, 0.4);
+    }
+
+    /* Threshold table styling — matches the percentile table conventions
+       but its own min-width since the column count is different. */
+    table.survival-thresholds { min-width: 760px; table-layout: fixed; }
+    table.survival-thresholds th:first-child,
+    table.survival-thresholds td:first-child { width: 110px; }
+    table.survival-thresholds th, table.survival-thresholds td { white-space: nowrap; }
+    table.survival-thresholds tbody td {
+      font-family: var(--alea-font-display);
+      font-weight: 500;
+      font-size: 16px;
+      letter-spacing: 0.01em;
+      color: var(--alea-text);
+    }
+    table.survival-thresholds tbody td.empty {
+      color: var(--alea-text-subtle);
+      font-family: var(--alea-font-sans);
+      font-weight: 400;
+      font-size: 14px;
+    }
   </style>
 </head>
 <body>
@@ -179,6 +319,33 @@ export function renderTrainingDistributionsHtml({
             <tbody></tbody>
           </table>
         </div>
+
+        <div class="alea-section-rule">
+          <h2>Point-of-No-Return Levels</h2>
+        </div>
+        <p class="survival-helper">Minimum distance from the 5m start line needed for the current side to historically survive. Each line shows the empirical win rate at every distance bucket given the time remaining in the window. Baseline only — no volatility, wick/body, or regime filters are included. Buckets with fewer than ${SURVIVAL_MIN_SAMPLES.toLocaleString()} snapshots are hidden.</p>
+
+        <div class="survival-section" id="survival-section">
+          <p class="alea-card-meta" id="survival-meta"></p>
+          <div class="alea-legend">
+            ${survivalLegendItems}
+          </div>
+          <div class="chart-frame">
+            <div id="survival-chart" class="chart-host"><div class="chart-loading">Loading chart…</div></div>
+            <div id="survival-tooltip" class="alea-tooltip"></div>
+          </div>
+          <div class="alea-table-wrap">
+            <table class="alea-table survival-thresholds">
+              <thead>
+                <tr>
+                  <th scope="col"></th>
+                  ${survivalTableHeaderCells}
+                </tr>
+              </thead>
+              <tbody id="survival-tbody"></tbody>
+            </table>
+          </div>
+        </div>
       </section>
     </main>
   </div>
@@ -193,6 +360,10 @@ export function renderTrainingDistributionsHtml({
     const bodyColor = ${JSON.stringify(bodyColor)};
     const wickColor = ${JSON.stringify(wickColor)};
     const chartTokens = ${JSON.stringify(aleaChartTokens)};
+    const survivalRemainingOrder = ${JSON.stringify(SURVIVAL_REMAINING_ORDER)};
+    const survivalRemainingColors = ${JSON.stringify(SURVIVAL_REMAINING_COLORS)};
+    const survivalTargetWinRates = ${JSON.stringify(SURVIVAL_TARGET_WIN_RATES)};
+    const survivalMinSamples = ${SURVIVAL_MIN_SAMPLES};
 
     // Source values are in percent (e.g. 0.05 = 0.05%). Display in basis
     // points: 1% = 100 bp, rounded to the nearest integer. Same numbers,
@@ -216,6 +387,14 @@ export function renderTrainingDistributionsHtml({
     const tooltipEl = document.getElementById("chart-tooltip");
     const chartFrame = chartHost.parentElement;
     let chart = null;
+
+    const survivalSectionEl = document.getElementById("survival-section");
+    const survivalMetaEl = document.getElementById("survival-meta");
+    const survivalChartHost = document.getElementById("survival-chart");
+    const survivalTooltipEl = document.getElementById("survival-tooltip");
+    const survivalChartFrame = survivalChartHost.parentElement;
+    const survivalTbodyEl = document.getElementById("survival-tbody");
+    let survivalChart = null;
 
     // Rewrite the whole tbody on every call. We can't keep stable element
     // references inside the rows (innerHTML replacement on a <tr> would
@@ -372,6 +551,192 @@ export function renderTrainingDistributionsHtml({
       }
     }
 
+    // ----------------------------------------------------------------
+    // Survival section: a second chart + table inside the same panel.
+    // The chart shows current-side win rate as a function of distance
+    // from the 5m line, one series per remaining-minutes bucket. The
+    // table inverts the question: how much distance does each remaining
+    // bucket need to historically reach a given win-rate target?
+    // ----------------------------------------------------------------
+
+    const formatBp = (v) => {
+      if (v == null || !Number.isFinite(v)) return "—";
+      return Math.round(v).toLocaleString() + " bp";
+    };
+
+    function survivalChartHostError(msg) {
+      survivalChartHost.innerHTML = '<pre class="chart-error">' + msg + '</pre>';
+    }
+
+    function renderSurvivalEmpty(message) {
+      if (survivalChart) { survivalChart.destroy(); survivalChart = null; }
+      survivalChartHost.innerHTML = '<div class="chart-loading">' + message + '</div>';
+      if (survivalTbodyEl) survivalTbodyEl.innerHTML = "";
+      if (survivalMetaEl) survivalMetaEl.textContent = "";
+    }
+
+    function renderSurvivalChart(survival) {
+      if (survivalChart) { survivalChart.destroy(); survivalChart = null; }
+      survivalChartHost.innerHTML = "";
+      if (typeof uPlot === "undefined") {
+        survivalChartHostError("uPlot global is undefined — CDN failed to load?");
+        return;
+      }
+      const w = survivalChartHost.clientWidth || survivalChartHost.getBoundingClientRect().width || 800;
+      const h = survivalChartHost.clientHeight || 380;
+      if (w === 0 || h === 0) {
+        survivalChartHostError("chart host has zero size: " + w + "x" + h);
+        return;
+      }
+      // Shared x-axis is every integer bp across the display range; each
+      // remaining-minutes series is a parallel y array (null for sparse
+      // buckets, which uPlot draws as gaps).
+      const xs = survival.distancesBp.slice();
+      const yArrays = survivalRemainingOrder.map(
+        (rem) => survival.byRemaining[rem].winRate.slice(),
+      );
+      const sampleArrays = survivalRemainingOrder.map(
+        (rem) => survival.byRemaining[rem].sampleCount.slice(),
+      );
+      const data = [xs].concat(yArrays);
+      const series = [{}].concat(
+        survivalRemainingOrder.map((rem) => ({
+          label: rem + "m left",
+          stroke: survivalRemainingColors[rem],
+          width: 2,
+          spanGaps: false,
+          points: { show: false },
+        })),
+      );
+      const updateTooltip = (u) => {
+        const idx = u.cursor.idx;
+        if (idx == null || idx < 0 || idx >= xs.length) {
+          survivalTooltipEl.classList.remove("visible");
+          return;
+        }
+        const x = xs[idx];
+        let rows = '';
+        for (let i = 0; i < survivalRemainingOrder.length; i++) {
+          const rem = survivalRemainingOrder[i];
+          const wr = yArrays[i][idx];
+          const n = sampleArrays[i][idx];
+          const value = wr == null
+            ? '<span class="value" style="color: var(--alea-text-subtle)">n=' + n.toLocaleString() + '</span>'
+            : '<span class="value">' + wr.toFixed(1) + '% <span style="color: var(--alea-text-subtle); font-weight: 400; margin-left: 6px">n=' + n.toLocaleString() + '</span></span>';
+          rows +=
+            '<div class="alea-tooltip-row"><span class="alea-legend-swatch" style="background:' + survivalRemainingColors[rem] + '"></span><span class="name">' + rem + 'm left</span>' + value + '</div>';
+        }
+        survivalTooltipEl.innerHTML =
+          '<div class="alea-tooltip-head">' + formatBp(x) + ' from line</div>' + rows;
+        const cursorLeft = u.cursor.left;
+        const frameW = survivalChartFrame.getBoundingClientRect().width;
+        const tooltipW = survivalTooltipEl.offsetWidth || 240;
+        const margin = 14;
+        const placeRight = cursorLeft + margin + tooltipW <= frameW;
+        const left = placeRight ? cursorLeft + margin : cursorLeft - margin - tooltipW;
+        survivalTooltipEl.style.left = Math.max(margin, Math.min(left, frameW - tooltipW - margin)) + "px";
+        survivalTooltipEl.style.top = "14px";
+        survivalTooltipEl.classList.add("visible");
+      };
+      const opts = {
+        width: w,
+        height: h,
+        legend: { show: false },
+        padding: [16, 18, 8, 8],
+        scales: {
+          x: { time: false },
+          y: { range: [0, 100] },
+        },
+        cursor: {
+          points: { show: false },
+          drag: { setScale: false, x: false, y: false },
+        },
+        series: series,
+        axes: [
+          {
+            stroke: chartTokens.axisStroke,
+            font: chartTokens.axisFont,
+            grid: { stroke: chartTokens.gridStroke, width: 1 },
+            ticks: { stroke: chartTokens.axisTickStroke, width: 1, size: 5 },
+            values: (u, splits) => splits.map(formatBp),
+          },
+          {
+            stroke: chartTokens.axisStroke,
+            font: chartTokens.axisFont,
+            grid: { stroke: chartTokens.gridStroke, width: 1 },
+            ticks: { stroke: chartTokens.axisTickStroke, width: 1, size: 5 },
+            values: (u, splits) => splits.map((v) => Math.round(v) + "%"),
+            size: 60,
+          },
+        ],
+        hooks: {
+          setCursor: [updateTooltip],
+          // Faint horizontal reference at 50% (coin-flip baseline). Drawn
+          // behind the curves via drawAxes, same pattern as the body/wick
+          // chart's p50 line.
+          drawAxes: [
+            (u) => {
+              const yPos = u.valToPos(50, "y", true);
+              const ctx = u.ctx;
+              ctx.save();
+              ctx.strokeStyle = chartTokens.referenceLine;
+              ctx.lineWidth = 1;
+              ctx.setLineDash([4, 4]);
+              ctx.beginPath();
+              ctx.moveTo(u.bbox.left, yPos);
+              ctx.lineTo(u.bbox.left + u.bbox.width, yPos);
+              ctx.stroke();
+              ctx.restore();
+            },
+          ],
+        },
+      };
+      try {
+        survivalChart = new uPlot(opts, data, survivalChartHost);
+        survivalChartHost.addEventListener("mouseleave", () => survivalTooltipEl.classList.remove("visible"));
+      } catch (err) {
+        survivalChartHostError("uPlot threw: " + (err && err.message ? err.message : String(err)));
+      }
+    }
+
+    function renderSurvivalTable(survival) {
+      if (!survivalTbodyEl) return;
+      let html = "";
+      for (const rem of survivalRemainingOrder) {
+        const winRate = survival.byRemaining[rem].winRate;
+        const sampleCount = survival.byRemaining[rem].sampleCount;
+        let row = '<tr><th scope="row">' + rem + 'm left</th>';
+        for (const target of survivalTargetWinRates) {
+          let cellBp = null;
+          for (let i = 0; i < winRate.length; i++) {
+            const wr = winRate[i];
+            if (wr == null) continue;
+            if (sampleCount[i] < survivalMinSamples) continue;
+            if (wr >= target) { cellBp = survival.distancesBp[i]; break; }
+          }
+          row += cellBp == null
+            ? '<td class="empty">—</td>'
+            : '<td>' + formatBp(cellBp) + '</td>';
+        }
+        row += '</tr>';
+        html += row;
+      }
+      survivalTbodyEl.innerHTML = html;
+    }
+
+    function renderSurvival(slice) {
+      const survival = slice.survival;
+      if (!survival) {
+        renderSurvivalEmpty("No 1m candle data yet for " + slice.assetUpper + ".");
+        return;
+      }
+      if (survivalMetaEl) {
+        survivalMetaEl.textContent = survival.windowCount.toLocaleString() + " 5m windows";
+      }
+      renderSurvivalChart(survival);
+      renderSurvivalTable(survival);
+    }
+
     function activate(asset) {
       const slice = slices.find((s) => s.asset === asset);
       if (!slice) return;
@@ -383,6 +748,7 @@ export function renderTrainingDistributionsHtml({
       countEl.textContent = slice.candleCount.toLocaleString() + " candles";
       renderTable(slice);
       renderChart(slice);
+      renderSurvival(slice);
     }
 
     tabsEl.addEventListener("click", (e) => {
@@ -406,9 +772,17 @@ export function renderTrainingDistributionsHtml({
         if (w > 0 && h > 0) chart.setSize({ width: w, height: h });
       });
       ro.observe(chartHost);
+      const survivalRo = new ResizeObserver(() => {
+        if (!survivalChart) return;
+        const w = survivalChartHost.clientWidth;
+        const h = survivalChartHost.clientHeight;
+        if (w > 0 && h > 0) survivalChart.setSize({ width: w, height: h });
+      });
+      survivalRo.observe(survivalChartHost);
     }
     window.addEventListener("resize", () => {
       if (chart) chart.setSize({ width: chartHost.clientWidth, height: chartHost.clientHeight });
+      if (survivalChart) survivalChart.setSize({ width: survivalChartHost.clientWidth, height: survivalChartHost.clientHeight });
     });
 
     if (slices.length > 0) activate(slices[0].asset);
@@ -418,7 +792,13 @@ export function renderTrainingDistributionsHtml({
 `;
 }
 
-function toDashboardSlice(asset: AssetSizeDistribution): DashboardAssetSlice {
+function toDashboardSlice({
+  asset,
+  survival,
+}: {
+  readonly asset: AssetSizeDistribution;
+  readonly survival: AssetSurvivalDistribution | null;
+}): DashboardAssetSlice {
   const years = Object.keys(asset.byYear).sort();
   const first = years[0];
   const last = years[years.length - 1];
@@ -435,6 +815,62 @@ function toDashboardSlice(asset: AssetSizeDistribution): DashboardAssetSlice {
     yearRange,
     body: asset.all.body,
     wick: asset.all.wick,
+    survival: survival === null ? null : toSurvivalSlice({ survival }),
+  };
+}
+
+/**
+ * Pivots the per-asset survival distribution into chart-ready arrays
+ * indexed by `distancesBp` (0..MAX-1, every integer bp). The compute step
+ * stores buckets as a sparse list keyed by distance; here we densify so
+ * the chart can iterate a fixed x-axis. Buckets below the sample-count
+ * floor are kept as `null` win-rate values (rendered as gaps) but their
+ * raw `sampleCount` is preserved for tooltips.
+ */
+function toSurvivalSlice({
+  survival,
+}: {
+  readonly survival: AssetSurvivalDistribution;
+}): SurvivalSlice {
+  const distancesBp: number[] = [];
+  for (let bp = 0; bp < SURVIVAL_MAX_DISTANCE_BP; bp += 1) {
+    distancesBp.push(bp);
+  }
+  const byRemaining = {} as Record<
+    SurvivalRemainingMinutes,
+    { winRate: (number | null)[]; sampleCount: number[] }
+  >;
+  for (const remaining of SURVIVAL_REMAINING_ORDER) {
+    const buckets = survival.all.byRemaining[remaining];
+    const byDistance = new Map<number, { total: number; survived: number }>();
+    for (const bucket of buckets) {
+      byDistance.set(bucket.distanceBp, {
+        total: bucket.total,
+        survived: bucket.survived,
+      });
+    }
+    const winRate: (number | null)[] = [];
+    const sampleCount: number[] = [];
+    for (const bp of distancesBp) {
+      const bucket = byDistance.get(bp);
+      if (bucket === undefined || bucket.total === 0) {
+        winRate.push(null);
+        sampleCount.push(0);
+        continue;
+      }
+      sampleCount.push(bucket.total);
+      if (bucket.total < SURVIVAL_MIN_SAMPLES) {
+        winRate.push(null);
+        continue;
+      }
+      winRate.push((bucket.survived / bucket.total) * 100);
+    }
+    byRemaining[remaining] = { winRate, sampleCount };
+  }
+  return {
+    windowCount: survival.windowCount,
+    distancesBp,
+    byRemaining,
   };
 }
 

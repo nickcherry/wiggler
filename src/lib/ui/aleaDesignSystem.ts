@@ -32,7 +32,7 @@ export const aleaDiceMarkSvg = `
 export const aleaChartTokens = {
   axisStroke: "#b8aa8a",
   axisTickStroke: "#6f5320",
-  axisFont: '12px Inter, ui-sans-serif, system-ui, sans-serif',
+  axisFont: "12px Inter, ui-sans-serif, system-ui, sans-serif",
   gridStroke: "rgba(215, 170, 69, 0.12)",
   referenceLine: "rgba(215, 170, 69, 0.45)",
   bodyColor: "#5b95ff",
