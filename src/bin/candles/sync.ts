@@ -29,11 +29,11 @@ const millisecondsPerDay = 86_400_000;
 
 /**
  * Concurrent series in flight. Sized so each provider sees at most half the
- * load when the iteration order alternates Coinbase / Binance evenly — eight
- * workers across two providers means roughly four concurrent requests per
+ * load when the iteration order alternates Coinbase / Binance evenly — four
+ * workers across two providers means roughly two concurrent requests per
  * provider, which stays comfortably below either's public rate limits.
  */
-const syncConcurrency = 8;
+const syncConcurrency = 4;
 
 /**
  * Backfills 5-minute (or 1-minute) candles into Postgres for a configurable
