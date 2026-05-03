@@ -1,6 +1,11 @@
 import { exchangePerpVolumeWeights } from "@alea/lib/exchangePrices/exchangePerpVolumeWeights";
 import { exchangeSpotVolumeWeights } from "@alea/lib/exchangePrices/exchangeSpotVolumeWeights";
 import { interpolateMidsAtTimestamps } from "@alea/lib/exchangePrices/interpolateMidsAtTimestamps";
+import {
+  aleaBrandMark,
+  aleaChartTokens,
+  aleaDesignSystemHead,
+} from "@alea/lib/ui/aleaDesignSystem";
 import type { ExchangeId, QuoteTick } from "@alea/types/exchanges";
 
 type RenderPriceChartHtmlParams = {
@@ -12,12 +17,12 @@ type RenderPriceChartHtmlParams = {
 };
 
 /**
- * Renders a self-contained light-themed HTML chart of mid-price BBO ticks
+ * Renders a self-contained dark-themed HTML chart of mid-price BBO ticks
  * per exchange using uPlot. Two synced panels stacked vertically:
  *
- *   - Top panel: spot venues + spot VWAP + polymarket-chainlink (which is
- *     a Chainlink-derived spot oracle).
- *   - Bottom panel: perp/swap venues + perp VWAP.
+ *   - Top panel: spot venues + (in exhaustive mode) spot VWAP +
+ *     polymarket-chainlink (a Chainlink-derived spot oracle).
+ *   - Bottom panel: perp/swap venues + (in exhaustive mode) perp VWAP.
  *
  * Each panel's y-axis auto-fits its own data, so there is no wasted space
  * between the two clusters (they typically sit ~$30 apart due to funding-
@@ -40,102 +45,184 @@ export function renderPriceChartHtml({
   const panels = buildPanelData({ ticksByExchange, grid, exhaustive });
   const tickCountsByExchange = countTicksByExchange({ ticksByExchange });
   const tickCountBars = buildTickCountBars({ tickCountsByExchange });
+  const totalTicks = Object.values(tickCountsByExchange).reduce(
+    (acc, n) => acc + n,
+    0,
+  );
 
   const title = "Exchange Price Latency";
+  const subtitle = formatSubtitle({
+    startedAtMs,
+    endedAtMs,
+    exhaustive,
+    totalTicks,
+  });
 
   return `<!doctype html>
-<html lang="en" data-theme="light">
+<html lang="en" data-theme="dark">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>${escapeHtml(title)}</title>
-  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@picocss/pico@2/css/pico.classless.min.css" />
+  <title>Alea · ${escapeHtml(title)}</title>
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/uplot@1.6.30/dist/uPlot.min.css" />
   <script src="https://cdn.jsdelivr.net/npm/uplot@1.6.30/dist/uPlot.iife.min.js" charset="utf-8"></script>
+  ${aleaDesignSystemHead()}
   <style>
-    /* Pico provides typography + color tokens; this block only overrides
-       where the temp-dashboard needs a full-viewport flex layout instead
-       of Pico's default centered-document layout, plus chart-specific
-       custom widgets (panels, legend, tooltip, bar chart). */
-    :root { color-scheme: light; --pico-font-size: 87.5%; }
-    * { box-sizing: border-box; }
-    body { margin: 0; min-height: 100vh; display: flex; flex-direction: column; padding: 0; }
-    body > header { padding: 18px 28px 14px; max-width: none; border-bottom: 1px solid var(--pico-muted-border-color); flex: 0 0 auto; }
-    body > header > h1 { font-size: 18px; margin: 0; --pico-typography-spacing-vertical: 0; }
-    body > header .range { margin: 6px 0 0; color: var(--pico-muted-color); font-variant-numeric: tabular-nums; }
-    body > main { flex: 1 1 auto; max-width: none; padding: 14px 20px 32px; display: flex; flex-direction: column; gap: 14px; }
-    section.primary { display: flex; flex-direction: column; gap: 12px; min-height: 86vh; }
-    section.secondary { padding-top: 32px; border-top: 1px solid var(--pico-muted-border-color); display: flex; flex-direction: column; gap: 14px; }
-    section > h2 { font-size: 14px; margin: 0; --pico-typography-spacing-vertical: 0; }
-    .legend { display: flex; flex-wrap: wrap; gap: 10px 22px; font-size: 13px; color: #334155; user-select: none; }
-    .legend-item { display: inline-flex; align-items: center; gap: 8px; cursor: pointer; line-height: 1.4; }
-    .legend-item.muted { opacity: 0.4; }
-    .legend-swatch { width: 22px; height: 2px; border-radius: 1px; flex: 0 0 auto; }
-    .legend-swatch.dashed { background: repeating-linear-gradient(90deg, currentColor 0 5px, transparent 5px 9px) !important; height: 2px; }
-    .panels { position: relative; flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; gap: 4px; }
-    .panel { flex: 1 1 0; min-height: 0; position: relative; }
+    /* Page-specific layout: stacked twin chart panels (spot + perp) that
+       share an x-cursor, then the per-source tick-count bar chart. The
+       design system handles tokens/typography/cards/tooltip chrome. */
+
+    .latency-shell { min-height: 100vh; }
+
+    /* The primary chart card needs to fill the viewport so the twin
+       panels feel like a proper trading chart, not a small widget. */
+    .chart-card {
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+      padding: 22px 22px 18px;
+      min-height: 78vh;
+    }
+
+    .chart-card-head {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      flex-wrap: wrap;
+    }
+
+    .chart-card-head .alea-card-title { font-size: 16px; }
+
+    .panels {
+      position: relative;
+      flex: 1 1 auto;
+      min-height: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+
+    .panel {
+      flex: 1 1 0;
+      min-height: 0;
+      position: relative;
+      border: 1px solid var(--alea-border-muted);
+      border-radius: 8px;
+      background:
+        radial-gradient(circle at 92% 8%, rgba(215, 170, 69, 0.05), transparent 36%),
+        linear-gradient(180deg, rgba(15, 27, 18, 0.55), rgba(7, 9, 10, 0.4));
+      overflow: hidden;
+    }
+
     .panel.spot { flex-grow: 1.1; }
     .panel.perp { flex-grow: 0.9; }
-    .panel > .uplot-host { position: absolute; inset: 0; }
-    /* Tick-count bar chart, second section. */
-    .bars { display: flex; flex-direction: column; gap: 6px; max-width: 760px; }
-    .bar-row { display: grid; grid-template-columns: 150px 1fr 80px; gap: 14px; align-items: center; }
-    .bar-label { text-align: right; font-size: 13px; color: #334155; }
-    .bar-track { background: #f1f5f9; height: 16px; border-radius: 3px; overflow: hidden; }
-    .bar-fill { height: 100%; border-radius: 3px; }
-    .bar-value { text-align: right; font-size: 13px; color: #0f172a; font-variant-numeric: tabular-nums; font-weight: 600; }
-    /* Custom floating tooltip — one shared element across both panels. */
-    .tooltip {
+
+    .panel-tag {
       position: absolute;
+      top: 10px;
+      right: 16px;
+      z-index: 2;
+      font-family: var(--alea-font-display);
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 0.26em;
+      text-transform: uppercase;
+      color: var(--alea-gold-soft);
       pointer-events: none;
-      background: #ffffff;
-      border: 1px solid #e2e8f0;
-      border-radius: 8px;
-      padding: 12px 14px;
-      box-shadow: 0 8px 24px rgba(15, 23, 42, 0.12);
-      font: 13px/1.45 inherit;
-      font-variant-numeric: tabular-nums;
-      color: #0f172a;
-      transition: opacity 0.06s ease;
-      opacity: 0;
-      z-index: 10;
-      min-width: 250px;
     }
-    .tooltip.visible { opacity: 1; }
-    .tooltip .time { font-weight: 600; color: #0f172a; margin-bottom: 8px; padding-bottom: 6px; border-bottom: 1px solid #e2e8f0; }
-    .tooltip .row { display: grid; grid-template-columns: 12px 1fr auto; gap: 10px; align-items: center; padding: 3px 0; }
-    .tooltip .swatch { width: 10px; height: 10px; border-radius: 2px; }
-    .tooltip .swatch.dashed { background: repeating-linear-gradient(90deg, currentColor 0 3px, transparent 3px 5px) !important; height: 2px; align-self: center; }
-    .tooltip .name { color: #334155; font-weight: 500; }
-    .tooltip .price { color: #0f172a; font-weight: 600; }
-    .uplot, .u-wrap { background: transparent; }
-    .u-legend { display: none !important; }
+
+    .panel > .uplot-host { position: absolute; inset: 0; }
+
+    /* Tick-count bar chart, second card. */
+    .bars-card { padding: 22px 26px; }
+    .bars-card .alea-section-rule { margin-bottom: 18px; }
+
+    .bars {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      max-width: 820px;
+    }
+
+    .bar-row {
+      display: grid;
+      grid-template-columns: 160px 1fr 96px;
+      gap: 16px;
+      align-items: center;
+    }
+
+    .bar-label {
+      text-align: right;
+      font-size: 12.5px;
+      letter-spacing: 0.04em;
+      color: var(--alea-text-muted);
+      font-variant-numeric: tabular-nums;
+    }
+
+    .bar-track {
+      background:
+        linear-gradient(180deg, rgba(255, 255, 255, 0.02), rgba(0, 0, 0, 0.2)),
+        rgba(215, 170, 69, 0.05);
+      height: 14px;
+      border-radius: 4px;
+      overflow: hidden;
+      border: 1px solid var(--alea-border-faint);
+    }
+
+    .bar-fill {
+      height: 100%;
+      border-radius: 3px;
+      box-shadow: 0 0 12px rgba(215, 170, 69, 0.05);
+    }
+
+    .bar-value {
+      text-align: right;
+      font-family: var(--alea-font-display);
+      font-size: 16px;
+      font-weight: 600;
+      color: var(--alea-text);
+      font-variant-numeric: tabular-nums;
+    }
   </style>
 </head>
 <body>
-  <header>
-    <h1>${escapeHtml(title)}</h1>
-  </header>
-  <main>
-    <section class="primary">
-      <div id="legend" class="legend"></div>
-      <div class="panels">
-        <div class="panel spot"><div id="chart-spot" class="uplot-host"></div></div>
-        <div class="panel perp"><div id="chart-perp" class="uplot-host"></div></div>
-        <div id="tooltip" class="tooltip"></div>
-      </div>
-    </section>
-    <section class="secondary">
-      <h2>Ticks captured per source</h2>
-      <div id="bars" class="bars"></div>
-    </section>
-  </main>
+  <div class="alea-shell latency-shell">
+    <header class="alea-header">
+      <div class="alea-brand-row">${aleaBrandMark()}</div>
+      <h1 class="alea-title">${escapeHtml(title)}</h1>
+      <p class="alea-subtitle">${subtitle}</p>
+    </header>
+    <main class="alea-main">
+      <section class="alea-card with-corners chart-card">
+        <header class="chart-card-head">
+          <div id="legend" class="alea-legend"></div>
+        </header>
+        <div class="panels">
+          <div class="panel spot">
+            <span class="panel-tag">Spot</span>
+            <div id="chart-spot" class="uplot-host"></div>
+          </div>
+          <div class="panel perp">
+            <span class="panel-tag">Perp</span>
+            <div id="chart-perp" class="uplot-host"></div>
+          </div>
+          <div id="tooltip" class="alea-tooltip"></div>
+        </div>
+      </section>
+      <section class="alea-card bars-card">
+        <div class="alea-section-rule"><h2>Ticks captured per source</h2></div>
+        <div id="bars" class="bars"></div>
+      </section>
+    </main>
+  </div>
   <script>
     const spotPanel = ${JSON.stringify(panels.spot)};
     const perpPanel = ${JSON.stringify(panels.perp)};
     const xs = ${JSON.stringify(panels.xs)};
     const tickCountsByLabel = ${JSON.stringify(tickCountsByExchange)};
     const tickCountBars = ${JSON.stringify(tickCountBars)};
+    const chartTokens = ${JSON.stringify(aleaChartTokens)};
+
     const priceFormatter = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", minimumFractionDigits: 2, maximumFractionDigits: 2 });
     const priceFormatterCompact = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", minimumFractionDigits: 0, maximumFractionDigits: 0 });
     const tooltipTimeFormatter = new Intl.DateTimeFormat("en-US", {
@@ -188,10 +275,10 @@ export function renderPriceChartHtml({
     function makeAxes(showXLabels) {
       return [
         {
-          stroke: "#64748b",
-          font: "13px -apple-system, BlinkMacSystemFont, system-ui, sans-serif",
-          grid: { show: false },
-          ticks: { stroke: "#cbd5e1", width: 1, size: 6 },
+          stroke: chartTokens.axisStroke,
+          font: chartTokens.axisFont,
+          grid: { stroke: chartTokens.gridStroke, width: 1 },
+          ticks: { stroke: chartTokens.axisTickStroke, width: 1, size: 5 },
           show: showXLabels,
           // Minimum pixel gap between x-axis ticks. uPlot picks a tick
           // density that keeps adjacent labels at least this far apart, so
@@ -212,10 +299,10 @@ export function renderPriceChartHtml({
           },
         },
         {
-          stroke: "#64748b",
-          font: "13px -apple-system, BlinkMacSystemFont, system-ui, sans-serif",
-          grid: { show: false },
-          ticks: { show: false },
+          stroke: chartTokens.axisStroke,
+          font: chartTokens.axisFont,
+          grid: { stroke: chartTokens.gridStroke, width: 1 },
+          ticks: { stroke: chartTokens.axisTickStroke, width: 1, size: 5 },
           values: (u, splits) => splits.map((v) => priceFormatterCompact.format(v)),
           size: 92,
         },
@@ -229,7 +316,7 @@ export function renderPriceChartHtml({
     const spotOpts = {
       width: spotHost.clientWidth,
       height: spotHost.clientHeight,
-      padding: [12, 24, 6, 8],
+      padding: [22, 26, 6, 12],
       cursor: {
         points: { show: false },
         drag: { setScale: false, x: false, y: false },
@@ -244,7 +331,7 @@ export function renderPriceChartHtml({
     const perpOpts = {
       width: perpHost.clientWidth,
       height: perpHost.clientHeight,
-      padding: [6, 24, 8, 8],
+      padding: [12, 26, 8, 12],
       cursor: {
         points: { show: false },
         drag: { setScale: false, x: false, y: false },
@@ -278,20 +365,20 @@ export function renderPriceChartHtml({
           if (muted.has(m.label)) continue;
           const y = allSeriesData[i][idx];
           if (y == null) continue;
-          const swatchClass = m.dash ? "swatch dashed" : "swatch";
+          const swatchClass = m.dash ? "alea-legend-swatch dashed" : "alea-legend-swatch";
           const swatchStyle = m.dash ? "color:" + m.stroke : "background:" + m.stroke;
           rows.push({
             priority: m.priority,
             price: y,
-            html: '<div class="row">'
+            html: '<div class="alea-tooltip-row">'
               + '<span class="' + swatchClass + '" style="' + swatchStyle + '"></span>'
               + '<span class="name">' + m.label + '</span>'
-              + '<span class="price">' + priceFormatter.format(y) + '</span>'
+              + '<span class="value">' + priceFormatter.format(y) + '</span>'
               + '</div>',
           });
         }
         rows.sort((a, b) => (b.priority - a.priority) || (b.price - a.price));
-        tooltipEl.innerHTML = '<div class="time">' + formatTime(xVal) + '</div>' + rows.map((r) => r.html).join("");
+        tooltipEl.innerHTML = '<div class="alea-tooltip-head">' + formatTime(xVal) + '</div>' + rows.map((r) => r.html).join("");
 
         // Pin the tooltip to whichever side is opposite the cursor so it
         // never overlaps the data region the user is examining. Vertical
@@ -302,7 +389,7 @@ export function renderPriceChartHtml({
         const cursorXInWrap = (hostRect.left - wrapRect.left) + u.cursor.left;
         const halfwayX = wrapRect.width / 2;
         const ttW = tooltipEl.offsetWidth;
-        const margin = 12;
+        const margin = 14;
         const left = cursorXInWrap < halfwayX
           ? wrapRect.width - ttW - margin
           : margin;
@@ -325,9 +412,9 @@ export function renderPriceChartHtml({
     function renderLegend() {
       legendEl.innerHTML = orderedMeta.map((m) => {
         const muteClass = muted.has(m.label) ? " muted" : "";
-        const swatchClass = m.dash ? "legend-swatch dashed" : "legend-swatch";
+        const swatchClass = m.dash ? "alea-legend-swatch dashed" : "alea-legend-swatch";
         const swatchStyle = m.dash ? "color:" + m.stroke : "background:" + m.stroke;
-        return '<span class="legend-item' + muteClass + '" data-label="' + m.label + '">'
+        return '<span class="alea-legend-item' + muteClass + '" data-label="' + m.label + '">'
           + '<span class="' + swatchClass + '" style="' + swatchStyle + '"></span>'
           + m.label
           + '</span>';
@@ -343,14 +430,14 @@ export function renderPriceChartHtml({
         const widthPct = (b.count / max) * 100;
         return '<div class="bar-row">'
           + '<span class="bar-label">' + b.label + '</span>'
-          + '<div class="bar-track"><div class="bar-fill" style="width:' + widthPct.toFixed(2) + '%;background:' + b.stroke + '"></div></div>'
+          + '<div class="bar-track"><div class="bar-fill" style="width:' + widthPct.toFixed(2) + '%;background:linear-gradient(90deg,' + b.stroke + 'cc,' + b.stroke + ')"></div></div>'
           + '<span class="bar-value">' + b.count.toLocaleString() + '</span>'
           + '</div>';
       }).join("");
     }
     renderBars();
     legendEl.addEventListener("click", (e) => {
-      const target = e.target.closest(".legend-item");
+      const target = e.target.closest(".alea-legend-item");
       if (!target) return;
       const label = target.getAttribute("data-label");
       const findIdx = (meta) => meta.findIndex((m) => m.label === label) + 1;
@@ -382,25 +469,37 @@ export function renderPriceChartHtml({
 
 const gridBinMs = 100;
 const polymarketLineWidth = 3.25;
-const defaultLineWidth = 1.25;
-const uniformLineWidth = 1.5;
-const exchangeLineOpacity = 0.4;
+const defaultLineWidth = 1.4;
+const uniformLineWidth = 1.6;
+const exchangeLineOpacity = 0.45;
 const consensusLineWidth = 2;
-const spotConsensusColor = "#0f172a";
-const perpConsensusColor = "#3730a3";
 
+/**
+ * Aggregate-line colors. On the dark theme, a marble/ivory spot VWAP and
+ * an antique-gold perp VWAP read as ceremonial overlays — visually
+ * distinct from any single venue color.
+ */
+const spotConsensusColor = "#e8dec4";
+const perpConsensusColor = "#d7aa45";
+
+/**
+ * Per-venue stroke colors. Tuned for the dark Alea palette: each color
+ * keeps its brand identity (Coinbase blue, Binance amber, etc.) but is
+ * brightened where necessary so it stays readable on a deep felt-green
+ * panel.
+ */
 const colorByExchange: Record<ExchangeId, string> = {
-  "coinbase-spot": "#0052ff",
-  "coinbase-perp": "#003ec1",
+  "coinbase-spot": "#2a8bff",
+  "coinbase-perp": "#5fa8ff",
   "binance-spot": "#f0b90b",
-  "binance-perp": "#a37c08",
+  "binance-perp": "#d99d2c",
   "bybit-spot": "#ff8533",
-  "bybit-perp": "#c25d1a",
-  "okx-spot": "#475569",
-  "okx-swap": "#1f2937",
-  "bitstamp-spot": "#00b873",
-  "gemini-spot": "#0aa6a8",
-  "polymarket-chainlink": "#ff1744",
+  "bybit-perp": "#ffa75e",
+  "okx-spot": "#cbd5e1",
+  "okx-swap": "#94a3b8",
+  "bitstamp-spot": "#27d18e",
+  "gemini-spot": "#34d2d4",
+  "polymarket-chainlink": "#ff5470",
 };
 
 const shortLabelByExchange: Record<ExchangeId, string> = {
@@ -647,6 +746,40 @@ function escapeHtml(value: string): string {
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;");
+}
+
+function formatSubtitle({
+  startedAtMs,
+  endedAtMs,
+  exhaustive,
+  totalTicks,
+}: {
+  readonly startedAtMs: number;
+  readonly endedAtMs: number;
+  readonly exhaustive: boolean;
+  readonly totalTicks: number;
+}): string {
+  const started = formatTimestamp(startedAtMs);
+  const durationS = Math.max(1, Math.round((endedAtMs - startedAtMs) / 1000));
+  const mode = exhaustive ? "exhaustive" : "default";
+  const ticks = totalTicks.toLocaleString();
+  return `captured ${escapeHtml(started)}<span class="sep">·</span>${durationS}s window<span class="sep">·</span>${ticks} ticks<span class="sep">·</span>${mode} mode`;
+}
+
+function formatTimestamp(ms: number): string {
+  const fmt = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/New_York",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  });
+  const parts = fmt.formatToParts(new Date(ms));
+  const get = (type: string): string =>
+    parts.find((p) => p.type === type)?.value ?? "";
+  return `${get("year")}-${get("month")}-${get("day")} @ ${get("hour")}:${get("minute")} ET`;
 }
 
 function countTicksByExchange({

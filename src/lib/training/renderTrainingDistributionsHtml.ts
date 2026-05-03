@@ -2,14 +2,19 @@ import type {
   AssetSizeDistribution,
   TrainingDistributionsPayload,
 } from "@alea/lib/training/types";
+import {
+  aleaBrandMark,
+  aleaChartTokens,
+  aleaDesignSystemHead,
+} from "@alea/lib/ui/aleaDesignSystem";
 
 /**
- * Brand colors reused from the latency dashboard's palette so the two
- * temp-dashboards feel like they belong to the same product. Body = "the
- * move" (close minus open); wick = "the envelope" (high minus low).
+ * Body = "the move" (close minus open); wick = "the envelope" (high minus
+ * low). Colors are pulled from the shared design tokens so they stay in
+ * lockstep with any tooltip/legend swatches the design system renders.
  */
-const bodyColor = "#0052ff";
-const wickColor = "#ff8533";
+const bodyColor = aleaChartTokens.bodyColor;
+const wickColor = aleaChartTokens.wickColor;
 
 /**
  * Percentiles to render in the upper-tail table. Chart shows all 101 points
@@ -30,10 +35,11 @@ type DashboardAssetSlice = {
 };
 
 /**
- * Renders a self-contained light-themed HTML dashboard for the
+ * Renders a self-contained dark-themed HTML dashboard for the
  * `training:distributions` analysis. One tab per asset; each tab has a
- * uPlot line chart of body/wick percentiles (x = 0..100, y = %) on top of
- * a focused table that lists `p100, p95, ..., p50` for both metrics.
+ * uPlot CDF chart of body/wick percentiles (x = move size in bp, y =
+ * P(move <= x), in %) above a focused table that lists `p95...p50` for
+ * both metrics.
  *
  * Per-year breakdowns are intentionally omitted from the HTML — they live
  * only in the JSON sidecar so the page stays scannable. The JSON is the
@@ -52,158 +58,130 @@ export function renderTrainingDistributionsHtml({
     .join("");
 
   return `<!doctype html>
-<html lang="en" data-theme="light">
+<html lang="en" data-theme="dark">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Training: Candle Size Distributions</title>
-  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@picocss/pico@2/css/pico.classless.min.css" />
+  <title>Alea · Training · Candle Size Distributions</title>
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/uplot@1.6.30/dist/uPlot.min.css" />
   <script src="https://cdn.jsdelivr.net/npm/uplot@1.6.30/dist/uPlot.iife.min.js" charset="utf-8"></script>
+  ${aleaDesignSystemHead()}
   <style>
-    /* Pico classless gives us typography, color tokens, and table styling
-       for free; this block only overrides the layout (full-viewport
-       dashboard, not Pico's centered document) and styles the bits Pico
-       does not know about (tabs, chart host, the percentile-table tail). */
-    :root { color-scheme: light; --pico-font-size: 87.5%; }
-    * { box-sizing: border-box; }
-    body { margin: 0; min-height: 100vh; display: flex; flex-direction: column; padding: 0; }
-    body > header { padding: 18px 28px 14px; max-width: none; border-bottom: 1px solid var(--pico-muted-border-color); flex: 0 0 auto; }
-    body > header > h1 { font-size: 18px; margin: 0; --pico-typography-spacing-vertical: 0; }
-    body > header > p { margin: 6px 0 0; color: var(--pico-muted-color); font-variant-numeric: tabular-nums; --pico-typography-spacing-vertical: 0; }
-    body > main { flex: 1 1 auto; max-width: none; padding: 14px 28px 32px; display: flex; flex-direction: column; gap: 18px; }
-    nav.tabs { display: flex; gap: 2px; border-bottom: 1px solid var(--pico-muted-border-color); padding: 0; margin: 0; flex-wrap: wrap; }
-    /* Pico styles <button> via CSS variables (--pico-background-color,
-       --pico-color, --pico-box-shadow, etc.); for the tab pattern we
-       override those variables rather than fight Pico's selectors. */
-    nav.tabs .tab {
-      --pico-background-color: transparent;
-      --pico-border-color: transparent;
-      --pico-color: #64748b;
-      --pico-box-shadow: none;
-      border: none;
-      border-bottom: 2px solid transparent;
-      border-radius: 0;
-      padding: 8px 16px;
-      margin: 0 0 -1px 0;
-      width: auto;
-      line-height: 1.4;
-      font-weight: 500;
-      font-size: 14px;
-      letter-spacing: 0.02em;
-      text-transform: uppercase;
-      cursor: pointer;
-      outline: none;
+    /* Page-specific layout: the asset panel composition, the chart-host
+       sizing, and a few percentile-table tweaks (sticky-ish first column,
+       per-series row label colors). Tokens, fonts, cards, tabs, generic
+       table styling, and tooltip chrome all come from the design system. */
+    .asset-panel { display: flex; flex-direction: column; gap: 18px; }
+
+    .chart-section { display: flex; flex-direction: column; gap: 14px; }
+
+    .chart-frame {
+      position: relative;
+      border-radius: 10px;
+      background:
+        radial-gradient(circle at 92% 10%, rgba(215, 170, 69, 0.05), transparent 36%),
+        linear-gradient(180deg, rgba(15, 27, 18, 0.6), rgba(7, 9, 10, 0.4));
+      border: 1px solid var(--alea-border-muted);
+      padding: 12px 8px 6px;
     }
-    nav.tabs .tab:hover,
-    nav.tabs .tab:focus,
-    nav.tabs .tab:focus-visible,
-    nav.tabs .tab:active {
-      --pico-background-color: transparent;
-      --pico-border-color: transparent;
-      --pico-color: #0f172a;
-      --pico-box-shadow: none;
-      outline: none;
+
+    .chart-host {
+      position: relative;
+      width: 100%;
+      height: 380px;
+      min-height: 380px;
+      max-height: 380px;
     }
-    nav.tabs .tab.active {
-      --pico-color: #0f172a;
-      border-bottom-color: ${bodyColor};
-      font-weight: 600;
-    }
-    /* Block layout for the asset panel — flex was making the chart-host's
-       fixed 360px height ambiguous in some browsers and the chart was
-       stretching to fill the parent. Plain block + margin-bottom is
-       boringly predictable. */
-    section.asset { display: block; }
-    section.asset > * + * { margin-top: 18px; }
-    section.asset > header { display: flex; align-items: baseline; gap: 14px; }
-    section.asset > header > h2 { margin: 0; font-size: 16px; --pico-typography-spacing-vertical: 0; }
-    section.asset > header > p { margin: 0; color: var(--pico-muted-color); font-size: 13px; font-variant-numeric: tabular-nums; --pico-typography-spacing-vertical: 0; }
-    .chart-card { display: block; }
-    .chart-card .legend { display: flex; gap: 18px; font-size: 13px; color: var(--pico-color); margin-bottom: 8px; }
-    .chart-card .legend .swatch { display: inline-block; width: 22px; height: 2px; vertical-align: middle; margin-right: 8px; }
-    .chart-frame { position: relative; }
-    .chart-host { position: relative; width: 100%; height: 360px; min-height: 360px; max-height: 360px; }
-    .chart-loading { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: var(--pico-muted-color); font-size: 13px; }
-    .chart-tooltip {
+
+    .chart-loading {
       position: absolute;
-      pointer-events: none;
-      background: #ffffff;
-      border: 1px solid var(--pico-muted-border-color);
-      border-radius: 6px;
-      padding: 8px 10px;
-      box-shadow: 0 4px 12px rgba(15, 23, 42, 0.08);
-      font-size: 12px;
-      font-variant-numeric: tabular-nums;
-      opacity: 0;
-      transition: opacity 0.06s ease;
-      z-index: 10;
-      min-width: 130px;
+      inset: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: var(--alea-text-subtle);
+      font-size: 12.5px;
+      letter-spacing: 0.04em;
     }
-    .chart-tooltip.visible { opacity: 1; }
-    .chart-tooltip .p { font-weight: 600; margin-bottom: 4px; padding-bottom: 4px; border-bottom: 1px solid var(--pico-muted-border-color); color: #0f172a; }
-    .chart-tooltip .row { display: grid; grid-template-columns: 12px auto 1fr; gap: 8px; align-items: center; padding: 1px 0; }
-    .chart-tooltip .swatch { width: 10px; height: 2px; }
-    .chart-tooltip .name { color: var(--pico-muted-color); }
-    .chart-tooltip .val { font-weight: 600; text-align: right; color: #0f172a; }
-    .table-wrap { overflow-x: auto; }
-    /* Min-width is 70px (label col) + 10 * 90px (percentile cols) = 970px.
-       At narrower viewports the .table-wrap scrolls horizontally. Cells
-       set white-space: nowrap so numbers never wrap mid-cell regardless. */
-    table.percentiles { width: 100%; min-width: 970px; margin: 0; --pico-typography-spacing-vertical: 0; font-variant-numeric: tabular-nums; table-layout: fixed; }
-    table.percentiles th:first-child, table.percentiles td:first-child { width: 70px; }
+
+    .chart-error {
+      color: var(--alea-red);
+      font-family: var(--alea-font-mono);
+      padding: 12px;
+      margin: 0;
+      white-space: pre-wrap;
+      font-size: 12px;
+    }
+
+    /* Percentile table: dense numeric layout. Min-width keeps the columns
+       readable on narrow viewports (the wrap scrolls horizontally). */
+    table.percentiles { min-width: 970px; table-layout: fixed; }
+    table.percentiles th:first-child,
+    table.percentiles td:first-child { width: 90px; }
     table.percentiles th, table.percentiles td { white-space: nowrap; }
-    table.percentiles thead th { color: var(--pico-muted-color); font-weight: 500; text-align: right; }
-    table.percentiles tbody th { text-align: left; text-transform: uppercase; letter-spacing: 0.04em; font-size: 13px; }
-    table.percentiles tbody td { text-align: right; }
     table.percentiles tbody tr.body th { color: ${bodyColor}; }
     table.percentiles tbody tr.wick th { color: ${wickColor}; }
-    .uplot, .u-wrap { background: transparent; }
-    .u-legend { display: none !important; }
+
+    /* Push the candle-count meta to the right edge of the card header. */
+    .alea-card-meta-end { margin-left: auto; }
+
+    /* Numeric cells use the display serif; gives the readout a slight
+       ledger feel without sacrificing tabular-nums alignment. */
+    table.percentiles tbody td {
+      font-family: var(--alea-font-display);
+      font-weight: 500;
+      font-size: 16px;
+      letter-spacing: 0.01em;
+      color: var(--alea-text);
+    }
   </style>
 </head>
 <body>
-  <header>
-    <h1>Training · Candle Size Distributions</h1>
-    <p>${escapeHtml(seriesLabel)} · generated ${escapeHtml(generatedAt)}</p>
-  </header>
-  <main>
-    <nav class="tabs" role="tablist" id="tabs">
-      ${slices
-        .map(
-          (slice, idx) =>
-            `<button type="button" role="tab" class="tab${idx === 0 ? " active" : ""}" data-asset="${escapeHtml(slice.asset)}">${escapeHtml(slice.assetUpper)}</button>`,
-        )
-        .join("\n      ")}
-    </nav>
-    <section class="asset" id="asset-panel">
-      <header>
-        <h2 id="asset-title"></h2>
-        <p id="asset-meta"></p>
-      </header>
-      <div class="chart-card">
-        <div class="legend">
-          <span><span class="swatch" style="background:${bodyColor}"></span>body size</span>
-          <span><span class="swatch" style="background:${wickColor}"></span>wick size</span>
+  <div class="alea-shell">
+    <header class="alea-header">
+      <div class="alea-brand-row">${aleaBrandMark()}</div>
+      <h1 class="alea-title">Training · Candle Size Distributions</h1>
+      <p class="alea-subtitle">${escapeHtml(seriesLabel)}<span class="sep">·</span>generated ${escapeHtml(generatedAt)}</p>
+    </header>
+    <main class="alea-main">
+      <nav class="alea-tabs" role="tablist" id="tabs">
+        ${slices
+          .map(
+            (slice, idx) =>
+              `<button type="button" role="tab" class="alea-tab${idx === 0 ? " active" : ""}" data-asset="${escapeHtml(slice.asset)}">${escapeHtml(slice.assetUpper)}</button>`,
+          )
+          .join("\n        ")}
+      </nav>
+      <section class="alea-card with-corners asset-panel" id="asset-panel">
+        <header class="alea-card-header">
+          <h2 class="alea-card-title" id="asset-title"></h2>
+          <p class="alea-card-meta" id="asset-meta"></p>
+          <p class="alea-card-meta alea-card-meta-end" id="asset-count"></p>
+        </header>
+        <div class="chart-section">
+          <div class="alea-legend">
+            <span class="alea-legend-item"><span class="alea-legend-swatch" style="background:${bodyColor}"></span>body size</span>
+            <span class="alea-legend-item"><span class="alea-legend-swatch" style="background:${wickColor}"></span>wick size</span>
+          </div>
+          <div class="chart-frame">
+            <div id="chart" class="chart-host"><div class="chart-loading">Loading chart…</div></div>
+            <div id="chart-tooltip" class="alea-tooltip"></div>
+          </div>
         </div>
-        <div class="chart-frame">
-          <div id="chart" class="chart-host"><div class="chart-loading">Loading chart…</div></div>
-          <div id="chart-tooltip" class="chart-tooltip"></div>
+        <div class="alea-table-wrap">
+          <table class="alea-table percentiles">
+            <thead>
+              <tr>
+                <th scope="col"></th>
+                ${tableHeaderCells}
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
         </div>
-      </div>
-      <div class="table-wrap">
-        <table class="percentiles">
-          <thead>
-            <tr>
-              <th scope="col"></th>
-              ${tableHeaderCells}
-            </tr>
-          </thead>
-          <tbody></tbody>
-        </table>
-      </div>
-    </section>
-  </main>
+      </section>
+    </main>
+  </div>
   <script>
     const slices = ${JSON.stringify(slices)};
     const tablePs = ${JSON.stringify(tableTailPercentiles)};
@@ -214,6 +192,7 @@ export function renderTrainingDistributionsHtml({
     const chartLastP = 99;
     const bodyColor = ${JSON.stringify(bodyColor)};
     const wickColor = ${JSON.stringify(wickColor)};
+    const chartTokens = ${JSON.stringify(aleaChartTokens)};
 
     // Source values are in percent (e.g. 0.05 = 0.05%). Display in basis
     // points: 1% = 100 bp, rounded to the nearest integer. Same numbers,
@@ -232,6 +211,7 @@ export function renderTrainingDistributionsHtml({
     const tabsEl = document.getElementById("tabs");
     const titleEl = document.getElementById("asset-title");
     const metaEl = document.getElementById("asset-meta");
+    const countEl = document.getElementById("asset-count");
     const chartHost = document.getElementById("chart");
     const tooltipEl = document.getElementById("chart-tooltip");
     const chartFrame = chartHost.parentElement;
@@ -253,11 +233,11 @@ export function renderTrainingDistributionsHtml({
     }
 
     function chartHostError(msg) {
-      chartHost.innerHTML = '<pre style="color:#b91c1c;padding:12px;margin:0;white-space:pre-wrap;font-size:12px">' + msg + '</pre>';
+      chartHost.innerHTML = '<pre class="chart-error">' + msg + '</pre>';
     }
 
     // Render synchronously: this script runs at end of <body>, layout has
-    // happened, and .chart-host has min-height: 360px so it always has a
+    // happened, and .chart-host has min-height: 380px so it always has a
     // measurable size. We deliberately do NOT use requestAnimationFrame
     // here — RAF is paused when document.visibilityState is "hidden",
     // which silently breaks the chart for any tab opened in the
@@ -270,7 +250,7 @@ export function renderTrainingDistributionsHtml({
         return;
       }
       const w = chartHost.clientWidth || chartHost.getBoundingClientRect().width || 800;
-      const h = chartHost.clientHeight || 360;
+      const h = chartHost.clientHeight || 380;
       if (w === 0 || h === 0) {
         chartHostError("chart host has zero size: " + w + "x" + h);
         return;
@@ -318,23 +298,24 @@ export function renderTrainingDistributionsHtml({
         const bodyV = bodyData[idx];
         const wickV = wickData[idx];
         tooltipEl.innerHTML =
-          '<div class="p">' + formatBips(x) + ' or less</div>' +
-          '<div class="row"><span class="swatch" style="background:' + bodyColor + '"></span><span class="name">body</span><span class="val">' + formatProb(bodyV) + '</span></div>' +
-          '<div class="row"><span class="swatch" style="background:' + wickColor + '"></span><span class="name">wick</span><span class="val">' + formatProb(wickV) + '</span></div>';
+          '<div class="alea-tooltip-head">' + formatBips(x) + ' or less</div>' +
+          '<div class="alea-tooltip-row"><span class="alea-legend-swatch" style="background:' + bodyColor + '"></span><span class="name">body</span><span class="value">' + formatProb(bodyV) + '</span></div>' +
+          '<div class="alea-tooltip-row"><span class="alea-legend-swatch" style="background:' + wickColor + '"></span><span class="name">wick</span><span class="value">' + formatProb(wickV) + '</span></div>';
         const cursorLeft = u.cursor.left;
         const frameW = chartFrame.getBoundingClientRect().width;
-        const tooltipW = tooltipEl.offsetWidth || 140;
-        const margin = 12;
+        const tooltipW = tooltipEl.offsetWidth || 200;
+        const margin = 14;
         const placeRight = cursorLeft + margin + tooltipW <= frameW;
         const left = placeRight ? cursorLeft + margin : cursorLeft - margin - tooltipW;
         tooltipEl.style.left = Math.max(margin, Math.min(left, frameW - tooltipW - margin)) + "px";
-        tooltipEl.style.top = "12px";
+        tooltipEl.style.top = "14px";
         tooltipEl.classList.add("visible");
       };
       const opts = {
         width: w,
         height: h,
         legend: { show: false },
+        padding: [16, 18, 8, 8],
         scales: { x: { time: false } },
         cursor: {
           points: { show: false },
@@ -342,22 +323,24 @@ export function renderTrainingDistributionsHtml({
         },
         series: [
           {},
-          { label: "body", stroke: bodyColor, width: 1.75 },
-          { label: "wick", stroke: wickColor, width: 1.75 },
+          { label: "body", stroke: bodyColor, width: 2 },
+          { label: "wick", stroke: wickColor, width: 2 },
         ],
         axes: [
           {
-            stroke: "#64748b",
-            grid: { show: false },
-            ticks: { show: false },
+            stroke: chartTokens.axisStroke,
+            font: chartTokens.axisFont,
+            grid: { stroke: chartTokens.gridStroke, width: 1 },
+            ticks: { stroke: chartTokens.axisTickStroke, width: 1, size: 5 },
             values: (u, splits) => splits.map(formatBips),
           },
           {
-            stroke: "#64748b",
-            grid: { show: false },
-            ticks: { show: false },
+            stroke: chartTokens.axisStroke,
+            font: chartTokens.axisFont,
+            grid: { stroke: chartTokens.gridStroke, width: 1 },
+            ticks: { stroke: chartTokens.axisTickStroke, width: 1, size: 5 },
             values: (u, splits) => splits.map(formatProb),
-            size: 56,
+            size: 60,
           },
         ],
         hooks: {
@@ -369,7 +352,7 @@ export function renderTrainingDistributionsHtml({
               const yPos = u.valToPos(50, "y", true);
               const ctx = u.ctx;
               ctx.save();
-              ctx.strokeStyle = "#94a3b8";
+              ctx.strokeStyle = chartTokens.referenceLine;
               ctx.lineWidth = 1;
               ctx.setLineDash([4, 4]);
               ctx.beginPath();
@@ -392,12 +375,12 @@ export function renderTrainingDistributionsHtml({
     function activate(asset) {
       const slice = slices.find((s) => s.asset === asset);
       if (!slice) return;
-      for (const btn of tabsEl.querySelectorAll(".tab")) {
+      for (const btn of tabsEl.querySelectorAll(".alea-tab")) {
         btn.classList.toggle("active", btn.getAttribute("data-asset") === asset);
       }
       titleEl.textContent = slice.assetUpper;
-      const yearStr = slice.yearRange ? slice.yearRange + " · " : "";
-      metaEl.textContent = yearStr + slice.candleCount.toLocaleString() + " candles";
+      metaEl.textContent = slice.yearRange ?? "";
+      countEl.textContent = slice.candleCount.toLocaleString() + " candles";
       renderTable(slice);
       renderChart(slice);
     }
@@ -405,12 +388,11 @@ export function renderTrainingDistributionsHtml({
     tabsEl.addEventListener("click", (e) => {
       const target = e.target;
       if (!(target instanceof HTMLElement)) return;
-      const btn = target.closest(".tab");
+      const btn = target.closest(".alea-tab");
       if (!(btn instanceof HTMLElement)) return;
       const asset = btn.getAttribute("data-asset");
       if (!asset) return;
       activate(asset);
-      // Drop focus so Pico's :focus styling does not stick after click.
       btn.blur();
     });
 
