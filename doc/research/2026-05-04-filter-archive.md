@@ -1,5 +1,14 @@
 # 2026-05-04 — Filter archive
 
+> **Note on numbers in this doc:** the calibration figures below were
+> computed with `SUMMARY_MIN_SAMPLES = 300`. We later bumped that floor
+> to 2000 (see
+> [doc/research/2026-05-04-sample-floor.md](./2026-05-04-sample-floor.md))
+> after discovering a sample-composition artifact at low bp. Absolute
+> calibration percentages here are slightly inflated relative to current
+> dashboard numbers; **relative rankings are unaffected**. The table is
+> preserved as a historical record of what we thought at the time.
+
 ## Takeaway
 
 Of the 28 filters we'd ever shipped, exactly two are pulling their

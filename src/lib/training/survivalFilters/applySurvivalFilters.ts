@@ -15,15 +15,26 @@ import type {
 } from "@alea/lib/training/types";
 
 /**
- * Sample-count floor used when comparing a half's bucket vs baseline's
- * bucket: both must clear this floor for the bucket's pp delta to count
- * toward the score. Mirrors the renderer's threshold so the score
- * matches what the operator can actually see in the chart.
+ * Sample-count floor for any bucket's per-cell rate to count toward the
+ * score: both halves at the bucket must clear this floor. Mirrors the
+ * renderer's `SURVIVAL_MIN_SAMPLES` so the score matches what the
+ * operator can actually see in the chart.
+ *
+ * Set at 2000 because at lower floors (we previously used 300), low-bp
+ * buckets in distance-conditioned filters carry a sample-composition
+ * artifact: at bp = 1 for `distance_from_line_atr`, only ~570/cell
+ * snapshots qualify as `true` ("decisively away"), and those are
+ * structurally low-ATR-regime snapshots — not representative of the
+ * "decisively away" semantics the filter claims at higher bp. The 300
+ * floor wasn't strict enough to filter those out; 2000 gets per-cell
+ * standard error to ~1pp (vs the ~3pp from 300), comparable to the
+ * deltas we're trying to measure. See
+ * doc/research/2026-05-04-sample-floor.md for the full investigation.
  *
  * Kept here (not imported from the renderer) so the compute layer has
  * no dependency on the rendering layer.
  */
-const SUMMARY_MIN_SAMPLES = 300;
+const SUMMARY_MIN_SAMPLES = 2000;
 
 const REMAINING_VALUES: readonly SurvivalRemainingMinutes[] = [4, 3, 2, 1];
 

@@ -46,3 +46,8 @@ contained — read it cold.
   info-gain capture threshold, and the trading-discipline
   interpretation. Includes the threshold trade-off table for the
   champion filter.
+- [2026-05-04 — Bumping the sample floor](./2026-05-04-sample-floor.md):
+  why we raised `SUMMARY_MIN_SAMPLES` from 300 to 2000 — including the
+  sample-composition artifact at low bp for `distance_from_line_atr`
+  that the old floor wasn't strict enough to filter out, and the
+  before/after impact on calibration scores and sweet-spot ranges.

@@ -72,7 +72,10 @@ function buildSnapshot({
   };
 }
 
-const SAMPLE_FLOOR = 500;
+// Just-above the production SUMMARY_MIN_SAMPLES floor (2000), so tests
+// that want a bucket to clear the floor can use this value and tests
+// that want to land below it can use anything < 2000.
+const SAMPLE_FLOOR = 2500;
 
 function buildBalancedSnapshots({
   remaining,

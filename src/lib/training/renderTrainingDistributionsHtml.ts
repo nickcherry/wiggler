@@ -21,7 +21,7 @@ import {
  * snapshots per remaining-minutes bucket per asset) without hiding the
  * mid-tail data we actually want to read.
  */
-const SURVIVAL_MIN_SAMPLES = 300;
+const SURVIVAL_MIN_SAMPLES = 2000;
 
 /**
  * Hard cap on the x-axis range for the survival chart, in basis points.
