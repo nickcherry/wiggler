@@ -1,6 +1,6 @@
 import { scanPolymarketLifetimePnl } from "@alea/lib/trading/vendor/polymarket/scanLifetimePnl";
 import type { LifetimePnlScanProgress } from "@alea/lib/trading/vendor/types";
-import type { ClobClient } from "@polymarket/clob-client";
+import type { ClobClient } from "@polymarket/clob-client-v2";
 import { describe, expect, it } from "bun:test";
 
 function clientWith({

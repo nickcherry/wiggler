@@ -1,4 +1,8 @@
 import { polymarket } from "@alea/constants/polymarket";
+import {
+  mergePolymarketOrderConstraints,
+  parseBookConstraints,
+} from "@alea/lib/trading/vendor/polymarket/marketConstraints";
 import type {
   TopOfBook,
   TradableMarket,
@@ -25,8 +29,31 @@ export async function fetchPolymarketBook({
     fetchTokenBook({ tokenId: market.upRef, signal }),
     fetchTokenBook({ tokenId: market.downRef, signal }),
   ]);
-  return { market, up, down, fetchedAtMs: Date.now() };
+  const constraintItems = [
+    market.constraints,
+    up.constraints,
+    down.constraints,
+  ];
+  const hasConstraints = constraintItems.some(
+    (item) => item !== undefined && item !== null,
+  );
+  const constraints = hasConstraints
+    ? mergePolymarketOrderConstraints(...constraintItems)
+    : undefined;
+  return {
+    market: constraints === undefined ? market : { ...market, constraints },
+    up,
+    down,
+    fetchedAtMs: Date.now(),
+  };
 }
+
+type TokenBook = TopOfBook & {
+  readonly constraints:
+    | ReturnType<typeof parseBookConstraints>
+    | null
+    | undefined;
+};
 
 async function fetchTokenBook({
   tokenId,
@@ -34,7 +61,7 @@ async function fetchTokenBook({
 }: {
   readonly tokenId: string;
   readonly signal?: AbortSignal;
-}): Promise<TopOfBook> {
+}): Promise<TokenBook> {
   const url = `${polymarket.clobApiUrl}/book?token_id=${tokenId}`;
   const response = await fetch(url, {
     headers: { "User-Agent": "alea/1.0" },
@@ -49,6 +76,7 @@ async function fetchTokenBook({
   return {
     bestBid: pickBest({ levels: parsed.bids, side: "bid" }),
     bestAsk: pickBest({ levels: parsed.asks, side: "ask" }),
+    constraints: parseBookConstraints({ raw: parsed }),
   };
 }
 
@@ -88,5 +116,8 @@ const bookSchema = z
   .object({
     bids: z.array(levelSchema),
     asks: z.array(levelSchema),
+    min_order_size: z.string().optional(),
+    tick_size: z.string().optional(),
+    neg_risk: z.boolean().optional(),
   })
   .passthrough();

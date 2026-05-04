@@ -9,9 +9,11 @@ import {
   OrderType,
   Side,
   type SignedOrder,
-  type UserOrder,
-} from "@polymarket/clob-client";
-import { describe, expect, it } from "bun:test";
+  type UserOrderV2,
+} from "@polymarket/clob-client-v2";
+import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+
+const originalDateNow = Date.now;
 
 const market: TradableMarket = {
   asset: "btc",
@@ -24,39 +26,65 @@ const market: TradableMarket = {
   acceptingOrders: true,
 };
 
+const constraints = {
+  priceTickSize: 0.01,
+  tickSize: "0.01" as const,
+  minOrderSize: 1,
+  minimumOrderAgeSeconds: 0,
+  makerBaseFeeBps: 0,
+  takerBaseFeeBps: 720,
+  feesTakerOnly: true,
+  negRisk: true,
+  rfqEnabled: false,
+  takerOrderDelayEnabled: false,
+};
+
+const expireBeforeMs = market.windowEndMs - 10_000;
+
 function signedOrder(): SignedOrder {
   return {
     salt: 1,
     maker: "0xmaker",
     signer: "0xsigner",
-    taker: "0x0000000000000000000000000000000000000000",
     tokenId: "UP_TOKEN",
     makerAmount: "100",
     takerAmount: "50",
     expiration: "0",
-    nonce: "0",
-    feeRateBps: "0",
     side: Side.BUY,
+    signatureType: 2,
+    timestamp: "1777900210000",
+    metadata:
+      "0x0000000000000000000000000000000000000000000000000000000000000000",
+    builder:
+      "0x0000000000000000000000000000000000000000000000000000000000000000",
     signature: "0xsig",
   } as unknown as SignedOrder;
 }
 
 describe("placePolymarketMakerLimitBuy", () => {
-  it("creates and posts a post-only GTC buy using rounded venue price and shares", async () => {
+  beforeEach(() => {
+    Date.now = () => market.windowStartMs + 120_000;
+  });
+
+  afterEach(() => {
+    Date.now = originalDateNow;
+  });
+
+  it("creates and posts a post-only GTD buy using venue tick, size, and expiration", async () => {
     const signed = signedOrder();
     const createCalls: Array<{
-      readonly order: UserOrder;
+      readonly order: UserOrderV2;
       readonly options: Partial<CreateOrderOptions> | undefined;
     }> = [];
     const postCalls: Array<{
       readonly order: SignedOrder;
       readonly orderType: OrderType | undefined;
-      readonly deferExec: boolean | undefined;
       readonly postOnly: boolean | undefined;
+      readonly deferExec: boolean | undefined;
     }> = [];
     const client = {
       async createOrder(
-        order: UserOrder,
+        order: UserOrderV2,
         options?: Partial<CreateOrderOptions>,
       ): Promise<SignedOrder> {
         createCalls.push({ order, options });
@@ -65,12 +93,13 @@ describe("placePolymarketMakerLimitBuy", () => {
       async postOrder(
         order: SignedOrder,
         orderType?: OrderType,
-        deferExec?: boolean,
         postOnly?: boolean,
+        deferExec?: boolean,
       ): Promise<unknown> {
         postCalls.push({ order, orderType, deferExec, postOnly });
         return {
           success: true,
+          errorMsg: "",
           orderID: "0xorder",
           transactionsHashes: [],
           status: "live",
@@ -86,7 +115,8 @@ describe("placePolymarketMakerLimitBuy", () => {
       side: "down",
       limitPrice: 0.333,
       stakeUsd: 20,
-      negRisk: true,
+      expireBeforeMs,
+      constraints,
     });
 
     expect(createCalls).toEqual([
@@ -96,17 +126,17 @@ describe("placePolymarketMakerLimitBuy", () => {
           price: 0.33,
           size: 60.6,
           side: Side.BUY,
-          feeRateBps: 0,
+          expiration: 1_777_900_490,
         },
-        options: { negRisk: true },
+        options: { negRisk: true, tickSize: "0.01" },
       },
     ]);
     expect(postCalls).toEqual([
       {
         order: signed,
-        orderType: OrderType.GTC,
-        deferExec: false,
+        orderType: OrderType.GTD,
         postOnly: true,
+        deferExec: false,
       },
     ]);
     expect(placed).toMatchObject({
@@ -116,6 +146,8 @@ describe("placePolymarketMakerLimitBuy", () => {
       limitPrice: 0.33,
       sharesIfFilled: 60.6,
       feeRateBps: 0,
+      orderType: "GTD",
+      expiresAtMs: expireBeforeMs,
     });
     expect(placed.placedAtMs).toBeGreaterThan(0);
   });
@@ -140,7 +172,8 @@ describe("placePolymarketMakerLimitBuy", () => {
         side: "up",
         limitPrice: 0.52,
         stakeUsd: 20,
-        negRisk: false,
+        expireBeforeMs,
+        constraints: { ...constraints, negRisk: false },
       }),
     ).rejects.toThrow(PostOnlyRejectionError);
   });
@@ -162,9 +195,33 @@ describe("placePolymarketMakerLimitBuy", () => {
         side: "up",
         limitPrice: 0.52,
         stakeUsd: 20,
-        negRisk: false,
+        expireBeforeMs,
+        constraints: { ...constraints, negRisk: false },
       }),
     ).rejects.toThrow(/postOrder rejected: insufficient allowance/);
+  });
+
+  it("surfaces V2 error-only venue responses as generic errors", () => {
+    const client = {
+      async createOrder(): Promise<SignedOrder> {
+        return signedOrder();
+      },
+      async postOrder(): Promise<unknown> {
+        return { error: "Trading restricted in your region", status: 403 };
+      },
+    } as unknown as ClobClient;
+
+    expect(
+      placePolymarketMakerLimitBuy({
+        client,
+        market,
+        side: "up",
+        limitPrice: 0.52,
+        stakeUsd: 20,
+        expireBeforeMs,
+        constraints: { ...constraints, negRisk: false },
+      }),
+    ).rejects.toThrow(/postOrder rejected: Trading restricted in your region/);
   });
 
   it("rejects invalid limit prices before creating an order", () => {
@@ -184,8 +241,55 @@ describe("placePolymarketMakerLimitBuy", () => {
         side: "up",
         limitPrice: 1,
         stakeUsd: 20,
-        negRisk: false,
+        expireBeforeMs,
+        constraints: { ...constraints, negRisk: false },
       }),
     ).rejects.toThrow(/limitPrice must be in \(0, 1\)/);
+  });
+
+  it("rejects orders below the venue minimum size", () => {
+    const client = {
+      async createOrder(): Promise<SignedOrder> {
+        throw new Error("should not be called");
+      },
+      async postOrder(): Promise<unknown> {
+        throw new Error("should not be called");
+      },
+    } as unknown as ClobClient;
+
+    expect(
+      placePolymarketMakerLimitBuy({
+        client,
+        market,
+        side: "up",
+        limitPrice: 0.99,
+        stakeUsd: 1,
+        expireBeforeMs,
+        constraints: { ...constraints, minOrderSize: 5 },
+      }),
+    ).rejects.toThrow(/below venue minimum/);
+  });
+
+  it("rejects GTD orders too close to expiration before signing", () => {
+    const client = {
+      async createOrder(): Promise<SignedOrder> {
+        throw new Error("should not be called");
+      },
+      async postOrder(): Promise<unknown> {
+        throw new Error("should not be called");
+      },
+    } as unknown as ClobClient;
+
+    expect(
+      placePolymarketMakerLimitBuy({
+        client,
+        market,
+        side: "up",
+        limitPrice: 0.5,
+        stakeUsd: 20,
+        expireBeforeMs: Date.now() + 30_000,
+        constraints,
+      }),
+    ).rejects.toThrow(/not enough time before GTD expiry/);
   });
 });

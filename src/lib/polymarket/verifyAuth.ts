@@ -1,6 +1,6 @@
 import { getPolymarketAuthState } from "@alea/lib/polymarket/getPolymarketClobClient";
 import { probeUserWebSocket } from "@alea/lib/polymarket/probeUserWebSocket";
-import { AssetType, type ClobClient, Side } from "@polymarket/clob-client";
+import { AssetType, type ClobClient, Side } from "@polymarket/clob-client-v2";
 import { z } from "zod";
 
 export type VerifyAuthCheck = {

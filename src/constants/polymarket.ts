@@ -9,7 +9,7 @@
  * `src/constants/env.ts`.
  */
 
-import { Chain, SignatureType } from "@polymarket/clob-client";
+import { Chain, SignatureTypeV2 } from "@polymarket/clob-client-v2";
 
 export const polymarket = {
   chainId: Chain.POLYGON,
@@ -23,7 +23,7 @@ export const polymarket = {
    * Polymarket gnosis-safe proxy signature scheme. The funder address must be
    * the safe (proxy) wallet, not the EOA that signs.
    */
-  signatureType: SignatureType.POLY_GNOSIS_SAFE,
+  signatureType: SignatureTypeV2.POLY_GNOSIS_SAFE,
   clobApiUrl: "https://clob.polymarket.com",
   gammaApiUrl: "https://gamma-api.polymarket.com",
   marketWsUrl: "wss://ws-subscriptions-clob.polymarket.com/ws/market",

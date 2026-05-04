@@ -30,7 +30,9 @@ import {
 import type { Asset } from "@alea/types/assets";
 
 const PLACE_RETRY_DELAY_MS = 250;
-const PLACE_GIVE_UP_BEFORE_END_MS = ORDER_CANCEL_MARGIN_MS + 1_000;
+const GTD_MIN_VALIDITY_BUFFER_MS = 61_000;
+const PLACE_GIVE_UP_BEFORE_END_MS =
+  ORDER_CANCEL_MARGIN_MS + GTD_MIN_VALIDITY_BUFFER_MS;
 
 /**
  * Places one maker-only limit BUY for `record`'s asset, with the
@@ -102,6 +104,19 @@ export async function placeWithRetry({
       record.slot = { kind: "empty" };
       return;
     }
+    try {
+      const fresh = await vendor.fetchBook({ market, signal });
+      books.set(market.vendorRef, fresh);
+      record.market = fresh.market;
+    } catch (error) {
+      record.slot = { kind: "empty" };
+      emit({
+        kind: "warn",
+        atMs: Date.now(),
+        message: `${labelAsset(asset)} JIT book refresh failed before placement: ${(error as Error).message}`,
+      });
+      return;
+    }
     const decision = currentDecision({
       asset,
       record,
@@ -118,12 +133,13 @@ export async function placeWithRetry({
       record.slot = { kind: "empty" };
       return;
     }
+    const orderMarket = record.market ?? market;
 
     // Reflect the freshly re-evaluated side/price on the placeholder
     // slot so log/UI events reading the slot mid-loop see truth.
     record.slot = {
       kind: "active",
-      market,
+      market: orderMarket,
       side: decision.side,
       outcomeRef: decision.outcomeRef,
       orderId: null,
@@ -137,15 +153,16 @@ export async function placeWithRetry({
 
     const attempt = await attemptPlace({
       vendor,
-      market,
+      market: orderMarket,
       side: decision.side,
       bid: decision.bid,
+      expireBeforeMs: window.windowEndMs - ORDER_CANCEL_MARGIN_MS,
     });
 
     if (attempt.kind === "ok") {
       const observed = matchingActiveSlot({
         slot: record.slot,
-        market,
+        market: orderMarket,
         outcomeRef: attempt.placed.outcomeRef,
       });
       const sharesFilled = observed?.sharesFilled ?? 0;
@@ -153,7 +170,7 @@ export async function placeWithRetry({
         sharesFilled + 1e-6 >= attempt.placed.sharesIfFilled;
       record.slot = {
         kind: "active",
-        market,
+        market: orderMarket,
         side: attempt.placed.side,
         outcomeRef: attempt.placed.outcomeRef,
         orderId: orderFullyFilled ? null : attempt.placed.orderId,
@@ -206,8 +223,9 @@ export async function placeWithRetry({
       // Force a fresh book against the venue so the next pass
       // evaluates against the moved spread, not the stale poll.
       try {
-        const fresh = await vendor.fetchBook({ market, signal });
-        books.set(market.vendorRef, fresh);
+        const fresh = await vendor.fetchBook({ market: orderMarket, signal });
+        books.set(orderMarket.vendorRef, fresh);
+        record.market = fresh.market;
       } catch {
         // Carry on with whatever the poll has.
       }
@@ -221,7 +239,7 @@ export async function placeWithRetry({
     const reconciled = await reconcilePlacementState({
       vendor,
       record,
-      market,
+      market: orderMarket,
       asset,
       emit,
     });
@@ -348,11 +366,13 @@ async function attemptPlace({
   market,
   side,
   bid,
+  expireBeforeMs,
 }: {
   readonly vendor: Vendor;
   readonly market: AssetWindowRecord["market"] & object;
   readonly side: LeadingSide;
   readonly bid: number;
+  readonly expireBeforeMs: number;
 }): Promise<PlaceAttempt> {
   try {
     const placed = await vendor.placeMakerLimitBuy({
@@ -360,6 +380,7 @@ async function attemptPlace({
       side,
       limitPrice: bid,
       stakeUsd: STAKE_USD,
+      expireBeforeMs,
     });
     return { kind: "ok", placed };
   } catch (error) {

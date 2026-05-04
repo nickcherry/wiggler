@@ -1,6 +1,6 @@
 import { env } from "@alea/constants/env";
 import { polymarket } from "@alea/constants/polymarket";
-import { ClobClient } from "@polymarket/clob-client";
+import { ClobClient } from "@polymarket/clob-client-v2";
 import { Wallet } from "ethers";
 
 /**
@@ -88,14 +88,13 @@ async function initialize(): Promise<AuthState> {
 
   // Unauthenticated client used only to fetch `/time` and mint or derive the
   // API key bundle. We discard it once we have credentials.
-  const bootClient = new ClobClient(
-    polymarket.clobApiUrl,
-    polymarket.chainId,
-    wallet,
-    undefined,
-    polymarket.signatureType,
+  const bootClient = new ClobClient({
+    host: polymarket.clobApiUrl,
+    chain: polymarket.chainId,
+    signer: wallet,
+    signatureType: polymarket.signatureType,
     funderAddress,
-  );
+  });
 
   const localBeforeFetchMs = Date.now();
   const serverEpochSeconds = await bootClient.getServerTime();
@@ -118,14 +117,14 @@ async function initialize(): Promise<AuthState> {
     );
   }
 
-  const client = new ClobClient(
-    polymarket.clobApiUrl,
-    polymarket.chainId,
-    wallet,
+  const client = new ClobClient({
+    host: polymarket.clobApiUrl,
+    chain: polymarket.chainId,
+    signer: wallet,
     creds,
-    polymarket.signatureType,
+    signatureType: polymarket.signatureType,
     funderAddress,
-  );
+  });
 
   return {
     client,

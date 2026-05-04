@@ -10,6 +10,7 @@ import type {
 import { z } from "zod";
 
 const RECONNECT_DELAYS_MS = [1_000, 2_000, 5_000, 10_000, 30_000] as const;
+const HEARTBEAT_INTERVAL_MS = 8_000;
 
 /**
  * Polymarket implementation of `Vendor.streamUserFills`. Maintains
@@ -45,7 +46,9 @@ export function streamPolymarketUserFills({
   let stopped = false;
   let socket: WebSocket | null = null;
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   let attempt = 0;
+  const seenFills = new Set<string>();
 
   const clearReconnectTimer = () => {
     if (reconnectTimer !== null) {
@@ -58,6 +61,7 @@ export function streamPolymarketUserFills({
     if (stopped || reconnectTimer !== null) {
       return;
     }
+    clearHeartbeatTimer();
     onDisconnect?.(reason);
     const delay =
       RECONNECT_DELAYS_MS[Math.min(attempt, RECONNECT_DELAYS_MS.length - 1)] ??
@@ -67,6 +71,13 @@ export function streamPolymarketUserFills({
       reconnectTimer = null;
       void connect();
     }, delay);
+  };
+
+  const clearHeartbeatTimer = () => {
+    if (heartbeatTimer !== null) {
+      clearInterval(heartbeatTimer);
+      heartbeatTimer = null;
+    }
   };
 
   const connect = async (): Promise<void> => {
@@ -94,6 +105,11 @@ export function streamPolymarketUserFills({
           markets: [...conditionIds],
         }),
       );
+      heartbeatTimer = setInterval(() => {
+        if (ws.readyState === WebSocket.OPEN) {
+          ws.send("PING");
+        }
+      }, HEARTBEAT_INTERVAL_MS);
       onConnect?.();
     });
 
@@ -103,7 +119,13 @@ export function streamPolymarketUserFills({
         attempt = 0;
       }
       try {
-        handleFrame({ raw: event.data, tokenIdToSide, onFill });
+        for (const fill of parsePolymarketUserFillEvents({
+          raw: event.data,
+          tokenIdToSide,
+          seenFills,
+        })) {
+          onFill(fill);
+        }
       } catch (error) {
         onError?.(error instanceof Error ? error : new Error(String(error)));
       }
@@ -115,6 +137,7 @@ export function streamPolymarketUserFills({
 
     ws.addEventListener("close", (event: CloseEvent) => {
       socket = null;
+      clearHeartbeatTimer();
       scheduleReconnect(
         event.reason.length > 0
           ? `user ws closed: ${event.reason}`
@@ -129,6 +152,7 @@ export function streamPolymarketUserFills({
     stop: async () => {
       stopped = true;
       clearReconnectTimer();
+      clearHeartbeatTimer();
       const ws = socket;
       socket = null;
       if (ws !== null) {
@@ -171,30 +195,39 @@ function extractCreds({
   return { apiKey, secret: creds.secret, passphrase: creds.passphrase };
 }
 
-function handleFrame({
+export function parsePolymarketUserFillEvents({
   raw,
   tokenIdToSide,
-  onFill,
+  seenFills,
 }: {
   readonly raw: string;
   readonly tokenIdToSide: ReadonlyMap<string, LeadingSide>;
-  readonly onFill: (event: FillEvent) => void;
-}): void {
-  if (raw.length === 0) {
-    return;
+  readonly seenFills: Set<string>;
+}): readonly FillEvent[] {
+  if (raw.length === 0 || raw === "PONG") {
+    return [];
   }
   const parsed = JSON.parse(raw);
   const items: unknown[] = Array.isArray(parsed) ? parsed : [parsed];
+  const fills: FillEvent[] = [];
   for (const item of items) {
     const trade = tradeFrameSchema.safeParse(item);
     if (!trade.success) {
       continue;
     }
-    const event = mapTradeFrame({ frame: trade.data, tokenIdToSide });
-    if (event !== null) {
-      onFill(event);
+    for (const event of mapTradeFrame({ frame: trade.data, tokenIdToSide })) {
+      const eventId =
+        trade.data.id ??
+        `${trade.data.market}:${trade.data.timestamp ?? trade.data.match_time ?? trade.data.matchtime ?? trade.data.last_update ?? "unknown"}`;
+      const key = `${eventId}:${event.outcomeRef}:${event.price}:${event.size}`;
+      if (seenFills.has(key)) {
+        continue;
+      }
+      seenFills.add(key);
+      fills.push(event);
     }
   }
+  return fills;
 }
 
 function mapTradeFrame({
@@ -203,35 +236,91 @@ function mapTradeFrame({
 }: {
   readonly frame: z.infer<typeof tradeFrameSchema>;
   readonly tokenIdToSide: ReadonlyMap<string, LeadingSide>;
-}): FillEvent | null {
-  const price = Number(frame.price);
-  const size = Number(frame.size);
+}): readonly FillEvent[] {
+  if (!tradeStatusCanFill({ status: frame.status })) {
+    return [];
+  }
+  const events: FillEvent[] = [];
+  for (const makerOrder of frame.maker_orders ?? []) {
+    const side = tokenIdToSide.get(makerOrder.asset_id) ?? null;
+    const price = Number(makerOrder.price);
+    const size = Number(makerOrder.matched_amount);
+    if (
+      side === null ||
+      !Number.isFinite(price) ||
+      !Number.isFinite(size) ||
+      size <= 0
+    ) {
+      continue;
+    }
+    events.push({
+      vendorRef: frame.market,
+      outcomeRef: makerOrder.asset_id,
+      side,
+      price,
+      size,
+      feeRateBps: 0,
+      atMs: parseAtMs({
+        matchTime: frame.match_time ?? frame.matchtime,
+        lastUpdate: frame.last_update,
+      }),
+    });
+  }
+  if (events.length > 0) {
+    return events;
+  }
+  const price = frame.price === undefined ? Number.NaN : Number(frame.price);
+  const size = frame.size === undefined ? Number.NaN : Number(frame.size);
   const feeRateBps =
-    frame.trader_side === "MAKER" ? 0 : Number(frame.fee_rate_bps);
+    frame.trader_side?.toUpperCase() === "MAKER" ||
+    frame.fee_rate_bps === undefined
+      ? 0
+      : Number(frame.fee_rate_bps);
   if (
     !Number.isFinite(price) ||
     !Number.isFinite(size) ||
     !Number.isFinite(feeRateBps)
   ) {
-    return null;
+    return [];
+  }
+  if (frame.asset_id === undefined) {
+    return [];
   }
   const side = tokenIdToSide.get(frame.asset_id) ?? null;
   if (side === null) {
-    return null;
+    return [];
   }
   const atMs = parseAtMs({
-    matchTime: frame.match_time,
+    matchTime: frame.match_time ?? frame.matchtime,
     lastUpdate: frame.last_update,
   });
-  return {
-    vendorRef: frame.market,
-    outcomeRef: frame.asset_id,
-    side,
-    price,
-    size,
-    feeRateBps,
-    atMs,
-  };
+  return [
+    {
+      vendorRef: frame.market,
+      outcomeRef: frame.asset_id,
+      side,
+      price,
+      size,
+      feeRateBps,
+      atMs,
+    },
+  ];
+}
+
+function tradeStatusCanFill({
+  status,
+}: {
+  readonly status: string | undefined;
+}): boolean {
+  if (status === undefined) {
+    return true;
+  }
+  const normalized = status.toUpperCase();
+  return (
+    normalized === "MATCHED" ||
+    normalized === "MINED" ||
+    normalized === "CONFIRMED"
+  );
 }
 
 function parseAtMs({
@@ -260,14 +349,29 @@ const tradeFrameSchema = z
   .object({
     event_type: z.string().optional(),
     market: z.string(),
-    asset_id: z.string(),
+    id: z.string().optional(),
+    asset_id: z.string().optional(),
     side: z.string().optional(),
-    size: z.string(),
-    price: z.string(),
-    fee_rate_bps: z.string(),
+    size: z.string().optional(),
+    price: z.string().optional(),
+    fee_rate_bps: z.string().optional(),
     status: z.string().optional(),
     trader_side: z.string().optional(),
+    timestamp: z.string().optional(),
     match_time: z.string().optional(),
+    matchtime: z.string().optional(),
     last_update: z.string().optional(),
+    maker_orders: z
+      .array(
+        z
+          .object({
+            asset_id: z.string(),
+            matched_amount: z.string(),
+            price: z.string(),
+            fee_rate_bps: z.string().optional(),
+          })
+          .passthrough(),
+      )
+      .optional(),
   })
   .passthrough();

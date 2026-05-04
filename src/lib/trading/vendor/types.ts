@@ -34,10 +34,29 @@ export type TradableMarket = {
   readonly downRef: string;
   readonly acceptingOrders: boolean;
   /**
+   * Venue-provided trading constraints for this market, when the
+   * adapter has hydrated them. The live runner treats missing
+   * constraints as "do not place" for real venues; tests and dry-run
+   * fakes may omit them when no order will be posted.
+   */
+  readonly constraints?: MarketOrderConstraints;
+  /**
    * Optional human-friendly identifier (Polymarket slug, Kalshi
    * ticker, etc.) for log lines. Never used as an API input.
    */
   readonly displayLabel?: string;
+};
+
+export type MarketOrderConstraints = {
+  /** Minimum valid price increment, e.g. 0.01 or 0.001. */
+  readonly priceTickSize: number;
+  /** Minimum order size in shares/contracts. */
+  readonly minOrderSize: number;
+  /** Minimum age in seconds before a resting order can be cancelled. */
+  readonly minimumOrderAgeSeconds: number;
+  readonly makerBaseFeeBps: number | null;
+  readonly takerBaseFeeBps: number | null;
+  readonly feesTakerOnly: boolean | null;
 };
 
 export type TopOfBook = {
@@ -59,6 +78,8 @@ export type PlacedOrder = {
   readonly limitPrice: number;
   readonly sharesIfFilled: number;
   readonly feeRateBps: number;
+  readonly orderType: "GTC" | "GTD";
+  readonly expiresAtMs: number | null;
   readonly placedAtMs: number;
 };
 
@@ -175,6 +196,7 @@ export type Vendor = {
     readonly side: LeadingSide;
     readonly limitPrice: number;
     readonly stakeUsd: number;
+    readonly expireBeforeMs: number;
   }): Promise<PlacedOrder>;
 
   cancelOrder(input: { readonly orderId: string }): Promise<CancelResult>;

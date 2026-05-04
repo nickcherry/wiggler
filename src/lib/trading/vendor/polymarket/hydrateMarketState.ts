@@ -5,7 +5,7 @@ import type {
   PlacedOrder,
   TradableMarket,
 } from "@alea/lib/trading/vendor/types";
-import type { ClobClient, OpenOrder, Trade } from "@polymarket/clob-client";
+import type { ClobClient, OpenOrder, Trade } from "@polymarket/clob-client-v2";
 
 /**
  * Polymarket implementation of `Vendor.hydrateMarketState`. The runner
@@ -86,6 +86,11 @@ function pickOpenOrder({
       limitPrice,
       sharesIfFilled: originalSize,
       feeRateBps: 0,
+      orderType: order.order_type === "GTD" ? "GTD" : "GTC",
+      expiresAtMs:
+        order.order_type === "GTD" && Number.isFinite(Number(order.expiration))
+          ? Number(order.expiration) * 1000
+          : null,
       placedAtMs:
         typeof order.created_at === "number"
           ? order.created_at * 1000

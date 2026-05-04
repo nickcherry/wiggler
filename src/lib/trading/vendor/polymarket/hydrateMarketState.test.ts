@@ -5,7 +5,7 @@ import {
   type OpenOrder,
   Side,
   type Trade,
-} from "@polymarket/clob-client";
+} from "@polymarket/clob-client-v2";
 import { describe, expect, it } from "bun:test";
 
 const market: TradableMarket = {
@@ -126,6 +126,8 @@ describe("hydratePolymarketMarketState", () => {
       limitPrice: 0.37,
       sharesIfFilled: 15,
       feeRateBps: 0,
+      orderType: "GTC",
+      expiresAtMs: null,
       placedAtMs: 200_000,
     });
     expect(result).toMatchObject({

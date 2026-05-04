@@ -127,9 +127,9 @@ factory swap at the CLI layer.
 
 The orchestrator (`runLive.ts`) only does three things:
 
-1. **Boot.** Hydrate lifetime PnL (load checkpoint, or scan vendor
-   trade history on cold start). Hydrate EMA-50. Open the Binance
-   WS feed. Open the vendor's user fill stream.
+1. **Boot.** Hydrate lifetime PnL from the checkpoint, then reconcile it
+   against vendor trade history. Hydrate EMA-50. Open the Binance WS feed.
+   Open the vendor's user fill stream.
 2. **Tick.** Every 250 ms, detect window rollover, capture lines,
    evaluate decisions, fire `placeWithRetry` for empty slots that
    pass the edge filter.
@@ -146,9 +146,9 @@ Polymarket happens to expose it today:
 
 | Method               | Purpose                                                  | Network shape                                     |
 | -------------------- | -------------------------------------------------------- | ------------------------------------------------- |
-| `discoverMarket`     | Locate the venue's market for an `(asset, windowStart)`  | One REST GET                                      |
-| `fetchBook`          | Top-of-book for both up/down YES tokens                  | Two parallel REST GETs                            |
-| `placeMakerLimitBuy` | Sign + post a `postOnly: true` GTC limit BUY             | One REST POST (signed)                            |
+| `discoverMarket`     | Locate the venue's market for an `(asset, windowStart)`  | REST GETs for Gamma + venue constraints           |
+| `fetchBook`          | Top-of-book plus venue tick/min-size constraints         | Two parallel REST GETs                            |
+| `placeMakerLimitBuy` | Sign + post a `postOnly: true` GTD limit BUY             | One REST POST (signed)                            |
 | `cancelOrder`        | Cancel a resting order by id                             | One REST POST (signed)                            |
 | `streamUserFills`    | Long-lived WS for our wallet's fill events               | One auth WS, auto-reconnecting                    |
 | `hydrateMarketState` | Open orders + cumulative fills for one market            | Two parallel REST GETs (signed)                   |
@@ -183,10 +183,12 @@ T+0…+1m  vendor.discoverMarket completes per asset. Line is captured
 
 T+1m     remaining = 4. evaluateDecision returns its first non-null
          decision. If TAKE + slot still empty + market acceptingOrders:
-         placeWithRetry fires. On postOnly rejection it refreshes the
-         book and re-evaluates against the moved spread; gives up
-         when the edge drops below MIN_EDGE or the cancel margin is
-         reached.
+         placeWithRetry forces a just-in-time book refresh, re-runs the
+         decision against that fresh book, and posts a V2 GTD post-only
+         BUY that expires at T+5m - ORDER_CANCEL_MARGIN_MS. On postOnly
+         rejection it refreshes the book again and re-evaluates against
+         the moved spread; gives up when the edge drops below MIN_EDGE
+         or the venue GTD validity buffer would be violated.
 
 T+2m,3m,4m  remaining flips to 3, 2, 1. The placement loop only fires
          at most once per window (slot stops being empty after the
@@ -251,8 +253,8 @@ Public unauthenticated REST. Slug pattern is fixed: `<asset>-updown-5m-<unixSeco
 | `GET /trades?market=...`                      | Boot-time hydration per market                | 5 markets per window                            | ~150 ms         |
 | `POST /order` (auth)                          | Place one maker limit BUY                     | 0–1 per asset per window                        | ~250–500 ms     |
 | `POST /order/cancel` (auth)                   | Cancel a residual order                       | ≤5 per window (one per active slot)             | ~200–400 ms     |
-| `GET /trades` (paginated, auth)               | Lifetime PnL scan (cold start only)           | One pagination walk per cold start              | ~150 ms × pages |
-| `GET /markets/<conditionId>` (concurrency 10) | Lifetime PnL scan resolution lookup           | ≤N unique markets per cold start                | ~200 ms each    |
+| `GET /trades` (paginated, auth)               | Lifetime PnL reconciliation                   | One pagination walk per live startup            | ~150 ms × pages |
+| `GET /markets/<conditionId>` (concurrency 10) | Lifetime PnL reconciliation resolution lookup | ≤N unique markets per live startup              | ~200 ms each    |
 
 A full lifetime scan over a fresh wallet is under a second; over a
 several-thousand-trade wallet it can take 30 s – 2 min depending on
@@ -285,7 +287,7 @@ loop. A failed send logs a `warn` and keeps moving.
 
 | Path                                   | Usage                   | Frequency                                   |
 | -------------------------------------- | ----------------------- | ------------------------------------------- |
-| `tmp/lifetime-pnl.json` (atomic write) | Lifetime PnL checkpoint | Read at boot; rewritten once per window-end |
+| `tmp/lifetime-pnl.json` (atomic write) | Lifetime PnL checkpoint | Read at boot; rewritten after startup reconciliation and once per window-end |
 
 ## Failure modes and recovery
 
@@ -300,6 +302,7 @@ reading a long log stretch knows what's normal:
 | `${asset} no polymarket market for window …` | Slug not yet in gamma-api                       | Skip this asset for the window; retry on next 5m boundary                                                                          |
 | `${asset} postOnly rejection (#N)`           | Price moved between book read and post          | Re-fetch book → re-evaluate → retry; counted in window summary as `Cross-book rejections`                                          |
 | `${asset} place failed (after retry)`        | Generic post error, even after one silent retry | Skip this asset for the window; fire-and-forget Telegram alert                                                                     |
+| `lifetime pnl reconciliation failed`         | Startup venue-truth scan failed after a checkpoint loaded | Keep the loaded checkpoint and continue; operator can run `trading:hydrate-lifetime-pnl` manually                                  |
 | `lifetime pnl persist failed`                | Disk error on the checkpoint write              | Continue; the in-memory accumulator is still correct, next window will retry the persist                                           |
 | `window summary telegram send failed`        | Telegram API hiccup                             | Continue; the next window's summary will reflect the same lifetime total                                                           |
 | `${asset} state hydration failed`            | `getOpenOrders` or `getTrades` failed at boot   | Slot starts empty; if there was a leftover open order on the venue we'll observe its fill via the user WS, or cancel it at wrap-up |
@@ -399,10 +402,11 @@ debugging the model without risking a dollar.
 `bun alea trading:live --commit` is the production trader.
 Constructs the Polymarket vendor with `eagerAuth: true` (fails fast
 on missing wallet env), opens all the streams, places maker-only
-GTC limit BUYs ($20 stake), watches fills via the user WS, settles
-each window with real PnL net of the same normalized Polymarket fill
-fees used by the performance dashboard, and ships the per-window
-Telegram summary. Refuses to start without `--commit`.
+GTD limit BUYs ($20 stake) with venue-provided tick/min-size
+constraints, watches fills via the user WS, settles each window with
+real PnL net of the same normalized Polymarket fill fees used by the
+performance dashboard, and ships the per-window Telegram summary.
+Refuses to start without `--commit`.
 
 ### `trading:hydrate-lifetime-pnl`
 

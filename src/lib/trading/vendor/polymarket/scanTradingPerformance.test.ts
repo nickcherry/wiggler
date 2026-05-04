@@ -2,7 +2,7 @@ import {
   scanPolymarketTradingPerformance,
   type TradingPerformanceScanProgress,
 } from "@alea/lib/trading/vendor/polymarket/scanTradingPerformance";
-import type { ClobClient } from "@polymarket/clob-client";
+import type { ClobClient } from "@polymarket/clob-client-v2";
 import { describe, expect, it } from "bun:test";
 
 function clientWith({

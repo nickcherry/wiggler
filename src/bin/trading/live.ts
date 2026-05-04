@@ -33,7 +33,7 @@ export const tradingLiveCommand = defineCommand({
   summary:
     "Run the live trader (maker-only limit orders, real money). Requires --commit.",
   description:
-    "Hydrates EMA-50 from Binance, opens the Binance perp WS, opens the Polymarket user WS, evaluates the same decision pipeline trading:dry-run uses, and posts maker-only GTC limit BUY orders ($STAKE_USD per trade) on the side with the largest edge over the current Polymarket bid. Cancels residual orders 10s before window close, settles filled positions on the kline_5m close, and ships a per-window Telegram summary including REAL PnL net of fees. In-memory state only; Polymarket is the source of truth and the runner re-hydrates from getOpenOrders + getTrades on every market discovery.",
+    "Hydrates EMA-50 from Binance, opens the Binance perp WS, opens the Polymarket user WS, evaluates the same decision pipeline trading:dry-run uses, and posts maker-only GTD limit BUY orders ($STAKE_USD per trade) on the side with the largest edge over the current Polymarket bid. Orders use venue tick/min-size constraints and expire before window close, with cancel as a backup. Settles filled positions on the kline_5m close and ships a per-window Telegram summary including REAL PnL net of fees. In-memory state only; Polymarket is the source of truth and the runner re-hydrates from getOpenOrders + getTrades on every market discovery.",
   options: [
     defineValueOption({
       key: "assets",
@@ -77,7 +77,7 @@ export const tradingLiveCommand = defineCommand({
   output:
     "Streams a one-line-per-event log: boot, ws connects/disconnects, decisions, order placements, fills, and per-window summaries.",
   sideEffects:
-    "Posts maker-only GTC limit BUY orders on Polymarket for matched (side, edge) signals. Sends Telegram messages on every order placement and once per window summary. Reads from fapi.binance.com (REST + WS) and Polymarket (gamma-api, CLOB REST + WS).",
+    "Posts maker-only GTD limit BUY orders on Polymarket for matched (side, edge) signals. Sends Telegram messages on every order placement and once per window summary. Reads from fapi.binance.com (REST + WS) and Polymarket (gamma-api, CLOB REST + WS).",
   async run({ io, options }) {
     if (probabilityTable.assets.length === 0) {
       throw new CliUsageError(

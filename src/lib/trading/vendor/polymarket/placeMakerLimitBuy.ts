@@ -1,11 +1,14 @@
 import type { LeadingSide } from "@alea/lib/trading/types";
+import type { PolymarketOrderConstraints } from "@alea/lib/trading/vendor/polymarket/marketConstraints";
 import {
   type PlacedOrder,
   PostOnlyRejectionError,
   type TradableMarket,
 } from "@alea/lib/trading/vendor/types";
-import { type ClobClient, OrderType, Side } from "@polymarket/clob-client";
+import { type ClobClient, OrderType, Side } from "@polymarket/clob-client-v2";
 import { z } from "zod";
+
+const GTD_MIN_VALIDITY_MS = 60_000;
 
 /**
  * Maker-only limit BUY of a YES outcome token on Polymarket. Posts
@@ -17,7 +20,9 @@ import { z } from "zod";
  *
  * Order size is computed as `stakeUsd / limitPrice`, rounded down to
  * Polymarket's 2-decimal share quantum so the resulting cost stays
- * ≤ stake. Limit price is rounded to the venue's 0.01 tick.
+ * ≤ stake. Limit price is rounded down to the market's venue-provided
+ * tick size, and the placed order is GTD so it expires before the
+ * five-minute market closes even if our cancel call fails.
  *
  * Translates Polymarket's free-form rejection error into the typed
  * `PostOnlyRejectionError` so the runner's retry loop can distinguish
@@ -29,21 +34,36 @@ export async function placePolymarketMakerLimitBuy({
   side,
   limitPrice,
   stakeUsd,
-  negRisk,
+  expireBeforeMs,
+  constraints,
 }: {
   readonly client: ClobClient;
   readonly market: TradableMarket;
   readonly side: LeadingSide;
   readonly limitPrice: number;
   readonly stakeUsd: number;
-  readonly negRisk: boolean;
+  readonly expireBeforeMs: number;
+  readonly constraints: PolymarketOrderConstraints;
 }): Promise<PlacedOrder> {
   if (!Number.isFinite(limitPrice) || limitPrice <= 0 || limitPrice >= 1) {
     throw new Error(
       `placePolymarketMakerLimitBuy: limitPrice must be in (0, 1), got ${limitPrice}`,
     );
   }
-  const tickedPrice = Math.round(limitPrice * 100) / 100;
+  const nowMs = Date.now();
+  const minimumValidityMs = Math.max(
+    GTD_MIN_VALIDITY_MS,
+    constraints.minimumOrderAgeSeconds * 1000,
+  );
+  if (nowMs + minimumValidityMs >= expireBeforeMs) {
+    throw new Error(
+      `placePolymarketMakerLimitBuy: not enough time before GTD expiry to satisfy minimum validity (${minimumValidityMs}ms)`,
+    );
+  }
+  const tickedPrice = floorToTick({
+    price: limitPrice,
+    tickSize: constraints.priceTickSize,
+  });
   if (tickedPrice <= 0 || tickedPrice >= 1) {
     throw new Error(
       `placePolymarketMakerLimitBuy: ticked price ${tickedPrice} fell outside (0, 1)`,
@@ -56,7 +76,13 @@ export async function placePolymarketMakerLimitBuy({
       `placePolymarketMakerLimitBuy: computed shares ≤ 0 (price=${tickedPrice}, stake=${stakeUsd})`,
     );
   }
+  if (shares < constraints.minOrderSize) {
+    throw new Error(
+      `placePolymarketMakerLimitBuy: computed shares ${shares} below venue minimum ${constraints.minOrderSize}`,
+    );
+  }
   const tokenId = side === "up" ? market.upRef : market.downRef;
+  const expiration = Math.floor(expireBeforeMs / 1000);
 
   const signed = await client.createOrder(
     {
@@ -64,16 +90,16 @@ export async function placePolymarketMakerLimitBuy({
       price: tickedPrice,
       size: shares,
       side: Side.BUY,
-      feeRateBps: 0,
+      expiration,
     },
-    { negRisk },
+    { negRisk: constraints.negRisk, tickSize: constraints.tickSize },
   );
 
   const response = await client.postOrder(
     signed,
-    OrderType.GTC,
-    /* deferExec */ false,
+    OrderType.GTD,
     /* postOnly */ true,
+    /* deferExec */ false,
   );
 
   const parsed = postOrderResponseSchema.safeParse(response);
@@ -82,8 +108,10 @@ export async function placePolymarketMakerLimitBuy({
       `placePolymarketMakerLimitBuy: unexpected postOrder response shape: ${JSON.stringify(response)}`,
     );
   }
-  if (parsed.data.success === false) {
-    const errorMsg = parsed.data.errorMsg ?? "unknown error";
+  const responseError =
+    nonEmptyString(parsed.data.errorMsg) ?? nonEmptyString(parsed.data.error);
+  if (parsed.data.success === false || responseError !== undefined) {
+    const errorMsg = responseError ?? "unknown error";
     if (looksLikePostOnlyRejection({ message: errorMsg })) {
       throw new PostOnlyRejectionError(errorMsg);
     }
@@ -107,8 +135,40 @@ export async function placePolymarketMakerLimitBuy({
     limitPrice: tickedPrice,
     sharesIfFilled: shares,
     feeRateBps: 0,
-    placedAtMs: Date.now(),
+    orderType: "GTD",
+    expiresAtMs: expireBeforeMs,
+    placedAtMs: nowMs,
   };
+}
+
+function nonEmptyString(value: string | undefined): string | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  const trimmed = value.trim();
+  return trimmed.length === 0 ? undefined : trimmed;
+}
+
+function floorToTick({
+  price,
+  tickSize,
+}: {
+  readonly price: number;
+  readonly tickSize: number;
+}): number {
+  if (!Number.isFinite(tickSize) || tickSize <= 0) {
+    throw new Error(`invalid tick size ${tickSize}`);
+  }
+  const decimals = decimalPlaces({ value: tickSize });
+  return Number(
+    (Math.floor((price + 1e-12) / tickSize) * tickSize).toFixed(decimals),
+  );
+}
+
+function decimalPlaces({ value }: { readonly value: number }): number {
+  const text = value.toString();
+  const decimal = text.indexOf(".");
+  return decimal === -1 ? 0 : text.length - decimal - 1;
 }
 
 /**
@@ -137,6 +197,8 @@ const postOrderResponseSchema = z
   .object({
     success: z.boolean().optional(),
     errorMsg: z.string().optional(),
+    error: z.string().optional(),
+    status: z.union([z.number(), z.string()]).optional(),
     orderID: z.string().optional(),
   })
   .passthrough();

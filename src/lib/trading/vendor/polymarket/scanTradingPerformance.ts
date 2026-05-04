@@ -4,7 +4,7 @@ import {
   type TradingPerformanceInputTrade,
 } from "@alea/lib/trading/performance/buildTradingPerformancePayload";
 import type { TradingPerformancePayload } from "@alea/lib/trading/performance/types";
-import type { ClobClient } from "@polymarket/clob-client";
+import type { ClobClient } from "@polymarket/clob-client-v2";
 import { z } from "zod";
 
 const MARKET_LOOKUP_CONCURRENCY = 10;

@@ -1,5 +1,5 @@
 import { cancelPolymarketOrder } from "@alea/lib/trading/vendor/polymarket/cancelOrder";
-import type { ClobClient, OrderPayload } from "@polymarket/clob-client";
+import type { ClobClient, OrderPayload } from "@polymarket/clob-client-v2";
 import { describe, expect, it } from "bun:test";
 
 function clientWithCancel(

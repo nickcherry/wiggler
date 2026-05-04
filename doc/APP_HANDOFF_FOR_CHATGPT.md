@@ -71,7 +71,7 @@ Runtime and language:
 - PostgreSQL is the only database.
 - Kysely is the typed SQL/migration layer.
 - `pg` and `pg-cursor` are the Postgres drivers/cursor utilities.
-- Polymarket integration uses `@polymarket/clob-client` and `ethers`.
+- Polymarket integration uses `@polymarket/clob-client-v2` and `ethers`.
 - CLI color output uses `picocolors`.
 
 Package scripts:
@@ -187,7 +187,7 @@ CLI framework details:
 Assets:
 
 - `src/constants/assets.ts` defines `assetValues = ["btc", "eth", "sol",
-  "xrp", "doge"]`.
+"xrp", "doge"]`.
 - `src/types/assets.ts` defines the matching Zod enum and `Asset` type.
 
 Candle dimensions:
@@ -228,7 +228,8 @@ Environment constants in `src/constants/env.ts`:
 Polymarket constants in `src/constants/polymarket.ts`:
 
 - Polygon chain id.
-- API key nonce 0.
+- L1 auth API key nonce 0. V2 orders themselves do not carry the old V1
+  order nonce.
 - Signature type for Polymarket Gnosis Safe usage.
 - CLOB REST URL.
 - Gamma API URL.
@@ -845,12 +846,12 @@ Current committed generated table:
 Current generated table per-asset summary:
 
 | Asset | Aligned window share | Sweet spot | Sweet calibration raw | Coverage | Buckets aligned/not |
-| --- | ---: | --- | ---: | ---: | ---: |
-| BTC | 51.56% | 3-8 bp | 0.0093824443 | 38.18% | 24 / 24 |
-| ETH | 48.65% | 5-11 bp | 0.0089335477 | 30.66% | 28 / 28 |
-| SOL | 49.27% | 11-18 bp | 0.0089491764 | 19.05% | 32 / 32 |
-| XRP | 48.22% | 7-14 bp | 0.0102903027 | 25.52% | 32 / 32 |
-| DOGE | 48.88% | 8-16 bp | 0.0093379306 | 25.49% | 36 / 36 |
+| ----- | -------------------: | ---------- | --------------------: | -------: | ------------------: |
+| BTC   |               51.56% | 3-8 bp     |          0.0093824443 |   38.18% |             24 / 24 |
+| ETH   |               48.65% | 5-11 bp    |          0.0089335477 |   30.66% |             28 / 28 |
+| SOL   |               49.27% | 11-18 bp   |          0.0089491764 |   19.05% |             32 / 32 |
+| XRP   |               48.22% | 7-14 bp    |          0.0102903027 |   25.52% |             32 / 32 |
+| DOGE  |               48.88% | 8-16 bp    |          0.0093379306 |   25.49% |             36 / 36 |
 
 Important runtime/source distinction:
 
@@ -977,7 +978,8 @@ Behavior:
 - It creates an ethers wallet from the private key.
 - It constructs an unauthenticated CLOB client to fetch server time and create
   or derive the L2 API key bundle.
-- It uses nonce 0.
+- It uses nonce 0 for L1 API credential auth. V2 order signing does not
+  submit an order nonce.
 - It checks Polymarket server time against local clock.
 - If absolute clock drift exceeds 30 seconds, initialization fails.
 - It memoizes the authenticated client and credential state for the process.
@@ -1044,13 +1046,15 @@ Source:
 Behavior:
 
 - Only BUY orders are placed.
-- Orders are GTC.
+- Orders are GTD and expire before the five-minute window close.
 - `postOnly: true` is passed to Polymarket CLOB.
-- `feeRateBps: 0` is submitted for maker orders.
-- Limit price is rounded to the 0.01 venue tick.
+- `feeRateBps` is not submitted on V2 orders; fees are read from venue
+  metadata and historical trade records.
+- Limit price is floored to the venue-provided tick size.
 - Shares are computed as `stakeUsd / tickedPrice`, rounded down to two decimal
   share quantum so notional cost stays at or below stake.
-- `negRisk` is passed from the discovery cache.
+- `negRisk`, tick size, minimum order size, fee metadata, and minimum order age
+  are hydrated from the venue and cached by condition id.
 - Polymarket's free-form post-only rejection phrases are translated into
   `PostOnlyRejectionError`.
 - Unknown placement failures throw generic errors.
@@ -1250,7 +1254,7 @@ Core runtime:
 - Uses Polymarket as the venue through the vendor abstraction.
 - Polls Polymarket books.
 - Watches Polymarket user fills.
-- Places maker-only GTC BUY orders.
+- Places maker-only GTD BUY orders.
 - Cancels residual orders before window close.
 - Settles filled slots after the Binance five-minute close.
 - Sends Telegram alerts for placements and summaries.
@@ -1341,9 +1345,11 @@ Rules:
 1. Emit startup line with vendor, assets, stake, min edge, wallet prefix.
 2. Bootstrap lifetime PnL:
    - Load `tmp/lifetime-pnl.json` if wallet matches.
-   - Otherwise scan full vendor trade history.
+   - Reconcile against full vendor trade history on startup.
    - Persist scan result.
-   - On scan failure, log error and start from zero.
+   - On scan failure after a checkpoint loaded, keep the checkpoint and log a
+     warning.
+   - On scan failure without a checkpoint, log error and start from zero.
 3. Create EMA and ATR trackers per asset.
 4. Hydrate trackers from recent Binance five-minute bars.
 5. Open Binance perp websocket.
@@ -1565,10 +1571,12 @@ Behavior:
 
 - Stores wallet address, lifetime PnL USD, and as-of time.
 - Writes atomically.
-- If file missing, corrupt, or wallet mismatch, live bootstrap does a full
-  vendor scan.
+- Live bootstrap always does a venue-truth reconciliation scan.
 - If full scan succeeds, persists checkpoint.
-- If full scan fails, live runner logs error and starts lifetime total at zero.
+- If full scan fails after a checkpoint loaded, live runner keeps the loaded
+  checkpoint and logs a warning.
+- If full scan fails without a checkpoint, live runner logs error and starts
+  lifetime total at zero.
 - Operator can manually rescan with `trading:hydrate-lifetime-pnl`.
 
 ## Telegram Integration
@@ -1911,7 +1919,7 @@ These are facts encoded in current code or docs.
 - Runtime probability lookup requires exact bucket match.
 - Runtime skips distances under 2 bp.
 - Production table currently stores only buckets inside each asset sweet spot.
-- Live orders are post-only maker GTC buys.
+- Live orders are post-only maker GTD buys with a pre-close expiration.
 - Live runner never intentionally crosses the spread.
 - Live runner only starts with `--commit`.
 - Live runner requires Telegram credentials.

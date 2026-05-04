@@ -28,7 +28,7 @@
     "typescript-eslint": "^8.48.1"
   },
   "dependencies": {
-    "@polymarket/clob-client": "^5.8.1",
+    "@polymarket/clob-client-v2": "^1.0.3",
     "ethers": "5",
     "kysely": "^0.28.15",
     "pg": "^8.20.0",

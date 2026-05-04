@@ -1,4 +1,8 @@
 import { polymarket } from "@alea/constants/polymarket";
+import {
+  mergePolymarketOrderConstraints,
+  parseClobMarketInfoConstraints,
+} from "@alea/lib/trading/vendor/polymarket/marketConstraints";
 import type { TradableMarket } from "@alea/lib/trading/vendor/types";
 import type { Asset } from "@alea/types/assets";
 import { z } from "zod";
@@ -74,6 +78,11 @@ export async function discoverPolymarketMarket({
     return null;
   }
   const windowStartMs = windowStartUnixSeconds * 1000;
+  const clobConstraints = await fetchClobMarketInfoConstraints({
+    conditionId: market.conditionId,
+    fallbackNegRisk: market.negRisk ?? false,
+    signal,
+  }).catch(() => null);
   return {
     market: {
       asset,
@@ -84,10 +93,39 @@ export async function discoverPolymarketMarket({
       upRef,
       downRef,
       acceptingOrders: market.acceptingOrders ?? false,
+      constraints:
+        clobConstraints === null
+          ? undefined
+          : mergePolymarketOrderConstraints(clobConstraints),
       displayLabel: slug,
     },
     negRisk: market.negRisk ?? false,
   };
+}
+
+async function fetchClobMarketInfoConstraints({
+  conditionId,
+  fallbackNegRisk,
+  signal,
+}: {
+  readonly conditionId: string;
+  readonly fallbackNegRisk: boolean;
+  readonly signal?: AbortSignal;
+}) {
+  const url = `${polymarket.clobApiUrl}/clob-markets/${conditionId}`;
+  const response = await fetch(url, {
+    headers: { "User-Agent": "alea/1.0" },
+    signal,
+  });
+  if (!response.ok) {
+    throw new Error(
+      `CLOB /clob-markets/${conditionId} failed: ${response.status} ${await response.text()}`,
+    );
+  }
+  return parseClobMarketInfoConstraints({
+    raw: await response.json(),
+    fallbackNegRisk,
+  });
 }
 
 function parseStringArray(value: string | undefined): string[] | null {

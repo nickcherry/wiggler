@@ -8,7 +8,7 @@ import type {
   LifetimePnlScanProgress,
   LifetimePnlScanResult,
 } from "@alea/lib/trading/vendor/types";
-import type { ClobClient } from "@polymarket/clob-client";
+import type { ClobClient } from "@polymarket/clob-client-v2";
 import { z } from "zod";
 
 const MARKET_LOOKUP_CONCURRENCY = 10;

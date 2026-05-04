@@ -3,11 +3,12 @@ import { cancelPolymarketOrder } from "@alea/lib/trading/vendor/polymarket/cance
 import { discoverPolymarketMarket } from "@alea/lib/trading/vendor/polymarket/discoverMarket";
 import { fetchPolymarketBook } from "@alea/lib/trading/vendor/polymarket/fetchBook";
 import { hydratePolymarketMarketState } from "@alea/lib/trading/vendor/polymarket/hydrateMarketState";
+import type { PolymarketOrderConstraints } from "@alea/lib/trading/vendor/polymarket/marketConstraints";
 import { placePolymarketMakerLimitBuy } from "@alea/lib/trading/vendor/polymarket/placeMakerLimitBuy";
 import { scanPolymarketLifetimePnl } from "@alea/lib/trading/vendor/polymarket/scanLifetimePnl";
 import { streamPolymarketUserFills } from "@alea/lib/trading/vendor/polymarket/streamUserFills";
 import type { Vendor } from "@alea/lib/trading/vendor/types";
-import type { ClobClient } from "@polymarket/clob-client";
+import type { ClobClient } from "@polymarket/clob-client-v2";
 
 export type CreatePolymarketVendorOptions = {
   /**
@@ -31,17 +32,19 @@ export type CreatePolymarketVendorOptions = {
  * `eagerAuth: true` to fail fast at construction when running the
  * live trader.
  *
- * `negRiskByConditionId` is the only piece of vendor-internal state
+ * `constraintsByConditionId` is the only piece of vendor-internal state
  * the implementation maintains beyond the auth bundle: it caches the
- * `neg_risk` flag returned by `discoverMarket` so `placeMakerLimitBuy`
- * doesn't have to re-fetch the market on every order. Falls back to
- * `false` for any conditionId we somehow weren't told about — the
- * standard up/down 5m markets are non-negRisk anyway.
+ * venue-provided tick, size, fee, age, and neg-risk parameters returned
+ * by market discovery and book hydration so `placeMakerLimitBuy` never
+ * falls back to hardcoded venue assumptions.
  */
 export async function createPolymarketVendor(
   options: CreatePolymarketVendorOptions = {},
 ): Promise<Vendor> {
-  const negRiskByConditionId = new Map<string, boolean>();
+  const constraintsByConditionId = new Map<
+    string,
+    PolymarketOrderConstraints
+  >();
   let cachedAuth: { client: ClobClient; walletAddress: string } | null = null;
 
   const auth = async (): Promise<{
@@ -88,23 +91,50 @@ export async function createPolymarketVendor(
       if (result === null) {
         return null;
       }
-      negRiskByConditionId.set(result.market.vendorRef, result.negRisk);
+      if (result.market.constraints !== undefined) {
+        constraintsByConditionId.set(
+          result.market.vendorRef,
+          result.market.constraints as PolymarketOrderConstraints,
+        );
+      }
       return result.market;
     },
 
-    fetchBook({ market, signal }) {
-      return fetchPolymarketBook({ market, signal });
+    async fetchBook({ market, signal }) {
+      const book = await fetchPolymarketBook({ market, signal });
+      if (book.market.constraints !== undefined) {
+        constraintsByConditionId.set(
+          book.market.vendorRef,
+          book.market.constraints as PolymarketOrderConstraints,
+        );
+      }
+      return book;
     },
 
-    async placeMakerLimitBuy({ market, side, limitPrice, stakeUsd }) {
+    async placeMakerLimitBuy({
+      market,
+      side,
+      limitPrice,
+      stakeUsd,
+      expireBeforeMs,
+    }) {
       const { client } = await auth();
+      const constraints =
+        constraintsByConditionId.get(market.vendorRef) ??
+        (market.constraints as PolymarketOrderConstraints | undefined);
+      if (constraints === undefined) {
+        throw new Error(
+          `Polymarket constraints missing for ${market.vendorRef}; refusing to place an order without venue tick/min-size parameters.`,
+        );
+      }
       return placePolymarketMakerLimitBuy({
         client,
         market,
         side,
         limitPrice,
         stakeUsd,
-        negRisk: negRiskByConditionId.get(market.vendorRef) ?? false,
+        expireBeforeMs,
+        constraints,
       });
     },
 

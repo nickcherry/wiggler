@@ -182,6 +182,8 @@ function placedOrder(overrides: Partial<PlacedOrder> = {}): PlacedOrder {
     limitPrice: 0.6,
     sharesIfFilled: 33.33,
     feeRateBps: 0,
+    orderType: "GTD",
+    expiresAtMs: WINDOW_START + 5 * 60_000 - 10_000,
     placedAtMs: NOW,
     ...overrides,
   };
@@ -213,7 +215,7 @@ function vendorWith({
       return market;
     },
     async fetchBook() {
-      throw new Error("not used");
+      return books().get(market.vendorRef)!;
     },
     async placeMakerLimitBuy() {
       return place();
@@ -284,6 +286,36 @@ describe("placeWithRetry", () => {
     expect(placeCount).toBe(1);
     expect(assetRecord.slot).toEqual({ kind: "empty" });
     expect(events.some((event) => event.kind === "error")).toBe(true);
+  });
+
+  it("does not place when the just-in-time book refresh fails", async () => {
+    const assetRecord = record();
+    const events: LiveEvent[] = [];
+    let placeCount = 0;
+    const vendor = vendorWith({
+      place: async () => {
+        placeCount += 1;
+        return placedOrder();
+      },
+    });
+
+    await runPlacement({
+      record: assetRecord,
+      events,
+      vendor: {
+        ...vendor,
+        async fetchBook() {
+          throw new Error("book unavailable");
+        },
+      },
+    });
+
+    expect(placeCount).toBe(0);
+    expect(assetRecord.slot).toEqual({ kind: "empty" });
+    expect(events.at(-1)).toMatchObject({
+      kind: "warn",
+      message: "BTC   JIT book refresh failed before placement: book unavailable",
+    });
   });
 
   it("reconciles an ambiguous placement error to the venue open order", async () => {

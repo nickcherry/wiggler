@@ -50,6 +50,9 @@ describe("fetchPolymarketBook", () => {
           market: "condition",
           asset_id: "UP_TOKEN",
           timestamp: "1777900279143",
+          min_order_size: "5",
+          tick_size: "0.01",
+          neg_risk: true,
           bids: [
             { price: "0.01", size: "7338.13" },
             { price: "0.51", size: "10" },
@@ -67,6 +70,9 @@ describe("fetchPolymarketBook", () => {
         market: "condition",
         asset_id: "DOWN_TOKEN",
         timestamp: "1777900279143",
+        min_order_size: "5",
+        tick_size: "0.01",
+        neg_risk: true,
         bids: [],
         asks: [{ price: "0.49", size: "12" }],
       });
@@ -84,6 +90,18 @@ describe("fetchPolymarketBook", () => {
       market,
       up: { bestBid: 0.51, bestAsk: 0.53 },
       down: { bestBid: null, bestAsk: 0.49 },
+    });
+    expect(book.market.constraints as unknown).toEqual({
+      priceTickSize: 0.01,
+      tickSize: "0.01",
+      minOrderSize: 5,
+      minimumOrderAgeSeconds: 0,
+      makerBaseFeeBps: null,
+      takerBaseFeeBps: null,
+      feesTakerOnly: null,
+      negRisk: true,
+      rfqEnabled: null,
+      takerOrderDelayEnabled: null,
     });
     expect(book.fetchedAtMs).toBeGreaterThan(0);
   });

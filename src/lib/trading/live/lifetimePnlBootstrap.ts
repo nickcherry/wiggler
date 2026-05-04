@@ -7,9 +7,9 @@ import type { Vendor } from "@alea/lib/trading/vendor/types";
 
 /**
  * Boot-time lifetime PnL hydration. Loads the on-disk checkpoint if
- * it matches the running wallet; otherwise falls back to a vendor-
- * side trade-history scan so `Total Pnl` is *truly* lifetime, not
- * just since-process-start.
+ * it matches the running wallet, then reconciles it against a vendor-
+ * side trade-history scan so `Total Pnl` is venue truth, not a stale
+ * proxy-settled checkpoint.
  *
  * Always returns — failures are logged but the runner proceeds with
  * whatever value the bootstrap could produce (zero if all paths
@@ -18,13 +18,18 @@ import type { Vendor } from "@alea/lib/trading/vendor/types";
 export async function bootstrapLifetimePnl({
   vendor,
   lifetimePnl,
+  lifetimePnlPath,
   emit,
 }: {
   readonly vendor: Vendor;
   readonly lifetimePnl: LifetimePnlBox;
+  readonly lifetimePnlPath?: string;
   readonly emit: (event: LiveEvent) => void;
 }): Promise<void> {
-  const loaded = await loadLifetimePnl({ walletAddress: vendor.walletAddress });
+  const loaded = await loadLifetimePnl({
+    walletAddress: vendor.walletAddress,
+    path: lifetimePnlPath,
+  });
   if (loaded.source === "loaded") {
     lifetimePnl.value = loaded.lifetimePnlUsd;
     emit({
@@ -32,13 +37,18 @@ export async function bootstrapLifetimePnl({
       atMs: Date.now(),
       message: `lifetime pnl loaded: $${loaded.lifetimePnlUsd.toFixed(2)} (as-of ${new Date(loaded.asOfMs).toISOString()})`,
     });
-    return;
+    emit({
+      kind: "info",
+      atMs: Date.now(),
+      message: `lifetime pnl checkpoint loaded; reconciling ${vendor.id} trade history…`,
+    });
+  } else {
+    emit({
+      kind: "info",
+      atMs: Date.now(),
+      message: `lifetime pnl checkpoint ${loaded.reason}; scanning ${vendor.id} trade history…`,
+    });
   }
-  emit({
-    kind: "info",
-    atMs: Date.now(),
-    message: `lifetime pnl checkpoint ${loaded.reason}; scanning ${vendor.id} trade history…`,
-  });
   try {
     const scan = await vendor.scanLifetimePnl({
       onProgress: (event) => {
@@ -61,12 +71,13 @@ export async function bootstrapLifetimePnl({
     emit({
       kind: "info",
       atMs: Date.now(),
-      message: `lifetime pnl scanned: $${scan.lifetimePnlUsd.toFixed(2)} across ${scan.resolvedMarketsCounted} resolved markets (${scan.unresolvedMarketsSkipped} skipped, ${scan.tradesCounted} trades counted)`,
+      message: `lifetime pnl reconciled: $${scan.lifetimePnlUsd.toFixed(2)} across ${scan.resolvedMarketsCounted} resolved markets (${scan.unresolvedMarketsSkipped} skipped, ${scan.tradesCounted} trades counted)`,
     });
     try {
       await persistLifetimePnl({
         walletAddress: vendor.walletAddress,
         lifetimePnlUsd: lifetimePnl.value,
+        path: lifetimePnlPath,
       });
     } catch (error) {
       emit({
@@ -76,6 +87,14 @@ export async function bootstrapLifetimePnl({
       });
     }
   } catch (error) {
+    if (loaded.source === "loaded") {
+      emit({
+        kind: "warn",
+        atMs: Date.now(),
+        message: `lifetime pnl reconciliation failed: ${(error as Error).message}; keeping loaded checkpoint $${loaded.lifetimePnlUsd.toFixed(2)}`,
+      });
+      return;
+    }
     emit({
       kind: "error",
       atMs: Date.now(),
