@@ -21,6 +21,8 @@ function emptyContext(): SurvivalSnapshotContext {
     ema50SlopePct: null,
     rsi14x5m: null,
     roc20Pct: null,
+    atr3x5m: null,
+    atr4x5m: null,
     atr14x5m: null,
     atr50x5m: null,
     donchian50High: null,

@@ -107,9 +107,23 @@ export type SurvivalSnapshotContext = {
   readonly roc20Pct: number | null;
 
   /**
+   * 3-period Average True Range on 5m bars. Wilder's smoothing on
+   * `max(high−low, |high−prevClose|, |prevClose−low|)`. The May 2026
+   * period sweep found this to be the strongest average candidate for
+   * the distance-from-line filter.
+   */
+  readonly atr3x5m: number | null;
+
+  /**
+   * 4-period ATR on 5m bars. Near-tied with ATR-3 and useful as a
+   * dashboard comparator because it won more individual assets.
+   */
+  readonly atr4x5m: number | null;
+
+  /**
    * 14-period Average True Range on 5m bars. Wilder's smoothing on
-   * `max(high−low, |high−prevClose|, |prevClose−low|)`. Used as a
-   * volatility unit for stretch-from-mean and range-expansion filters.
+   * `max(high−low, |high−prevClose|, |prevClose−low|)`. Kept as the
+   * current production/dashboard comparison baseline.
    */
   readonly atr14x5m: number | null;
 
@@ -251,7 +265,7 @@ const MS_PER_1M = 60 * 1000;
  * any bump, so don't rev it for non-semantic refactors. Standalone export
  * so cache callers don't need to know the file's internals.
  */
-export const SNAPSHOT_PIPELINE_VERSION = 16;
+export const SNAPSHOT_PIPELINE_VERSION = 17;
 
 /**
  * Walks the 1m candle series, emitting one `SurvivalSnapshot` per usable
@@ -302,6 +316,8 @@ export function* computeSurvivalSnapshots({
     const ema50SlopePct = ma20Index?.ema50SlopePctAt({ windowStartMs }) ?? null;
     const rsi14x5m = ma20Index?.rsi14At({ windowStartMs }) ?? null;
     const roc20Pct = ma20Index?.roc20PctAt({ windowStartMs }) ?? null;
+    const atr3x5m = ma20Index?.atrAt({ windowStartMs, period: 3 }) ?? null;
+    const atr4x5m = ma20Index?.atrAt({ windowStartMs, period: 4 }) ?? null;
     const atr14x5m = ma20Index?.atrAt({ windowStartMs, period: 14 }) ?? null;
     const atr50x5m = ma20Index?.atrAt({ windowStartMs, period: 50 }) ?? null;
     const donchian50 =
@@ -385,6 +401,8 @@ export function* computeSurvivalSnapshots({
           ema50SlopePct,
           rsi14x5m,
           roc20Pct,
+          atr3x5m,
+          atr4x5m,
           atr14x5m,
           atr50x5m,
           donchian50High: donchian50?.high ?? null,
@@ -465,7 +483,7 @@ function* iterateWindows(candles: readonly Candle[]): Generator<{
  *   - `ema50SlopePctAt` — % change in EMA-50 over the last 10 bars.
  *   - `rsi14At` — 14-period Wilder RSI on closes.
  *   - `roc20PctAt` — 20-bar % rate of change.
- *   - `atrAt({ period })` — N-period Wilder ATR (14 and 50 supported).
+ *   - `atrAt({ period })` — N-period Wilder ATR (3, 4, 14, and 50 supported).
  *   - `donchianAt({ period })` — N-bar high/low range (50 supported).
  *   - `prevBarAt` — OHLC of the most recent completed bar.
  *   - `lastThreeDirectionsAt` / `lastFiveDirectionsAt` — directions of the
@@ -499,7 +517,7 @@ type FiveMinuteIndex = {
   }) => number | null;
   readonly atrAt: (input: {
     readonly windowStartMs: number;
-    readonly period: 14 | 50;
+    readonly period: 3 | 4 | 14 | 50;
   }) => number | null;
   readonly donchianAt: (input: {
     readonly windowStartMs: number;
@@ -618,6 +636,8 @@ function build5mLookback({
   const ema20 = computeEmaSeries({ closes, period: 20 });
   const ema50 = computeEmaSeries({ closes, period: 50 });
   const rsi14 = computeWilderRsiSeries({ closes, period: 14 });
+  const atr3 = computeWilderAtrSeries({ highs, lows, closes, period: 3 });
+  const atr4 = computeWilderAtrSeries({ highs, lows, closes, period: 4 });
   const atr14 = computeWilderAtrSeries({ highs, lows, closes, period: 14 });
   const atr50 = computeWilderAtrSeries({ highs, lows, closes, period: 50 });
 
@@ -730,7 +750,14 @@ function build5mLookback({
       if (lastIdx < 0) {
         return null;
       }
-      const series = period === 14 ? atr14 : atr50;
+      const series =
+        period === 3
+          ? atr3
+          : period === 4
+            ? atr4
+            : period === 14
+              ? atr14
+              : atr50;
       return series[lastIdx] ?? null;
     },
     donchianAt: ({ windowStartMs, period }) => {

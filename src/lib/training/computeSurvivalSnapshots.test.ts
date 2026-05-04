@@ -367,6 +367,8 @@ describe("computeSurvivalSnapshots", () => {
       });
     }
     const [snapshot] = [...computeSurvivalSnapshots({ candles1m, candles5m })];
+    expect(snapshot?.context.atr3x5m).toBeCloseTo(4, 5);
+    expect(snapshot?.context.atr4x5m).toBeCloseTo(4, 5);
     expect(snapshot?.context.atr14x5m).toBeCloseTo(4, 5);
   });
 

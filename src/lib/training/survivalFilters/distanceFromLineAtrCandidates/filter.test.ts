@@ -3,7 +3,10 @@ import type {
   SurvivalSnapshot,
   SurvivalSnapshotContext,
 } from "@alea/lib/training/computeSurvivalSnapshots";
-import { distanceFromLineAtrFilter } from "@alea/lib/training/survivalFilters/distanceFromLineAtr/filter";
+import {
+  distanceFromLineAtr3Filter,
+  distanceFromLineAtr4Filter,
+} from "@alea/lib/training/survivalFilters/distanceFromLineAtrCandidates/filter";
 import { describe, expect, it } from "bun:test";
 
 function emptyContext(): SurvivalSnapshotContext {
@@ -66,34 +69,41 @@ function buildSnapshot({
   };
 }
 
-describe("distanceFromLineAtrFilter", () => {
-  it("true when |price - line| ≥ 0.5 × ATR", () => {
+describe("distanceFromLineAtr candidate filters", () => {
+  it("classifies ATR-3 distance independently from ATR-14", () => {
     const snap = buildSnapshot({
       currentSide: "up",
       line: 100,
       snapshotPrice: 100.6,
-      ctx: { ...emptyContext(), atr14x5m: 1 },
+      ctx: { ...emptyContext(), atr3x5m: 1, atr14x5m: 10 },
     });
-    expect(distanceFromLineAtrFilter.classify(snap, snap.context)).toBe(true);
+    expect(distanceFromLineAtr3Filter.classify(snap, snap.context)).toBe(true);
   });
 
-  it("false when |price - line| < 0.5 × ATR", () => {
+  it("classifies ATR-4 distance independently from ATR-14", () => {
     const snap = buildSnapshot({
       currentSide: "up",
       line: 100,
       snapshotPrice: 100.3,
-      ctx: { ...emptyContext(), atr14x5m: 1 },
+      ctx: { ...emptyContext(), atr4x5m: 1, atr14x5m: 0.1 },
     });
-    expect(distanceFromLineAtrFilter.classify(snap, snap.context)).toBe(false);
+    expect(distanceFromLineAtr4Filter.classify(snap, snap.context)).toBe(
+      false,
+    );
   });
 
-  it("skips when ATR unavailable", () => {
+  it("skips when the candidate ATR period is unavailable", () => {
     const snap = buildSnapshot({
       currentSide: "up",
       line: 100,
       snapshotPrice: 102,
       ctx: emptyContext(),
     });
-    expect(distanceFromLineAtrFilter.classify(snap, snap.context)).toBe("skip");
+    expect(distanceFromLineAtr3Filter.classify(snap, snap.context)).toBe(
+      "skip",
+    );
+    expect(distanceFromLineAtr4Filter.classify(snap, snap.context)).toBe(
+      "skip",
+    );
   });
 });
