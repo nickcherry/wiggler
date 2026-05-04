@@ -464,6 +464,12 @@ export function renderTrainingDistributionsHtml({
     details.filter-section[open] > summary > .filter-summary-chevron {
       color: var(--alea-gold);
     }
+    /* When the section is open the in-section tab strip is the
+       canonical source for per-rem scores; the collapsed-header
+       summary pills would just duplicate it, so hide them. */
+    details.filter-section[open] > summary > .filter-summary-scores {
+      display: none;
+    }
     /* Score pills span the full width on their own row. Pills are
        fixed 140px so columns line up across filter sections. The
        gap is generous (14px) so adjacent pills don't visually
