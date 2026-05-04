@@ -1,3 +1,4 @@
+import { LIVE_TRADING_ATR_PERIOD } from "@alea/constants/liveTrading";
 import { createFiveMinuteAtrTracker } from "@alea/lib/livePrices/fiveMinuteAtrTracker";
 import type { ClosedFiveMinuteBar } from "@alea/lib/livePrices/types";
 import { describe, expect, it } from "bun:test";
@@ -27,11 +28,12 @@ function bar({
 }
 
 /**
- * Reference implementation of the training pipeline's ATR-14 — copied
- * verbatim from `computeWilderAtrSeries` in `computeSurvivalSnapshots.ts`
- * so this test is the cross-pipeline equality check itself. If the
- * production tracker drifts from the training formula, this test
- * catches it.
+ * Reference implementation of the training pipeline's Wilder ATR —
+ * copied verbatim from `computeWilderAtrSeries` in
+ * `computeSurvivalSnapshots.ts` so this test is the cross-pipeline
+ * equality check itself. If the production tracker drifts from the
+ * training formula at the configured `LIVE_TRADING_ATR_PERIOD`, this
+ * test catches it.
  */
 function referenceAtrSeries({
   highs,
@@ -70,17 +72,17 @@ function referenceAtrSeries({
 }
 
 describe("FiveMinuteAtrTracker", () => {
-  it("returns null until 14 bars have been seen", () => {
+  it("returns null until LIVE_TRADING_ATR_PERIOD bars have been seen", () => {
     const tracker = createFiveMinuteAtrTracker();
-    for (let i = 0; i < 13; i += 1) {
+    for (let i = 0; i < LIVE_TRADING_ATR_PERIOD - 1; i += 1) {
       tracker.append(bar({ openTimeMs: i * 300_000, open: 100, high: 102, low: 98, close: 100 }));
       expect(tracker.currentValue()).toBeNull();
     }
-    tracker.append(bar({ openTimeMs: 13 * 300_000, open: 100, high: 102, low: 98, close: 100 }));
+    tracker.append(bar({ openTimeMs: (LIVE_TRADING_ATR_PERIOD - 1) * 300_000, open: 100, high: 102, low: 98, close: 100 }));
     expect(tracker.currentValue()).not.toBeNull();
   });
 
-  it("matches the training pipeline's Wilder ATR-14 bar-for-bar", () => {
+  it("matches the training pipeline's Wilder ATR bar-for-bar at the configured period", () => {
     // Synthetic bar series with varied range so true-range != hi-lo for
     // most bars. Includes gap-ups and gap-downs to exercise the
     // |high − prevClose| and |prevClose − low| branches of the TR
@@ -112,7 +114,7 @@ describe("FiveMinuteAtrTracker", () => {
       highs: series.map((b) => b.high),
       lows: series.map((b) => b.low),
       closes: series.map((b) => b.close),
-      period: 14,
+      period: LIVE_TRADING_ATR_PERIOD,
     });
 
     const tracker = createFiveMinuteAtrTracker();

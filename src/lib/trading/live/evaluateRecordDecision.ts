@@ -61,11 +61,11 @@ export function evaluateRecordDecision({
     tracker,
     windowStartMs: window.windowStartMs,
   });
-  const atr14 = atrReadyForWindow({
+  const atr = atrReadyForWindow({
     tracker: atrTracker,
     windowStartMs: window.windowStartMs,
   });
-  if (atr14 === null) {
+  if (atr === null) {
     return null;
   }
   const book = usableBookForMarket({
@@ -81,7 +81,7 @@ export function evaluateRecordDecision({
     line: record.line,
     currentPrice: tick.mid,
     ema50,
-    atr14,
+    atr,
     upBestBid: book?.up.bestBid ?? null,
     downBestBid: book?.down.bestBid ?? null,
     upTokenId: market.upRef,

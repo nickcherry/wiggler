@@ -1,16 +1,19 @@
+import { LIVE_TRADING_ATR_PERIOD } from "@alea/constants/liveTrading";
 import type { ClosedFiveMinuteBar } from "@alea/lib/livePrices/types";
 
 /**
- * Period for the live ATR tracker. Mirrors the training pipeline's
- * 14-period ATR (`computeWilderAtrSeries({ period: 14 })` in
- * `computeSurvivalSnapshots.ts`). Live and training MUST use the same
- * period so the live filter classification matches the historical
- * classifications baked into the probability table.
+ * Period for the live ATR tracker. Sourced from
+ * `LIVE_TRADING_ATR_PERIOD` so it stays in lockstep with the filter
+ * that powers the persisted probability table. Live and training MUST
+ * use the same period so the live filter classification matches the
+ * historical classifications baked into the table.
  */
-const ATR_PERIOD = 14;
+const ATR_PERIOD = LIVE_TRADING_ATR_PERIOD;
 
 /**
- * Stateful Wilder ATR-14 tracker over completed 5m bars for one asset.
+ * Stateful Wilder ATR tracker over completed 5m bars for one asset
+ * at the period configured for live trading
+ * (`LIVE_TRADING_ATR_PERIOD`).
  * Mirrors the training pipeline's ATR convention exactly:
  *
  *   - True range per bar:

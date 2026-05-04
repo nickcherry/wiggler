@@ -1,3 +1,4 @@
+import { LIVE_TRADING_FILTER } from "@alea/constants/liveTrading";
 import { MIN_ACTIONABLE_DISTANCE_BP } from "@alea/constants/trading";
 import type {
   AssetProbabilities,
@@ -8,7 +9,6 @@ import type {
 } from "@alea/lib/trading/types";
 import { computeSurvivalSnapshots } from "@alea/lib/training/computeSurvivalSnapshots";
 import { computeSweetSpot } from "@alea/lib/training/survivalFilters/computeSweetSpot";
-import { distanceFromLineAtrFilter } from "@alea/lib/training/survivalFilters/distanceFromLineAtr/filter";
 import type { SurvivalSurface } from "@alea/lib/training/types";
 import type { Asset } from "@alea/types/assets";
 import type { Candle } from "@alea/types/candles";
@@ -59,7 +59,7 @@ export function computeAssetProbabilities({
   let totalSnapshots = 0;
 
   for (const snapshot of computeSurvivalSnapshots({ candles1m, candles5m })) {
-    const decision = distanceFromLineAtrFilter.classify(
+    const decision = LIVE_TRADING_FILTER.classify(
       snapshot,
       snapshot.context,
     );

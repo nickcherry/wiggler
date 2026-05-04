@@ -73,11 +73,12 @@ export const sweetSpotSchema = z.object({
 export type SweetSpot = z.infer<typeof sweetSpotSchema>;
 
 /**
- * Per-asset payload: two surfaces produced by the active filter
- * (`distance_from_line_atr` as of the May 2026 promotion: `aligned` =
- * "decisively away" iff `|distance| ≥ 0.5 × ATR-14`, `notAligned` =
- * "near the line"), plus the window count each was derived from and
- * the per-asset sweet-spot range that bounds the persisted buckets.
+ * Per-asset payload: two surfaces produced by the active live filter
+ * (`LIVE_TRADING_FILTER` — see `src/constants/liveTrading.ts`:
+ * `aligned` = "decisively away" iff `|distance| ≥ 0.5 × ATR` at the
+ * configured period, `notAligned` = "near the line"), plus the window
+ * count each was derived from and the per-asset sweet-spot range that
+ * bounds the persisted buckets.
  *
  * `windowCount` is the number of *5m windows*, not snapshots; each
  * window contributes up to four snapshots (one per remaining-minute

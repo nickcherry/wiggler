@@ -19,20 +19,20 @@ export type DecisionInputs = {
    * Most recent EMA-50 evaluated *through and including* the last
    * CLOSED 5m bar. Retained for diagnostic logging on the
    * `DecisionSnapshot`; **no longer the conditioning variable for
-   * the probability lookup** since we promoted to the
-   * `distance_from_line_atr` filter (see `atr14` below). `null`
-   * until ≥50 closed bars have been seen.
+   * the probability lookup** since we promoted to the live
+   * distance-from-line ATR filter (see `atr` below). `null` until
+   * ≥50 closed bars have been seen.
    */
   readonly ema50: number | null;
   /**
-   * Most recent Wilder ATR-14 evaluated *through and including* the
-   * last CLOSED 5m bar. Used to compute the `decisivelyAway`
-   * classification: `decisivelyAway = |currentPrice − line| ≥ 0.5 ×
-   * ATR-14`. This matches the training-side
-   * `distanceFromLineAtrFilter` exactly. `null` until ≥14 closed
-   * bars have been seen — the runner skips with `warmup` until then.
+   * Most recent Wilder ATR evaluated *through and including* the last
+   * CLOSED 5m bar at the `LIVE_TRADING_ATR_PERIOD` period. Used to
+   * compute the `decisivelyAway` classification:
+   * `decisivelyAway = |currentPrice − line| ≥ 0.5 × ATR`. Matches the
+   * training-side live filter exactly. `null` until the tracker has
+   * seeded — the runner skips with `warmup` until then.
    */
-  readonly atr14: number | null;
+  readonly atr: number | null;
   /** Best bid for the up-YES token, or `null` if nothing is resting. */
   readonly upBestBid: number | null;
   /** Best bid for the down-YES token, or `null` if nothing is resting. */
@@ -88,7 +88,7 @@ export function evaluateDecision(inputs: DecisionInputs): TradeDecision {
       down: null,
     };
   }
-  if (inputs.atr14 === null || inputs.atr14 <= 0) {
+  if (inputs.atr === null || inputs.atr <= 0) {
     return {
       kind: "skip",
       reason: "warmup",
@@ -117,13 +117,13 @@ export function evaluateDecision(inputs: DecisionInputs): TradeDecision {
   // doesn't condition on it anymore. We compute when EMA is available.
   const regime: LeadingSide | null =
     inputs.ema50 === null ? null : inputs.line >= inputs.ema50 ? "up" : "down";
-  // Filter classification: `decisivelyAway = |distance| >= 0.5 × ATR-14`.
-  // Mirrors `distanceFromLineAtrFilter.classify` in the training
-  // pipeline. `aligned` is named for back-compat with the existing
-  // probability-table surface naming (true → "decisively away" surface,
-  // false → "near the line" surface); rename to `decisivelyAway` is a
-  // separate, mechanical pass.
-  const aligned = distanceAbs >= 0.5 * inputs.atr14;
+  // Filter classification: `decisivelyAway = |distance| >= 0.5 × ATR`.
+  // Mirrors the live filter (`LIVE_TRADING_FILTER.classify`) in the
+  // training pipeline. `aligned` is named for back-compat with the
+  // existing probability-table surface naming (true → "decisively
+  // away" surface, false → "near the line" surface); rename to
+  // `decisivelyAway` is a separate, mechanical pass.
+  const aligned = distanceAbs >= 0.5 * inputs.atr;
 
   const snapshot: DecisionSnapshot = {
     asset: inputs.asset,

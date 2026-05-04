@@ -159,7 +159,7 @@ export async function runLive({
         emit({
           kind: "info",
           atMs: Date.now(),
-          message: `${labelAsset(bar.asset)} 5m close ${new Date(bar.openTimeMs).toISOString().slice(11, 16)} UTC: close=${bar.close}, ema50=${ema?.currentValue()?.toFixed(2) ?? "warming"}, atr14=${atr?.currentValue()?.toFixed(2) ?? "warming"}`,
+          message: `${labelAsset(bar.asset)} 5m close ${new Date(bar.openTimeMs).toISOString().slice(11, 16)} UTC: close=${bar.close}, ema50=${ema?.currentValue()?.toFixed(2) ?? "warming"}, atr=${atr?.currentValue()?.toFixed(2) ?? "warming"}`,
         });
       }
     },

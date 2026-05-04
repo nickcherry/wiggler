@@ -32,7 +32,8 @@ const tmpDir = resolvePath(repoRoot, "tmp");
  * Generates the committed `probabilityTable.generated.ts` artifact that
  * the live trader loads at boot. Reuses the survival snapshot pipeline
  * (so the bucketing math is identical to what we vet on the training
- * dashboard) but applies only the `distance_from_line_atr` filter and
+ * dashboard) but applies only the live filter
+ * (`LIVE_TRADING_FILTER` — see `src/constants/liveTrading.ts`) and
  * writes a lean per-asset surface restricted to that filter's
  * sweet-spot bp range. No HTML, no scoring caches — this is the
  * production model checked into version control.
@@ -47,7 +48,7 @@ export const tradingGenProbabilityTableCommand = defineCommand({
   summary:
     "Refresh the committed live-trading probability table from local candles",
   description:
-    "Reads the local Postgres for the configured training candle series (today: binance-perp 5m + the matching 1m series) and writes src/lib/trading/probabilityTable/probabilityTable.generated.ts plus a JSON sidecar in tmp/. The model uses the distance_from_line_atr filter (snapshot is `aligned`/decisively away when |distance| ≥ 0.5 × ATR-14) and only persists buckets within the per-asset sweet-spot bp range. Buckets thinner than --min-samples are dropped.",
+    "Reads the local Postgres for the configured training candle series (today: binance-perp 5m + the matching 1m series) and writes src/lib/trading/probabilityTable/probabilityTable.generated.ts plus a JSON sidecar in tmp/. The model uses LIVE_TRADING_FILTER (snapshot is `aligned`/decisively away when |distance| ≥ 0.5 × ATR at the configured period) and only persists buckets within the per-asset sweet-spot bp range. Buckets thinner than --min-samples are dropped.",
   options: [
     defineValueOption({
       key: "assets",

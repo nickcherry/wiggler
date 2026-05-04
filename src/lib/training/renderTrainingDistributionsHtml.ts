@@ -1,3 +1,4 @@
+import { LIVE_TRADING_FILTER } from "@alea/constants/liveTrading";
 import { MIN_ACTIONABLE_DISTANCE_BP } from "@alea/constants/trading";
 import {
   SWEET_SPOT_INFO_GAIN_THRESHOLD,
@@ -23,10 +24,11 @@ import {
  * (see `computeAssetProbabilities.ts`). The dashboard surfaces this
  * with a "LIVE" badge so the operator can tell at a glance which
  * section corresponds to the production model versus the comparison
- * filters. Hardcoded here rather than imported from the trading layer
- * so the renderer doesn't take a runtime dependency on it.
+ * filters. Sourced from the same `LIVE_TRADING_FILTER` constant the
+ * trading layer reads, so the badge can never lie about which filter
+ * is live.
  */
-const LIVE_TRADING_FILTER_ID = "distance_from_line_atr";
+const LIVE_TRADING_FILTER_ID = LIVE_TRADING_FILTER.id;
 
 /**
  * Minimum snapshot count required for a `(remaining, distance)` survival
@@ -1091,7 +1093,7 @@ export function renderTrainingDistributionsHtml({
         <span class="config-item"><span class="config-key">min distance</span><span class="config-val">${MIN_ACTIONABLE_DISTANCE_BP} bp</span></span>
         <span class="config-item"><span class="config-key">sample floor</span><span class="config-val">${SWEET_SPOT_MIN_SAMPLES.toLocaleString()}</span></span>
         <span class="config-item"><span class="config-key">sweet-spot threshold</span><span class="config-val">${(SWEET_SPOT_INFO_GAIN_THRESHOLD * 100).toFixed(0)}%</span></span>
-        <span class="config-item"><span class="config-key">live filter</span><span class="config-val">${escapeHtml(LIVE_TRADING_FILTER_ID)}</span></span>
+        <span class="config-item"><span class="config-key">live filter</span><span class="config-val">${escapeHtml(LIVE_TRADING_FILTER.displayName)}</span></span>
       </div>
     </header>
     <main class="alea-main">

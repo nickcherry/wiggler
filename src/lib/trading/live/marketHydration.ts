@@ -14,10 +14,11 @@ import type { Vendor } from "@alea/lib/trading/vendor/types";
 import type { Asset } from "@alea/types/assets";
 
 /**
- * Bootstrap each asset's moving trackers (EMA-50 and ATR-14) with the
- * most recent closed 5m bars from the price-feed REST endpoint. EMA
- * needs ≥50 closes; ATR needs ≥14. We pull `EMA50_BOOTSTRAP_BARS`
- * (60 by default) which seeds both with margin to spare, and fetch
+ * Bootstrap each asset's moving trackers (EMA-50 and the live ATR)
+ * with the most recent closed 5m bars from the price-feed REST
+ * endpoint. EMA needs ≥50 closes; ATR needs ≥`LIVE_TRADING_ATR_PERIOD`.
+ * We pull `EMA50_BOOTSTRAP_BARS` (60 by default) which seeds both with
+ * margin to spare, and fetch
  * once per asset so the two trackers share a single network round-
  * trip. Failures are logged and the runner proceeds — decisions
  * just stay in the `warmup` skip state until the live stream catches
@@ -59,7 +60,7 @@ export async function hydrateMovingTrackers({
       emit({
         kind: "info",
         atMs: Date.now(),
-        message: `${labelAsset(asset)} hydrated ${bars.length} closed 5m bars, ema50=${emaValue === null || emaValue === undefined ? "warming" : emaValue.toFixed(2)}, atr14=${atrValue === null || atrValue === undefined ? "warming" : atrValue.toFixed(2)}`,
+        message: `${labelAsset(asset)} hydrated ${bars.length} closed 5m bars, ema50=${emaValue === null || emaValue === undefined ? "warming" : emaValue.toFixed(2)}, atr=${atrValue === null || atrValue === undefined ? "warming" : atrValue.toFixed(2)}`,
       });
     } catch (error) {
       emit({
