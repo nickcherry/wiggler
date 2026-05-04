@@ -33,6 +33,8 @@ Everything that matters is reachable through one non-interactive entrypoint:
   `training:distributions`
 - `telegram:*`
   `telegram:test`
+- `polymarket:*`
+  `polymarket:auth-check`
 - `help`
   Built-in. `alea help <command>` prints detailed help; `alea help` is equivalent to `alea` with no arguments.
 

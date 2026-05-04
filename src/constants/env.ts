@@ -30,6 +30,12 @@ export const env = {
   get telegramChatId(): string | undefined {
     return optionalEnv("TELEGRAM_CHAT_ID");
   },
+  get polymarketPrivateKey(): string | undefined {
+    return optionalEnv("POLYMARKET_PRIVATE_KEY");
+  },
+  get polymarketFunderAddress(): string | undefined {
+    return optionalEnv("POLYMARKET_FUNDER_ADDRESS");
+  },
 };
 
 function optionalEnv(name: string): string | undefined {
