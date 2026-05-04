@@ -6,6 +6,21 @@ import { OrderType, Side } from "@polymarket/clob-client";
 import { z } from "zod";
 
 /**
+ * Thrown when Polymarket rejects a `postOnly: true` order because it
+ * would cross the spread (= would have been filled as taker). Callers
+ * treat this as the *expected* failure mode — the price moved between
+ * book read and post — and re-evaluate against the fresh state. NOT
+ * surfaced over Telegram on its own; counted in the per-window
+ * summary instead.
+ */
+export class PostOnlyRejectionError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "PostOnlyRejectionError";
+  }
+}
+
+/**
  * Maker-only limit BUY of a YES outcome token. Posts a GTC limit at
  * `limitPrice` with `postOnly: true`, which makes the venue REJECT
  * the order if it would cross the spread (= become a taker). This is
@@ -85,9 +100,11 @@ export async function placeMakerLimitBuy({
     );
   }
   if (parsed.data.success === false) {
-    throw new Error(
-      `placeMakerLimitBuy: postOrder rejected: ${parsed.data.errorMsg ?? "unknown error"}`,
-    );
+    const errorMsg = parsed.data.errorMsg ?? "unknown error";
+    if (looksLikePostOnlyRejection({ message: errorMsg })) {
+      throw new PostOnlyRejectionError(errorMsg);
+    }
+    throw new Error(`placeMakerLimitBuy: postOrder rejected: ${errorMsg}`);
   }
   if (
     typeof parsed.data.orderID !== "string" ||
@@ -108,6 +125,29 @@ export async function placeMakerLimitBuy({
     feeRateBps,
     placedAtMs: Date.now(),
   };
+}
+
+/**
+ * Crude phrase match against the venue's `errorMsg`. Polymarket has
+ * not stabilized a machine-readable error code for postOnly rejections,
+ * so we look for any of the obvious phrases. False negatives surface
+ * as a generic error — the worst case is one extra Telegram alert,
+ * not a wrong trading decision.
+ */
+function looksLikePostOnlyRejection({
+  message,
+}: {
+  readonly message: string;
+}): boolean {
+  const lower = message.toLowerCase();
+  return (
+    lower.includes("post only") ||
+    lower.includes("postonly") ||
+    lower.includes("would match") ||
+    lower.includes("would cross") ||
+    lower.includes("would taker") ||
+    lower.includes("would fill")
+  );
 }
 
 const postOrderResponseSchema = z
