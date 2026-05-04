@@ -2,7 +2,6 @@ import type {
   AssetSizeDistribution,
   AssetSurvivalDistribution,
   AssetSurvivalFilters,
-  SizeHistogram,
   SurvivalFilterResultPayload,
   SurvivalRemainingMinutes,
   SurvivalSurfaceWithCount,
@@ -13,14 +12,6 @@ import {
   aleaChartTokens,
   aleaDesignSystemHead,
 } from "@alea/lib/ui/aleaDesignSystem";
-
-/**
- * Body = "the move" (close minus open); wick = "the envelope" (high minus
- * low). Colors are pulled from the shared design tokens so they stay in
- * lockstep with any tooltip/legend swatches the design system renders.
- */
-const bodyColor = aleaChartTokens.bodyColor;
-const wickColor = aleaChartTokens.wickColor;
 
 /**
  * Minimum snapshot count required for a `(remaining, distance)` survival
@@ -104,9 +95,6 @@ type DashboardAssetSlice = {
   readonly assetUpper: string;
   readonly candleCount: number;
   readonly yearRange: string | null;
-  readonly body: readonly number[];
-  readonly wick: readonly number[];
-  readonly histogram: SizeHistogram;
   readonly survival: SurvivalSlice | null;
   readonly filters: readonly FilterSlice[];
 };
@@ -203,15 +191,16 @@ type SurvivalSlice = {
 
 /**
  * Renders a self-contained dark-themed HTML dashboard for the
- * `training:distributions` analysis. One tab per asset; each tab has a
- * uPlot histogram of body/wick sizes (x = move size in bp, y = % of
- * candles in that bin) above a focused table that lists `p95...p50` for
- * both metrics. The chart is for shape intuition; the table is the place
- * to read off thresholds.
+ * `training:distributions` analysis. One tab per asset; each tab shows
+ * the unconditional point-of-no-return survival surface as the
+ * "Baseline" section, then one collapsible section per registered
+ * filter overlay below it. Filter sections render their main
+ * survival-vs-baseline chart and a delta-from-baseline chart with
+ * density-weighted fills.
  *
- * Per-year breakdowns are intentionally omitted from the HTML — they live
- * only in the JSON sidecar so the page stays scannable. The JSON is the
- * place to query "what was BTC body p99 in 2024".
+ * The body/range size distribution and per-year breakdowns are
+ * computed and persisted in the JSON sidecar but not rendered here —
+ * the dashboard focuses on the trading-relevant survival surface.
  */
 export function renderTrainingDistributionsHtml({
   payload,
@@ -345,7 +334,7 @@ export function renderTrainingDistributionsHtml({
       );
     }
     .filter-tab {
-      padding: 8px 14px;
+      padding: 10px 22px;
       border: 0;
       background: transparent;
       color: var(--alea-text-subtle);
@@ -376,7 +365,7 @@ export function renderTrainingDistributionsHtml({
       box-shadow: inset 0 -2px 0 0 var(--alea-gold);
     }
     .filter-tab .filter-tab-delta {
-      margin-left: 8px;
+      margin-left: 16px;
       font-size: 11px;
       font-weight: 500;
       letter-spacing: 0.04em;
@@ -457,16 +446,20 @@ export function renderTrainingDistributionsHtml({
       letter-spacing: 0.16em;
       text-transform: uppercase;
       transition: transform 160ms ease, color 120ms ease;
-      margin-left: auto;
     }
     details.filter-section[open] > summary > .filter-summary-chevron {
       color: var(--alea-gold);
     }
+    /* Push the score-row to the right edge of the summary so pills
+       across multiple filter sections line up vertically — the filter
+       title widths vary, so left-aligning misaligned the columns. */
     details.filter-section > summary > .filter-summary-scores {
       display: flex;
       gap: 6px;
       flex-wrap: wrap;
       align-items: center;
+      justify-content: flex-end;
+      margin-left: auto;
     }
     /* Score pills shown in the collapsed header — non-interactive
        summary of the per-config scores. Same color semantics as the
@@ -585,58 +578,16 @@ export function renderTrainingDistributionsHtml({
         <p class="survival-helper">Each filter splits the same survival snapshots in two, so we can ask "does this slice of context tighten the point of no return?". The chart compares baseline vs filter-true vs filter-false at one remaining-time bucket — switch buckets with the tabs above each chart. The default tab is the bucket where the filter most strongly tightens the threshold (negative deltas in the badges = good).</p>
 
         <div class="filter-sections-host" id="filter-sections-host"></div>
-
-        <div class="alea-section-rule">
-          <h2>Movement Distribution</h2>
-        </div>
-        <p class="survival-helper">Distribution of 5m candle body and full high-low range. Useful for understanding normal move size, not directly a survival probability.</p>
-        <div class="chart-section">
-          <div class="alea-legend">
-            <span class="alea-legend-item"><span class="alea-legend-swatch" style="background:${bodyColor}"></span>body</span>
-            <span class="alea-legend-item"><span class="alea-legend-swatch" style="background:${wickColor}"></span>range</span>
-          </div>
-          <div class="chart-frame">
-            <div id="chart" class="chart-host"><div class="chart-loading">Loading chart…</div></div>
-            <div id="chart-tooltip" class="alea-tooltip"></div>
-          </div>
-        </div>
       </section>
     </main>
   </div>
   <script>
     const slices = ${JSON.stringify(slices)};
-    // Chart is a histogram: x = move size in bp, y = % of candles whose
-    // size falls in that 1 bp bin. The bin range is sized to p99 of the
-    // larger metric, so anything past it (the rare flash-crash tail) lives
-    // in the overflow slot of the histogram payload and isn't plotted.
-    const bodyColor = ${JSON.stringify(bodyColor)};
-    const wickColor = ${JSON.stringify(wickColor)};
-    // Translucent line-color fills for the two histogram series. Computed
-    // here (not in the design-system tokens) since the opacity is purely a
-    // chart-rendering choice — same hue as the stroke, dim enough that two
-    // overlapping series stay readable.
-    const bodyFill = "rgba(91, 149, 255, 0.18)";
-    const wickFill = "rgba(255, 165, 102, 0.18)";
     const chartTokens = ${JSON.stringify(aleaChartTokens)};
     const survivalRemainingOrder = ${JSON.stringify(SURVIVAL_REMAINING_ORDER)};
     const survivalRemainingColors = ${JSON.stringify(SURVIVAL_REMAINING_COLORS)};
     const survivalMinSamples = ${SURVIVAL_MIN_SAMPLES};
     const survivalXAxisPadBp = ${SURVIVAL_X_AXIS_PAD_BP};
-
-    // Source values are in percent (e.g. 0.05 = 0.05%). Display in basis
-    // points: 1% = 100 bp, rounded to the nearest integer. Same numbers,
-    // just a tidier unit for the sub-1% range we care about.
-    const formatBips = (v) => {
-      if (v == null || !Number.isFinite(v)) return "—";
-      return Math.round(v * 100).toLocaleString() + " bp";
-    };
-    // Histogram density axis: bin counts normalized to % of all candles.
-    // Typical heights are in the 0.1–5% range so two decimal places gives
-    // the tooltip useful resolution without going to noise.
-    const formatDensity = (v) => {
-      if (v == null || !Number.isFinite(v)) return "—";
-      return v.toFixed(2) + "%";
-    };
 
     // Auto-fit the y-axis to actual data range, clamped to [0, 100] for
     // the % charts. The hard-coded [0, 100] was wasting most of the
@@ -694,10 +645,6 @@ export function renderTrainingDistributionsHtml({
     const titleEl = document.getElementById("asset-title");
     const metaEl = document.getElementById("asset-meta");
     const countEl = document.getElementById("asset-count");
-    const chartHost = document.getElementById("chart");
-    const tooltipEl = document.getElementById("chart-tooltip");
-    const chartFrame = chartHost.parentElement;
-    let chart = null;
 
     const survivalSectionEl = document.getElementById("survival-section");
     const survivalMetaEl = document.getElementById("survival-meta");
@@ -705,144 +652,6 @@ export function renderTrainingDistributionsHtml({
     const survivalTooltipEl = document.getElementById("survival-tooltip");
     const survivalChartFrame = survivalChartHost.parentElement;
     let survivalChart = null;
-
-    function chartHostError(msg) {
-      chartHost.innerHTML = '<pre class="chart-error">' + msg + '</pre>';
-    }
-
-    // Render synchronously: this script runs at end of <body>, layout has
-    // happened, and .chart-host has min-height: 380px so it always has a
-    // measurable size. We deliberately do NOT use requestAnimationFrame
-    // here — RAF is paused when document.visibilityState is "hidden",
-    // which silently breaks the chart for any tab opened in the
-    // background.
-    function renderChart(slice) {
-      if (chart) { chart.destroy(); chart = null; }
-      chartHost.innerHTML = "";
-      if (typeof uPlot === "undefined") {
-        chartHostError("uPlot global is undefined — CDN failed to load?");
-        return;
-      }
-      const w = chartHost.clientWidth || chartHost.getBoundingClientRect().width || 800;
-      const h = chartHost.clientHeight || 380;
-      if (w === 0 || h === 0) {
-        chartHostError("chart host has zero size: " + w + "x" + h);
-        return;
-      }
-      // Histogram payload: bin i covers [i*binWidth, (i+1)*binWidth) in
-      // percent-of-open units; the trailing slot at index binCount is the
-      // overflow tail (everything past p99) and is intentionally not
-      // plotted. Convert bin width to bp for axis labels and divide each
-      // bin count by total candles to get density (% of candles per bin).
-      const hist = slice.histogram;
-      const total = slice.candleCount;
-      const binWidthBp = hist.binWidth * 100;
-      // x = bin starts in bp, with one extra "closer" point at the right
-      // edge of the last bin so uPlot's stepped path renders the trailing
-      // bar with its full width. The closer's y is null so the path ends
-      // there cleanly.
-      const xs = new Array(hist.binCount + 1);
-      for (let i = 0; i <= hist.binCount; i++) xs[i] = i * binWidthBp;
-      const toDensity = (counts) => {
-        const out = new Array(hist.binCount + 1);
-        for (let i = 0; i < hist.binCount; i++) {
-          out[i] = total > 0 ? (counts[i] / total) * 100 : 0;
-        }
-        out[hist.binCount] = null;
-        return out;
-      };
-      const bodyData = toDensity(hist.body);
-      const wickData = toDensity(hist.wick);
-      const data = [xs, bodyData, wickData];
-      const updateTooltip = (u) => {
-        const idx = u.cursor.idx;
-        // The trailing closer (idx === binCount) is a structural point,
-        // not a real bin — suppress the tooltip there.
-        if (idx == null || idx < 0 || idx >= hist.binCount) {
-          tooltipEl.classList.remove("visible");
-          return;
-        }
-        const xStart = xs[idx];
-        const xEnd = xs[idx + 1];
-        const bodyV = bodyData[idx];
-        const wickV = wickData[idx];
-        const range = Math.round(xStart).toLocaleString() + '–' + Math.round(xEnd).toLocaleString() + ' bp';
-        tooltipEl.innerHTML =
-          '<div class="alea-tooltip-head">' + range + '</div>' +
-          '<div class="alea-tooltip-row"><span class="alea-legend-swatch" style="background:' + bodyColor + '"></span><span class="name">body</span><span class="value">' + formatDensity(bodyV) + '</span></div>' +
-          '<div class="alea-tooltip-row"><span class="alea-legend-swatch" style="background:' + wickColor + '"></span><span class="name">range</span><span class="value">' + formatDensity(wickV) + '</span></div>';
-        const cursorLeft = u.cursor.left;
-        const frameW = chartFrame.getBoundingClientRect().width;
-        const tooltipW = tooltipEl.offsetWidth || 200;
-        const margin = 14;
-        const placeRight = cursorLeft + margin + tooltipW <= frameW;
-        const left = placeRight ? cursorLeft + margin : cursorLeft - margin - tooltipW;
-        tooltipEl.style.left = Math.max(margin, Math.min(left, frameW - tooltipW - margin)) + "px";
-        tooltipEl.style.top = "14px";
-        tooltipEl.classList.add("visible");
-      };
-      // Stepped path with align: 1 means "the value at x[i] holds until
-      // x[i+1]" — exactly the histogram semantics: a flat top across each
-      // bin's [start, end) range. The translucent fill underneath gives the
-      // shape a density feel without obscuring the other series.
-      const steppedPath = uPlot.paths.stepped({ align: 1 });
-      const opts = {
-        width: w,
-        height: h,
-        legend: { show: false },
-        padding: [16, 18, 8, 8],
-        scales: { x: { time: false } },
-        cursor: {
-          points: { show: false },
-          drag: { setScale: false, x: false, y: false },
-        },
-        series: [
-          {},
-          {
-            label: "body",
-            stroke: bodyColor,
-            fill: bodyFill,
-            width: 1.5,
-            paths: steppedPath,
-            points: { show: false },
-          },
-          {
-            label: "wick",
-            stroke: wickColor,
-            fill: wickFill,
-            width: 1.5,
-            paths: steppedPath,
-            points: { show: false },
-          },
-        ],
-        axes: [
-          {
-            stroke: chartTokens.axisStroke,
-            font: chartTokens.axisFont,
-            grid: { stroke: chartTokens.gridStroke, width: 1 },
-            ticks: { stroke: chartTokens.axisTickStroke, width: 1, size: 5 },
-            values: (u, splits) => splits.map((v) => Math.round(v).toLocaleString() + " bp"),
-          },
-          {
-            stroke: chartTokens.axisStroke,
-            font: chartTokens.axisFont,
-            grid: { stroke: chartTokens.gridStroke, width: 1 },
-            ticks: { stroke: chartTokens.axisTickStroke, width: 1, size: 5 },
-            values: (u, splits) => splits.map((v) => v.toFixed(1) + "%"),
-            size: 60,
-          },
-        ],
-        hooks: {
-          setCursor: [updateTooltip],
-        },
-      };
-      try {
-        chart = new uPlot(opts, data, chartHost);
-        chartHost.addEventListener("mouseleave", () => tooltipEl.classList.remove("visible"));
-      } catch (err) {
-        chartHostError("uPlot threw: " + (err && err.message ? err.message : String(err)));
-      }
-    }
 
     // ----------------------------------------------------------------
     // Survival section: a second chart + table inside the same panel.
@@ -1608,7 +1417,6 @@ export function renderTrainingDistributionsHtml({
       titleEl.textContent = slice.assetUpper;
       metaEl.textContent = slice.yearRange ?? "";
       countEl.textContent = slice.candleCount.toLocaleString() + " candles";
-      renderChart(slice);
       renderSurvival(slice);
       renderFilters(slice);
     }
@@ -1627,13 +1435,6 @@ export function renderTrainingDistributionsHtml({
     // Use a ResizeObserver so the chart tracks its container even when
     // window size is unchanged (e.g. flex-layout reflow on first paint).
     if (typeof ResizeObserver !== "undefined") {
-      const ro = new ResizeObserver(() => {
-        if (!chart) return;
-        const w = chartHost.clientWidth;
-        const h = chartHost.clientHeight;
-        if (w > 0 && h > 0) chart.setSize({ width: w, height: h });
-      });
-      ro.observe(chartHost);
       const survivalRo = new ResizeObserver(() => {
         if (!survivalChart) return;
         const w = survivalChartHost.clientWidth;
@@ -1673,7 +1474,6 @@ export function renderTrainingDistributionsHtml({
       }
     }
     window.addEventListener("resize", () => {
-      if (chart) chart.setSize({ width: chartHost.clientWidth, height: chartHost.clientHeight });
       if (survivalChart) survivalChart.setSize({ width: survivalChartHost.clientWidth, height: survivalChartHost.clientHeight });
       for (const entry of filterCharts) {
         const w = entry.host.clientWidth;
@@ -1717,9 +1517,6 @@ function toDashboardSlice({
     assetUpper: asset.asset.toUpperCase(),
     candleCount: asset.candleCount,
     yearRange,
-    body: asset.all.body,
-    wick: asset.all.wick,
-    histogram: asset.histogram,
     survival: survival === null ? null : toSurvivalSlice({ survival }),
     filters:
       filters === null
