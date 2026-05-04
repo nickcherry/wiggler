@@ -14,6 +14,33 @@
 export const MIN_BUCKET_SAMPLES = 200;
 
 /**
+ * Minimum bp distance from the price line at which we'll *engage* —
+ * either count the snapshot toward training calibration or act on it
+ * in live trading. Snapshots within `[0, MIN_ACTIONABLE_DISTANCE_BP)`
+ * bp of the line are treated as if they don't exist for both purposes.
+ *
+ * Why: very near the line, win-rate is mechanically close to 50/50
+ * regardless of filter (the price hasn't committed). Predictions
+ * there carry no real edge over a coinflip, and the sample-rich noise
+ * floor was inflating headline numbers in earlier versions of the
+ * scoring. Excluding this band is a cleaner statement of "don't trade
+ * when it could go either way" than relying on the modeled edge to
+ * happen to fall below `MIN_EDGE` for those buckets.
+ *
+ * Set to 2 bp (≈$20 on a $100k BTC line). Bumping this value is a
+ * meaningful policy change — it directly shrinks the actionable
+ * snapshot population — so it lives here as a committed constant
+ * rather than a flag.
+ *
+ * Both the training-side scoring (`computeSweetSpot`,
+ * `scoreHalfVsBaseline`, `natsSavedVsGlobal`) and the live trader
+ * (`evaluateDecision` skip rule, plus the probability-table
+ * generation that drops sub-floor buckets) reference this constant
+ * directly so the rule is identical end-to-end.
+ */
+export const MIN_ACTIONABLE_DISTANCE_BP = 2;
+
+/**
  * Minimum edge over the market for the bot to take a trade. "Edge" =
  * `ourProbability − marketImpliedProbability` for the side we'd buy.
  * Below this threshold we don't bother — the spread, slippage, and

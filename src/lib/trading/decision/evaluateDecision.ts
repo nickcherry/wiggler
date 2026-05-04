@@ -1,3 +1,4 @@
+import { MIN_ACTIONABLE_DISTANCE_BP } from "@alea/constants/trading";
 import { flooredRemainingMinutes } from "@alea/lib/livePrices/fiveMinuteWindow";
 import type {
   DecisionSnapshot,
@@ -99,6 +100,16 @@ export function evaluateDecision(inputs: DecisionInputs): TradeDecision {
 
   const distanceAbs = Math.abs(inputs.currentPrice - inputs.line);
   const distanceBp = Math.floor((distanceAbs / inputs.line) * 10_000 + 1e-9);
+  if (distanceBp < MIN_ACTIONABLE_DISTANCE_BP) {
+    return {
+      kind: "skip",
+      reason: "too-close-to-line",
+      snapshot: null,
+      samples: null,
+      up: null,
+      down: null,
+    };
+  }
   const currentSide: LeadingSide =
     inputs.currentPrice >= inputs.line ? "up" : "down";
   // EMA-50 regime kept for diagnostic logging only; the decision

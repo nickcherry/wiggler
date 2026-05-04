@@ -1,3 +1,4 @@
+import { MIN_ACTIONABLE_DISTANCE_BP } from "@alea/constants/trading";
 import type {
   AssetProbabilities,
   ProbabilityBucket,
@@ -209,6 +210,9 @@ function bucketsOf({
   const distances = [...map.keys()].sort((a, b) => a - b);
   const out: ProbabilityBucket[] = [];
   for (const distanceBp of distances) {
+    if (distanceBp < MIN_ACTIONABLE_DISTANCE_BP) {
+      continue;
+    }
     if (distanceBp < sweetSpot.startBp || distanceBp > sweetSpot.endBp) {
       continue;
     }

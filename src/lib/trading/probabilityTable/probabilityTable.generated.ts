@@ -11,7 +11,7 @@ import type { ProbabilityTable } from "@alea/lib/trading/types";
 export const probabilityTable: ProbabilityTable = {
   "command": "trading:gen-probability-table",
   "schemaVersion": 1,
-  "generatedAtMs": 1777920521485,
+  "generatedAtMs": 1777920827761,
   "series": {
     "source": "binance",
     "product": "perp",

@@ -50,6 +50,7 @@ export type SideEdge = {
 export type DecisionSkipReason =
   | "warmup"
   | "out-of-window"
+  | "too-close-to-line"
   | "no-bucket"
   | "no-bid"
   | "thin-edge";

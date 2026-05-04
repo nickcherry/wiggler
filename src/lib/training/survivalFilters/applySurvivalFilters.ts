@@ -1,3 +1,4 @@
+import { MIN_ACTIONABLE_DISTANCE_BP } from "@alea/constants/trading";
 import type {
   SurvivalRemainingMinutes,
   SurvivalSnapshot,
@@ -396,6 +397,9 @@ function natsSavedVsGlobal({
   }
   let total = 0;
   for (const half of halfBuckets) {
+    if (half.distanceBp < MIN_ACTIONABLE_DISTANCE_BP) {
+      continue;
+    }
     if (half.total < SUMMARY_MIN_SAMPLES) {
       continue;
     }
@@ -511,6 +515,9 @@ function scoreHalfVsBaseline({
   let maxDeltaPp: number | null = null;
   let minDeltaPp: number | null = null;
   for (const half of halfBuckets) {
+    if (half.distanceBp < MIN_ACTIONABLE_DISTANCE_BP) {
+      continue;
+    }
     if (half.total < SUMMARY_MIN_SAMPLES) {
       continue;
     }

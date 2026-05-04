@@ -1,3 +1,4 @@
+import { MIN_ACTIONABLE_DISTANCE_BP } from "@alea/constants/trading";
 import type { SurvivalRemainingMinutes } from "@alea/lib/training/computeSurvivalSnapshots";
 import type {
   SurvivalBucket,
@@ -104,6 +105,7 @@ export function computeSweetSpot({
       whenFalse.byRemaining[remaining],
     ]) {
       for (const half of halfBuckets) {
+        if (half.distanceBp < MIN_ACTIONABLE_DISTANCE_BP) {continue;}
         if (half.total < SWEET_SPOT_MIN_SAMPLES) {continue;}
         const global = globalByDistance.get(half.distanceBp);
         if (global === undefined || global.total < SWEET_SPOT_MIN_SAMPLES) {
