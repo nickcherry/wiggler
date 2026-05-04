@@ -84,6 +84,39 @@ describe("formatWindowSummary", () => {
     expect(text.endsWith("Total Pnl: +$19.60")).toBe(true);
   });
 
+  it("appends a cross-book rejection line when stats are non-zero", () => {
+    const text = formatWindowSummary({
+      outcomes: allNone,
+      stats: { rejectedCount: 3, placedAfterRetryCount: 2 },
+    });
+    expect(text).toBe(
+      [
+        "No trades entered this market.",
+        "",
+        "Total Pnl: $0.00",
+        "Cross-book rejections: 3 (2 placed after retry)",
+      ].join("\n"),
+    );
+  });
+
+  it("omits the parens when no rejection led to a placement", () => {
+    const text = formatWindowSummary({
+      outcomes: allNone,
+      stats: { rejectedCount: 4, placedAfterRetryCount: 0 },
+    });
+    expect(text.endsWith("Cross-book rejections: 4")).toBe(true);
+  });
+
+  it("omits the stats line entirely when both counters are zero", () => {
+    const text = formatWindowSummary({
+      outcomes: allNone,
+      stats: { rejectedCount: 0, placedAfterRetryCount: 0 },
+    });
+    expect(text).toBe(
+      ["No trades entered this market.", "", "Total Pnl: $0.00"].join("\n"),
+    );
+  });
+
   it("uses $0.00 (no sign) for an exactly-zero total", () => {
     const outcomes: AssetWindowOutcome[] = [
       ...allNone.slice(0, 4),

@@ -31,13 +31,16 @@ import type { UserChannelHandle } from "@alea/lib/polymarket/userChannel/streamU
 import { streamUserChannel } from "@alea/lib/polymarket/userChannel/streamUserChannel";
 import { sendTelegramMessage } from "@alea/lib/telegram/sendTelegramMessage";
 import { evaluateDecision } from "@alea/lib/trading/decision/evaluateDecision";
-import type { TradeDecision } from "@alea/lib/trading/decision/types";
 import type { LiveEvent } from "@alea/lib/trading/live/types";
 import { cancelOpenOrder } from "@alea/lib/trading/orders/cancelOpenOrder";
 import { hydrateMarketState } from "@alea/lib/trading/orders/hydrateMarketState";
-import { placeMakerLimitBuy } from "@alea/lib/trading/orders/placeMakerLimitBuy";
+import {
+  placeMakerLimitBuy,
+  PostOnlyRejectionError,
+} from "@alea/lib/trading/orders/placeMakerLimitBuy";
 import { settleFilled } from "@alea/lib/trading/state/settleFilled";
 import type { AssetSlot } from "@alea/lib/trading/state/types";
+import { formatOrderError } from "@alea/lib/trading/telegram/formatOrderError";
 import { formatOrderPlaced } from "@alea/lib/trading/telegram/formatOrderPlaced";
 import {
   type AssetWindowOutcome,
@@ -52,6 +55,15 @@ import type { ClobClient } from "@polymarket/clob-client";
 
 const TICK_INTERVAL_MS = 250;
 const BOOK_POLL_INTERVAL_MS = 1_500;
+
+/** Pause between placement attempts inside the retry loop. */
+const PLACE_RETRY_DELAY_MS = 250;
+
+/**
+ * Stop the placement retry loop within this many ms of window close —
+ * we'd cancel any new resting order almost immediately anyway.
+ */
+const PLACE_GIVE_UP_BEFORE_END_MS = ORDER_CANCEL_MARGIN_MS + 1_000;
 
 export type RunLiveParams = {
   readonly assets: readonly Asset[];
@@ -258,6 +270,8 @@ export async function runLive({
         summarySent: false,
         cancelTimer: null,
         wrapUpTimer: null,
+        rejectedCount: 0,
+        placedAfterRetryCount: 0,
       };
       windows.set(startMs, window);
       const order = window;
@@ -378,10 +392,9 @@ export async function runLive({
         record.slot.kind === "empty" &&
         market.acceptingOrders
       ) {
-        // Place synchronously-marked: flip slot first so the next tick
-        // sees a non-empty slot and won't re-fire placement while the
-        // network call is in flight.
-        const placeholderSlot: Extract<AssetSlot, { kind: "active" }> = {
+        // Mark slot non-empty synchronously so the next tick can't
+        // re-fire placement while the async retry loop is in flight.
+        record.slot = {
           kind: "active",
           market,
           side: decision.chosen.side,
@@ -392,15 +405,19 @@ export async function runLive({
           costUsd: 0,
           feeRateBpsAvg: 0,
         };
-        record.slot = placeholderSlot;
-        void placeAndAlert({
+        void placeWithRetry({
+          asset,
           client,
           record,
-          decision,
-          tick,
           window,
+          lastTick,
+          emas,
+          books,
+          table,
+          minEdge,
           telegramBotToken,
           telegramChatId,
+          signal,
           emit,
         });
       }
@@ -440,6 +457,18 @@ type WindowRecord = {
   summarySent: boolean;
   cancelTimer: ReturnType<typeof setTimeout> | null;
   wrapUpTimer: ReturnType<typeof setTimeout> | null;
+  /**
+   * postOnly rejections observed during this window — silent at the
+   * time, surfaced in the per-window Telegram summary as
+   * "Cross-book rejections: N".
+   */
+  rejectedCount: number;
+  /**
+   * Orders that eventually placed successfully after one or more
+   * postOnly rejections (i.e. we re-evaluated against the moved book
+   * and decided we still wanted in). Subset of "all orders placed".
+   */
+  placedAfterRetryCount: number;
 };
 
 type AssetWindowRecord = {
@@ -638,90 +667,340 @@ async function refreshBook({
   }
 }
 
-async function placeAndAlert({
+/**
+ * Places one maker-only limit BUY for `record`'s asset, with the
+ * error-handling policy laid out in chunk-2 review:
+ *
+ *   - **postOnly rejection** (price moved between book read and post)
+ *     is the expected friction of being a maker. Silent over Telegram.
+ *     Increment `window.rejectedCount`. Re-fetch the book, re-evaluate
+ *     the decision against the fresh state, and try again. Repeat
+ *     until either we successfully place, the edge disappears, or the
+ *     window-close margin is reached.
+ *   - **Generic error** (network blip, signing hiccup, venue 5xx) gets
+ *     one silent retry with the same parameters. If the retry also
+ *     fails, fire-and-forget a Telegram alert (we want to know about
+ *     these soon, but not at the cost of blocking the loop) and give
+ *     up on this asset for the window.
+ *
+ * The slot is held in the `active` placeholder state for the entire
+ * loop so the tick handler doesn't double-fire placement while we're
+ * iterating.
+ */
+async function placeWithRetry({
+  asset,
   client,
   record,
-  decision,
-  tick,
   window,
+  lastTick,
+  emas,
+  books,
+  table,
+  minEdge,
   telegramBotToken,
   telegramChatId,
+  signal,
   emit,
 }: {
+  readonly asset: Asset;
   readonly client: ClobClient;
   readonly record: AssetWindowRecord;
-  readonly decision: Extract<TradeDecision, { kind: "trade" }>;
-  readonly tick: LivePriceTick;
   readonly window: WindowRecord;
+  readonly lastTick: ReadonlyMap<Asset, LivePriceTick>;
+  readonly emas: ReadonlyMap<Asset, FiveMinuteEmaTracker>;
+  readonly books: Map<Asset, UpDownBookSnapshot>;
+  readonly table: ProbabilityTable;
+  readonly minEdge: number;
   readonly telegramBotToken: string;
   readonly telegramChatId: string;
+  readonly signal: AbortSignal;
   readonly emit: (event: LiveEvent) => void;
 }): Promise<void> {
-  const market = record.market;
-  if (market === null || decision.chosen.bid === null) {
-    record.slot = { kind: "empty" };
-    return;
-  }
-  try {
-    const placed = await placeMakerLimitBuy({
-      client,
-      side: decision.chosen.side,
-      tokenId: decision.chosen.tokenId,
-      limitPrice: decision.chosen.bid,
-      negRisk: market.negRisk,
-      feeRateBps: 0,
+  let postOnlyRetries = 0;
+  while (true) {
+    if (signal.aborted) {
+      record.slot = { kind: "empty" };
+      return;
+    }
+    if (Date.now() >= window.windowEndMs - PLACE_GIVE_UP_BEFORE_END_MS) {
+      record.slot = { kind: "empty" };
+      return;
+    }
+    const market = record.market;
+    if (market === null || !market.acceptingOrders) {
+      record.slot = { kind: "empty" };
+      return;
+    }
+    const decision = currentDecision({
+      asset,
+      record,
+      window,
+      lastTick,
+      emas,
+      books,
+      table,
+      minEdge,
     });
+    if (decision === null) {
+      record.slot = { kind: "empty" };
+      return;
+    }
+
+    // Reflect the fresh decision in the placeholder slot so log/UI
+    // events reading the slot mid-loop see the right side and price.
     record.slot = {
       kind: "active",
       market,
-      side: placed.side,
-      tokenId: placed.tokenId,
-      orderId: placed.orderId,
-      limitPrice: placed.limitPrice,
+      side: decision.side,
+      tokenId: decision.tokenId,
+      orderId: null,
+      limitPrice: decision.bid,
       sharesFilled: 0,
       costUsd: 0,
-      feeRateBpsAvg: placed.feeRateBps,
+      feeRateBpsAvg: 0,
     };
-    if (record.slot.kind === "active") {
-      const slotForEvent = record.slot;
+
+    let attempt: PlaceAttempt = await attemptPlace({
+      client,
+      side: decision.side,
+      tokenId: decision.tokenId,
+      bid: decision.bid,
+      negRisk: market.negRisk,
+    });
+    // One silent retry for generic errors with the same parameters.
+    if (attempt.kind === "generic") {
+      await sleep(PLACE_RETRY_DELAY_MS);
+      attempt = await attemptPlace({
+        client,
+        side: decision.side,
+        tokenId: decision.tokenId,
+        bid: decision.bid,
+        negRisk: market.negRisk,
+      });
+    }
+
+    if (attempt.kind === "ok") {
+      const placedSlot: Extract<AssetSlot, { kind: "active" }> = {
+        kind: "active",
+        market,
+        side: attempt.placed.side,
+        tokenId: attempt.placed.tokenId,
+        orderId: attempt.placed.orderId,
+        limitPrice: attempt.placed.limitPrice,
+        sharesFilled: 0,
+        costUsd: 0,
+        feeRateBpsAvg: attempt.placed.feeRateBps,
+      };
+      record.slot = placedSlot;
+      if (postOnlyRetries > 0) {
+        window.placedAfterRetryCount += 1;
+      }
       emit({
         kind: "order-placed",
         atMs: Date.now(),
-        asset: record.asset,
-        slot: slotForEvent,
+        asset,
+        slot: placedSlot,
       });
-    }
-    const linePrice = record.line ?? tick.mid;
-    const message = formatOrderPlaced({
-      asset: record.asset,
-      side: placed.side,
-      stakeUsd: STAKE_USD,
-      underlyingPrice: tick.mid,
-      linePrice,
-      windowEndMs: window.windowEndMs,
-      nowMs: Date.now(),
-    });
-    try {
-      await sendTelegramMessage({
+      const tick = lastTick.get(asset);
+      const underlyingPrice =
+        tick?.mid ?? record.line ?? attempt.placed.limitPrice;
+      const linePrice = record.line ?? underlyingPrice;
+      const message = formatOrderPlaced({
+        asset,
+        side: attempt.placed.side,
+        stakeUsd: STAKE_USD,
+        underlyingPrice,
+        linePrice,
+        windowEndMs: window.windowEndMs,
+        nowMs: Date.now(),
+      });
+      sendTelegramFireAndForget({
         botToken: telegramBotToken,
         chatId: telegramChatId,
         text: message,
+        emit,
+        context: `${labelAsset(asset)} placement alert`,
       });
-    } catch (error) {
-      emit({
-        kind: "warn",
-        atMs: Date.now(),
-        message: `${labelAsset(record.asset)} telegram alert failed: ${(error as Error).message}`,
-      });
+      return;
     }
-  } catch (error) {
+
+    if (attempt.kind === "postOnly") {
+      window.rejectedCount += 1;
+      postOnlyRetries += 1;
+      emit({
+        kind: "info",
+        atMs: Date.now(),
+        message: `${labelAsset(asset)} postOnly rejection (#${postOnlyRetries}) at ${decision.bid.toFixed(2)} — ${attempt.errorMessage}`,
+      });
+      // Force a fresh book snapshot so the next pass evaluates against
+      // the moved spread, not the stale poll. Best-effort; the loop
+      // tolerates a failed refresh.
+      try {
+        const fresh = await fetchUpDownBook({ market, signal });
+        books.set(asset, fresh);
+      } catch {
+        // Carry on with whatever the poll has.
+      }
+      await sleep(PLACE_RETRY_DELAY_MS);
+      continue;
+    }
+
+    // Generic, after retry — give up and Telegram.
     record.slot = { kind: "empty" };
     emit({
       kind: "error",
       atMs: Date.now(),
-      message: `${labelAsset(record.asset)} place failed: ${(error as Error).message}`,
+      message: `${labelAsset(asset)} place failed (after retry): ${attempt.errorMessage}`,
     });
+    sendTelegramFireAndForget({
+      botToken: telegramBotToken,
+      chatId: telegramChatId,
+      text: formatOrderError({
+        asset,
+        side: decision.side,
+        errorMessage: attempt.errorMessage,
+      }),
+      emit,
+      context: `${labelAsset(asset)} order-error alert`,
+    });
+    return;
   }
+}
+
+type CurrentDecision = {
+  readonly side: "up" | "down";
+  readonly tokenId: string;
+  readonly bid: number;
+};
+
+/**
+ * Snapshots the live state into a single TAKE decision the placement
+ * loop can act on, or `null` if any precondition is missing or the
+ * edge has dropped below `minEdge` since last we looked.
+ */
+function currentDecision({
+  asset,
+  record,
+  window,
+  lastTick,
+  emas,
+  books,
+  table,
+  minEdge,
+}: {
+  readonly asset: Asset;
+  readonly record: AssetWindowRecord;
+  readonly window: WindowRecord;
+  readonly lastTick: ReadonlyMap<Asset, LivePriceTick>;
+  readonly emas: ReadonlyMap<Asset, FiveMinuteEmaTracker>;
+  readonly books: ReadonlyMap<Asset, UpDownBookSnapshot>;
+  readonly table: ProbabilityTable;
+  readonly minEdge: number;
+}): CurrentDecision | null {
+  const market = record.market;
+  if (market === null || record.line === null) {
+    return null;
+  }
+  const tick = lastTick.get(asset);
+  const tracker = emas.get(asset);
+  if (tick === undefined || tracker === undefined) {
+    return null;
+  }
+  const book = books.get(asset);
+  const decision = evaluateDecision({
+    asset,
+    windowStartMs: window.windowStartMs,
+    nowMs: Date.now(),
+    line: record.line,
+    currentPrice: tick.mid,
+    ema50: tracker.currentValue(),
+    upBestBid: book?.up.bestBid ?? null,
+    downBestBid: book?.down.bestBid ?? null,
+    upTokenId: market.upYesTokenId,
+    downTokenId: market.downYesTokenId,
+    table,
+    minEdge,
+  });
+  if (decision.kind !== "trade" || decision.chosen.bid === null) {
+    return null;
+  }
+  return {
+    side: decision.chosen.side,
+    tokenId: decision.chosen.tokenId,
+    bid: decision.chosen.bid,
+  };
+}
+
+type PlaceAttempt =
+  | {
+      readonly kind: "ok";
+      readonly placed: Awaited<ReturnType<typeof placeMakerLimitBuy>>;
+    }
+  | { readonly kind: "postOnly"; readonly errorMessage: string }
+  | { readonly kind: "generic"; readonly errorMessage: string };
+
+async function attemptPlace({
+  client,
+  side,
+  tokenId,
+  bid,
+  negRisk,
+}: {
+  readonly client: ClobClient;
+  readonly side: "up" | "down";
+  readonly tokenId: string;
+  readonly bid: number;
+  readonly negRisk: boolean;
+}): Promise<PlaceAttempt> {
+  try {
+    const placed = await placeMakerLimitBuy({
+      client,
+      side,
+      tokenId,
+      limitPrice: bid,
+      negRisk,
+      feeRateBps: 0,
+    });
+    return { kind: "ok", placed };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (error instanceof PostOnlyRejectionError) {
+      return { kind: "postOnly", errorMessage: message };
+    }
+    return { kind: "generic", errorMessage: message };
+  }
+}
+
+async function sleep(ms: number): Promise<void> {
+  await new Promise<void>((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Telegram is on the operator-experience hot path, not the trading
+ * hot path. Send it without awaiting; surface failures as a `warn`
+ * log line so the operator notices but the placement loop keeps
+ * moving.
+ */
+function sendTelegramFireAndForget({
+  botToken,
+  chatId,
+  text,
+  emit,
+  context,
+}: {
+  readonly botToken: string;
+  readonly chatId: string;
+  readonly text: string;
+  readonly emit: (event: LiveEvent) => void;
+  readonly context: string;
+}): void {
+  void sendTelegramMessage({ botToken, chatId, text }).catch((error) => {
+    emit({
+      kind: "warn",
+      atMs: Date.now(),
+      message: `${context} send failed: ${(error as Error).message}`,
+    });
+  });
 }
 
 function applyFill({
@@ -840,7 +1119,13 @@ async function wrapUpWindow({
     outcomes.push(outcome);
   }
 
-  const body = formatWindowSummary({ outcomes });
+  const body = formatWindowSummary({
+    outcomes,
+    stats: {
+      rejectedCount: window.rejectedCount,
+      placedAfterRetryCount: window.placedAfterRetryCount,
+    },
+  });
   emit({
     kind: "window-summary",
     atMs: Date.now(),
