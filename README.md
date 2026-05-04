@@ -22,3 +22,9 @@ when the modeled edge clears the market.
 - [Coding Conventions](./doc/CODING_CONVENTIONS.md) — repo structure, TypeScript style, and testing expectations.
 - [Documentation](./doc/DOCUMENTATION.md) — how project docs should be written and maintained.
 - [How To Work With Nick](./doc/HOW_TO_WORK_WITH_NICK.md) — collaboration preferences.
+
+### Research
+
+- [Research notes](./doc/research/) — dated findings, methodology
+  changes, and per-filter intuition from offline-analysis sessions.
+  Long-term memory for what we've tried and why.

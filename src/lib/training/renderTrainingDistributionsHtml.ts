@@ -455,6 +455,13 @@ export function renderTrainingDistributionsHtml({
       color: var(--alea-text);
       margin: 0;
       min-width: 0;
+      /* Override the summary's user-select:none so the operator can
+         select / copy the filter id from the title. The mousedown
+         handler on the summary detects an active text selection and
+         suppresses the toggle so single-click on text doesn't expand
+         the section while the user is mid-drag. */
+      user-select: text;
+      cursor: text;
     }
     details.filter-section > summary > .filter-summary-calibration {
       grid-column: 2;
@@ -1627,6 +1634,40 @@ export function renderTrainingDistributionsHtml({
         const chevron = detailsEl.querySelector('.filter-summary-chevron');
         if (chevron) chevron.textContent = detailsEl.open ? 'collapse ▴' : 'expand ▾';
       });
+      // Allow text selection on the title without toggling the section.
+      // We listen on the summary's click and suppress the default
+      // toggle whenever the user is mid-drag on the title, so a click-
+      // and-drag inside the title selects text instead of opening or
+      // closing the section. A bare click anywhere else on the summary
+      // (including the title without a drag) still toggles.
+      const summaryEl = detailsEl.querySelector('summary');
+      const titleEl = detailsEl.querySelector('.filter-summary-title');
+      if (summaryEl && titleEl) {
+        let titleMousedownAt = null;
+        titleEl.addEventListener('mousedown', (e) => {
+          titleMousedownAt = { x: e.clientX, y: e.clientY };
+        });
+        summaryEl.addEventListener('click', (e) => {
+          // If the user has an active selection inside the title at
+          // click time, suppress the toggle. Otherwise allow it.
+          const sel = window.getSelection();
+          const titleHasSelection =
+            sel && sel.toString().length > 0 &&
+            titleEl.contains(sel.anchorNode);
+          const startedOnTitle =
+            titleMousedownAt !== null &&
+            (e.target instanceof Node) &&
+            titleEl.contains(e.target);
+          const draggedAfterMousedown =
+            titleMousedownAt !== null &&
+            (Math.abs(e.clientX - titleMousedownAt.x) > 2 ||
+              Math.abs(e.clientY - titleMousedownAt.y) > 2);
+          if (titleHasSelection || (startedOnTitle && draggedAfterMousedown)) {
+            e.preventDefault();
+          }
+          titleMousedownAt = null;
+        });
+      }
     }
 
     function setFilterRemaining({ filterId, remaining }) {
