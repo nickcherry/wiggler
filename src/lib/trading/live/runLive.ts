@@ -38,6 +38,10 @@ import {
   placeMakerLimitBuy,
   PostOnlyRejectionError,
 } from "@alea/lib/trading/orders/placeMakerLimitBuy";
+import {
+  loadLifetimePnl,
+  persistLifetimePnl,
+} from "@alea/lib/trading/state/lifetimePnlStore";
 import { settleFilled } from "@alea/lib/trading/state/settleFilled";
 import type { AssetSlot } from "@alea/lib/trading/state/types";
 import { formatOrderError } from "@alea/lib/trading/telegram/formatOrderError";
@@ -121,12 +125,30 @@ export async function runLive({
     string,
     { readonly windowStartMs: number; readonly asset: Asset }
   >();
-  // Lifetime PnL accumulator. Single number across every window the
-  // running process has summarized; resets on restart since the runner
-  // is DB-free by design. Held in a one-field box so wrapUpWindow can
+  // Lifetime PnL accumulator. Persists across restarts via a tiny
+  // checkpoint file (`tmp/lifetime-pnl.json` by default) so `Total
+  // Pnl` in the Telegram summary is *truly* total, not just
+  // since-process-start. Held in a one-field box so wrapUpWindow can
   // read-modify-write through a closure without TS narrowing it back
   // to a const-look-alike at every call site.
   const lifetimePnl: { value: number } = { value: 0 };
+  const loadedLifetime = await loadLifetimePnl({
+    walletAddress: auth.walletAddress,
+  });
+  lifetimePnl.value = loadedLifetime.lifetimePnlUsd;
+  if (loadedLifetime.source === "loaded") {
+    emit({
+      kind: "info",
+      atMs: Date.now(),
+      message: `lifetime pnl loaded: $${loadedLifetime.lifetimePnlUsd.toFixed(2)} (as-of ${new Date(loadedLifetime.asOfMs).toISOString()})`,
+    });
+  } else {
+    emit({
+      kind: "info",
+      atMs: Date.now(),
+      message: `lifetime pnl cold-start (${loadedLifetime.reason}); accumulating from $0.00`,
+    });
+  }
 
   for (const asset of assets) {
     emas.set(asset, createFiveMinuteEmaTracker());
@@ -323,6 +345,7 @@ export async function runLive({
           windowsAll: windows,
           conditionIdIndex,
           lifetimePnl,
+          walletAddress: auth.walletAddress,
           emit,
         });
       }, wrapUpDelay);
@@ -1103,6 +1126,7 @@ async function wrapUpWindow({
   windowsAll,
   conditionIdIndex,
   lifetimePnl,
+  walletAddress,
   emit,
 }: {
   readonly window: WindowRecord;
@@ -1115,6 +1139,7 @@ async function wrapUpWindow({
     { readonly windowStartMs: number; readonly asset: Asset }
   >;
   readonly lifetimePnl: { value: number };
+  readonly walletAddress: string;
   readonly emit: (event: LiveEvent) => void;
 }): Promise<void> {
   if (window.summarySent) {
@@ -1135,6 +1160,24 @@ async function wrapUpWindow({
     0,
   );
   lifetimePnl.value += windowPnl;
+
+  // Persist to the checkpoint file before sending Telegram so a
+  // crash between settle and notify still preserves the new total.
+  // Failure to persist is logged but doesn't block the summary —
+  // we'd rather ship the message and lose one window's worth of
+  // checkpoint than block on disk I/O.
+  try {
+    await persistLifetimePnl({
+      walletAddress,
+      lifetimePnlUsd: lifetimePnl.value,
+    });
+  } catch (error) {
+    emit({
+      kind: "warn",
+      atMs: Date.now(),
+      message: `lifetime pnl persist failed: ${(error as Error).message}`,
+    });
+  }
 
   const body = formatWindowSummary({
     outcomes,
