@@ -32,19 +32,22 @@ const tmpDir = resolvePath(repoRoot, "tmp");
  * Generates the committed `probabilityTable.generated.ts` artifact that
  * the live trader loads at boot. Reuses the survival snapshot pipeline
  * (so the bucketing math is identical to what we vet on the training
- * dashboard) but applies only the EMA-50 alignment filter and writes a
- * lean per-asset surface. No HTML, no scoring, no caches — this is the
+ * dashboard) but applies only the `distance_from_line_atr` filter and
+ * writes a lean per-asset surface restricted to that filter's
+ * sweet-spot bp range. No HTML, no scoring caches — this is the
  * production model checked into version control.
  *
- * Run after the candle sync is up to date; the per-asset window count
- * line in the summary makes it obvious if the data is thin.
+ * Run after the candle sync is up to date; the per-asset summary line
+ * shows the discovered sweet-spot range and bucket counts so it's
+ * obvious if the data is thin or if the sweet spot has shifted from a
+ * prior run.
  */
 export const tradingGenProbabilityTableCommand = defineCommand({
   name: "trading:gen-probability-table",
   summary:
     "Refresh the committed live-trading probability table from local candles",
   description:
-    "Reads the local Postgres for the configured training candle series (today: binance-perp 5m + the matching 1m series) and writes src/lib/trading/probabilityTable/probabilityTable.generated.ts plus a JSON sidecar in tmp/. The model uses the EMA-50 5m alignment filter only; buckets thinner than --min-samples are dropped.",
+    "Reads the local Postgres for the configured training candle series (today: binance-perp 5m + the matching 1m series) and writes src/lib/trading/probabilityTable/probabilityTable.generated.ts plus a JSON sidecar in tmp/. The model uses the distance_from_line_atr filter (snapshot is `aligned`/decisively away when |distance| ≥ 0.5 × ATR-14) and only persists buckets within the per-asset sweet-spot bp range. Buckets thinner than --min-samples are dropped.",
   options: [
     defineValueOption({
       key: "assets",
@@ -115,10 +118,15 @@ export const tradingGenProbabilityTableCommand = defineCommand({
           probabilities: result.probabilities,
           aligned: false,
         });
+        const ss = result.probabilities.sweetSpot;
+        const sweetSpotLabel = ss
+          ? `[${ss.startBp}-${ss.endBp}] cov=${(ss.coverageFraction * 100).toFixed(1)}%`
+          : "—";
         io.writeStdout(
           `${pc.bold(asset.toUpperCase().padEnd(5))} ` +
             `${pc.dim("windows=")}${String(result.probabilities.windowCount).padStart(7)} ` +
             `${pc.dim("aligned=")}${(result.probabilities.alignedWindowShare * 100).toFixed(1).padStart(5)}% ` +
+            `${pc.dim("sweet=")}${sweetSpotLabel.padEnd(20)} ` +
             `${pc.dim("buckets=")}${String(aligned).padStart(4)}/${String(notAligned).padEnd(4)}\n`,
         );
       }

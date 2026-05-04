@@ -33,6 +33,12 @@ const baseTable: ProbabilityTable = {
           4: [],
         },
       },
+      sweetSpot: {
+        startBp: 0,
+        endBp: 100,
+        calibrationScore: 0.01,
+        coverageFraction: 0.5,
+      },
     },
   ],
 };

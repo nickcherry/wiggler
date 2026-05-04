@@ -46,27 +46,41 @@ Each in-window snapshot is classified by:
 - `remaining` — minutes left in the window, floored to one of
   `{1, 2, 3, 4}` per the training pipeline's snapshot convention
   (snapshots happen at +1m, +2m, +3m, +4m with `remaining = 5 − N`).
-- `aligned` — does `currentSide` agree with the EMA-50 regime,
-  evaluated _before_ the current window opened (i.e. through the
-  most recently closed 5m bar). EMA-50 of 5m closes is the only
-  context filter we trade with; the training framework's other
-  filters live in `src/lib/training/survivalFilters/` for
-  experimentation but are not consulted by the live trader.
+- `aligned` — was `|currentPrice − line| ≥ 0.5 × ATR-14` at decision
+  time, where ATR-14 is the Wilder ATR through and including the
+  most recently closed 5m bar. Mirrors the training-side
+  `distance_from_line_atr` filter exactly so the live classification
+  matches the historical classifications baked into the probability
+  table. (The field name `aligned` is kept for back-compat with the
+  surrounding code; semantically `true` = "decisively away" and
+  `false` = "near the line" — it does **not** refer to EMA-50
+  alignment anymore.)
 
 The probability table maps `(asset, aligned, remaining, distanceBp)`
 to `P(currentSide settles winning)`, derived empirically from the
-training data. Buckets thinner than `MIN_BUCKET_SAMPLES` (200) are
-dropped at generation; the runtime never sees them.
+training data. Buckets thinner than `MIN_BUCKET_SAMPLES` (200) and
+buckets outside the per-asset **sweet-spot bp range** are dropped at
+generation; the runtime never sees them, so a snapshot whose
+distance falls outside the sweet spot returns `null` from
+`lookupProbability` and the runner skips. See
+[TRAINING_DOMAIN.md § Sweet-spot detection](./TRAINING_DOMAIN.md#sweet-spot-detection)
+and [doc/research/2026-05-04-sweet-spot.md](./research/2026-05-04-sweet-spot.md).
 
-> **Active filter is under review.** The training-side scoring
-> overhaul (see [TRAINING_DOMAIN.md § Scoring methodology](./TRAINING_DOMAIN.md#scoring-methodology))
-> identifies `distance_from_line_atr` as the strongest single filter
-> across all five assets — meaningfully ahead of `ema_50_5m_alignment`
-> on calibration vs the global baseline. Switching the live trader
-> to it requires regenerating the probability table on the new
-> conditioning variable and re-running [`trading:dry-run`](#commands)
-> end-to-end before going live. Tracked as a future change; the
-> current production path still keys off `aligned`.
+The live runner maintains two streaming trackers per asset, both
+seeded from a REST hydration of the most recent 60 closed 5m bars
+and rolled forward by the websocket close-stream:
+
+- `fiveMinuteEmaTracker` — running EMA-50 (used for diagnostic
+  logging only since the filter swap; retained because operator-
+  facing messages still reference it).
+- `fiveMinuteAtrTracker` — running Wilder ATR-14 (the active
+  conditioning variable). Memory is O(1) after warmup; each tracker
+  keeps only its current value plus the previous bar's close.
+
+A focused unit test (`fiveMinuteAtrTracker.test.ts`) asserts the
+live ATR tracker matches the training pipeline's `computeWilderAtrSeries`
+bar-for-bar, so a divergence in the formula or seed convention is
+caught before it silently miscalibrates live trading.
 
 ## Architecture
 

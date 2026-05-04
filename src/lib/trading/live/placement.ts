@@ -1,9 +1,11 @@
 import { ORDER_CANCEL_MARGIN_MS, STAKE_USD } from "@alea/constants/trading";
+import type { FiveMinuteAtrTracker } from "@alea/lib/livePrices/fiveMinuteAtrTracker";
 import type { FiveMinuteEmaTracker } from "@alea/lib/livePrices/fiveMinuteEmaTracker";
 import type { LivePriceTick } from "@alea/lib/livePrices/types";
 import { sendTelegramMessage } from "@alea/lib/telegram/sendTelegramMessage";
 import { evaluateDecision } from "@alea/lib/trading/decision/evaluateDecision";
 import {
+  atrReadyForWindow,
   emaReadyForWindow,
   tickIsFresh,
   usableBookForMarket,
@@ -56,6 +58,7 @@ export async function placeWithRetry({
   window,
   lastTick,
   emas,
+  atrs,
   books,
   table,
   minEdge,
@@ -70,6 +73,7 @@ export async function placeWithRetry({
   readonly window: WindowRecord;
   readonly lastTick: ReadonlyMap<Asset, LivePriceTick>;
   readonly emas: ReadonlyMap<Asset, FiveMinuteEmaTracker>;
+  readonly atrs: ReadonlyMap<Asset, FiveMinuteAtrTracker>;
   readonly books: BookCache;
   readonly table: ProbabilityTable;
   readonly minEdge: number;
@@ -104,6 +108,7 @@ export async function placeWithRetry({
       window,
       lastTick,
       emas,
+      atrs,
       books,
       table,
       minEdge,
@@ -257,6 +262,7 @@ function currentDecision({
   window,
   lastTick,
   emas,
+  atrs,
   books,
   table,
   minEdge,
@@ -267,6 +273,7 @@ function currentDecision({
   readonly window: WindowRecord;
   readonly lastTick: ReadonlyMap<Asset, LivePriceTick>;
   readonly emas: ReadonlyMap<Asset, FiveMinuteEmaTracker>;
+  readonly atrs: ReadonlyMap<Asset, FiveMinuteAtrTracker>;
   readonly books: BookCache;
   readonly table: ProbabilityTable;
   readonly minEdge: number;
@@ -282,7 +289,8 @@ function currentDecision({
   }
   const tick = lastTick.get(asset);
   const tracker = emas.get(asset);
-  if (tick === undefined || tracker === undefined) {
+  const atrTracker = atrs.get(asset);
+  if (tick === undefined || tracker === undefined || atrTracker === undefined) {
     return null;
   }
   if (!tickIsFresh({ tick, windowStartMs: window.windowStartMs, nowMs })) {
@@ -292,7 +300,11 @@ function currentDecision({
     tracker,
     windowStartMs: window.windowStartMs,
   });
-  if (ema50 === null) {
+  const atr14 = atrReadyForWindow({
+    tracker: atrTracker,
+    windowStartMs: window.windowStartMs,
+  });
+  if (atr14 === null) {
     return null;
   }
   const book = usableBookForMarket({
@@ -308,6 +320,7 @@ function currentDecision({
     line: record.line,
     currentPrice: tick.mid,
     ema50,
+    atr14,
     upBestBid: book?.up.bestBid ?? null,
     downBestBid: book?.down.bestBid ?? null,
     upTokenId: market.upRef,

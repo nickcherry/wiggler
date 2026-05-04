@@ -3,28 +3,40 @@ import type {
   ProbabilityBucket,
   ProbabilitySurface,
   RemainingMinutes,
+  SweetSpot,
 } from "@alea/lib/trading/types";
 import { computeSurvivalSnapshots } from "@alea/lib/training/computeSurvivalSnapshots";
-import { ema505mAlignmentFilter } from "@alea/lib/training/survivalFilters/ema505mAlignment/filter";
+import { computeSweetSpot } from "@alea/lib/training/survivalFilters/computeSweetSpot";
+import { distanceFromLineAtrFilter } from "@alea/lib/training/survivalFilters/distanceFromLineAtr/filter";
+import type { SurvivalSurface } from "@alea/lib/training/types";
 import type { Asset } from "@alea/types/assets";
 import type { Candle } from "@alea/types/candles";
 
 /**
- * Computes the per-asset slice of the production probability table by
- * walking the historical snapshot stream once and accumulating
- * `(aligned, remaining, distanceBp) → (samples, survived)` totals.
+ * Computes the per-asset slice of the production probability table.
  *
- * The survival snapshot pipeline is reused as-is — same windowing, same
- * distance bucketing, same lookback context — but the rest of the
- * training framework (multi-filter overlays, scoring, JSON sidecars,
- * cache layers) is bypassed entirely. This keeps the live trader's
- * data dependency narrow: one filter, one numeric output per bucket.
+ * Walks the historical snapshot stream once and accumulates three raw
+ * surfaces in parallel: `aligned` ("decisively away" — filter true),
+ * `notAligned` ("near the line" — filter false), and the unconditional
+ * baseline. The unconditional baseline is needed only to compute the
+ * sweet-spot bp range; it isn't persisted in the output.
+ *
+ * After accumulation, runs sweet-spot detection (shared with the
+ * training-side `applySurvivalFilters` so the dashboard's sweet-spot
+ * range and the live trader's acted-upon range stay in lockstep), and
+ * filters the persisted surfaces to only include buckets within
+ * `[sweetSpot.startBp, sweetSpot.endBp]`. Buckets outside the range
+ * are dropped from the table — the live runtime treats a missing
+ * bucket as "no signal, do not trade", which is the discipline rule
+ * we want.
  *
  * Buckets thinner than `minBucketSamples` are dropped from both
- * surfaces so the runtime never has to second-guess the table.
+ * persisted surfaces independently of the sweet-spot filter, so the
+ * runtime never has to second-guess the table.
  *
- * Returns `null` when no usable windows exist for this asset (cold
- * series, insufficient EMA warm-up, etc.).
+ * Returns `null` when no usable windows exist (cold series, no warmup
+ * data) or when the filter has no positive info gain anywhere (no
+ * sweet spot — would be a signal something's wrong with the data).
  */
 export function computeAssetProbabilities({
   asset,
@@ -39,19 +51,23 @@ export function computeAssetProbabilities({
 }): AssetProbabilities | null {
   const aligned = createRawSurface();
   const notAligned = createRawSurface();
+  const global = createRawSurface();
   const allWindows = new Set<number>();
   const alignedWindows = new Set<number>();
   const notAlignedWindows = new Set<number>();
+  let totalSnapshots = 0;
 
   for (const snapshot of computeSurvivalSnapshots({ candles1m, candles5m })) {
-    const decision = ema505mAlignmentFilter.classify(
+    const decision = distanceFromLineAtrFilter.classify(
       snapshot,
       snapshot.context,
     );
     if (decision === "skip") {
       continue;
     }
+    totalSnapshots += 1;
     allWindows.add(snapshot.windowStartMs);
+    accumulate({ surface: global, snapshot });
     const target = decision ? aligned : notAligned;
     (decision ? alignedWindows : notAlignedWindows).add(snapshot.windowStartMs);
     accumulate({ surface: target, snapshot });
@@ -61,14 +77,36 @@ export function computeAssetProbabilities({
     return null;
   }
 
-  const alignedShare = alignedWindows.size / allWindows.size;
+  // Sweet-spot determination uses the unfiltered surfaces against the
+  // unconditional baseline — exact same algorithm the training-side
+  // `applySurvivalFilters` runs, so the live trader and the dashboard
+  // converge on the same bp range per asset.
+  const sweetSpot = computeSweetSpot({
+    baseline: surfaceFromRaw({ raw: global }),
+    whenTrue: surfaceFromRaw({ raw: aligned }),
+    whenFalse: surfaceFromRaw({ raw: notAligned }),
+    snapshotsTotal: totalSnapshots,
+  });
+  if (sweetSpot === null) {
+    return null;
+  }
 
+  const alignedShare = alignedWindows.size / allWindows.size;
   return {
     asset,
     windowCount: allWindows.size,
     alignedWindowShare: alignedShare,
-    aligned: materializeSurface({ raw: aligned, minBucketSamples }),
-    notAligned: materializeSurface({ raw: notAligned, minBucketSamples }),
+    aligned: materializeSurface({
+      raw: aligned,
+      minBucketSamples,
+      sweetSpot,
+    }),
+    notAligned: materializeSurface({
+      raw: notAligned,
+      minBucketSamples,
+      sweetSpot,
+    }),
+    sweetSpot,
   };
 }
 
@@ -106,19 +144,55 @@ function accumulate({
   surface[snapshot.remaining].set(snapshot.distanceBp, bucket);
 }
 
+/**
+ * Lightweight shape adapter so the same `RawSurface` we use here can
+ * feed `computeSweetSpot`, which expects `SurvivalSurface` (the
+ * training-side type). Same data, different access pattern.
+ */
+function surfaceFromRaw({
+  raw,
+}: {
+  readonly raw: RawSurface;
+}): SurvivalSurface {
+  return {
+    byRemaining: {
+      1: bucketsArrayFromRaw({ map: raw[1] }),
+      2: bucketsArrayFromRaw({ map: raw[2] }),
+      3: bucketsArrayFromRaw({ map: raw[3] }),
+      4: bucketsArrayFromRaw({ map: raw[4] }),
+    },
+  };
+}
+
+function bucketsArrayFromRaw({
+  map,
+}: {
+  readonly map: ReadonlyMap<number, RawBucket>;
+}): readonly { distanceBp: number; total: number; survived: number }[] {
+  return [...map.entries()]
+    .sort(([a], [b]) => a - b)
+    .map(([distanceBp, b]) => ({
+      distanceBp,
+      total: b.total,
+      survived: b.survived,
+    }));
+}
+
 function materializeSurface({
   raw,
   minBucketSamples,
+  sweetSpot,
 }: {
   readonly raw: RawSurface;
   readonly minBucketSamples: number;
+  readonly sweetSpot: SweetSpot;
 }): ProbabilitySurface {
   return {
     byRemaining: {
-      1: bucketsOf({ map: raw[1], minBucketSamples }),
-      2: bucketsOf({ map: raw[2], minBucketSamples }),
-      3: bucketsOf({ map: raw[3], minBucketSamples }),
-      4: bucketsOf({ map: raw[4], minBucketSamples }),
+      1: bucketsOf({ map: raw[1], minBucketSamples, sweetSpot }),
+      2: bucketsOf({ map: raw[2], minBucketSamples, sweetSpot }),
+      3: bucketsOf({ map: raw[3], minBucketSamples, sweetSpot }),
+      4: bucketsOf({ map: raw[4], minBucketSamples, sweetSpot }),
     },
   };
 }
@@ -126,13 +200,18 @@ function materializeSurface({
 function bucketsOf({
   map,
   minBucketSamples,
+  sweetSpot,
 }: {
   readonly map: ReadonlyMap<number, RawBucket>;
   readonly minBucketSamples: number;
+  readonly sweetSpot: SweetSpot;
 }): readonly ProbabilityBucket[] {
   const distances = [...map.keys()].sort((a, b) => a - b);
   const out: ProbabilityBucket[] = [];
   for (const distanceBp of distances) {
+    if (distanceBp < sweetSpot.startBp || distanceBp > sweetSpot.endBp) {
+      continue;
+    }
     const bucket = map.get(distanceBp);
     if (bucket === undefined || bucket.total < minBucketSamples) {
       continue;

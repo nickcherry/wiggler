@@ -1,5 +1,6 @@
 import { EMA50_BOOTSTRAP_BARS } from "@alea/constants/trading";
 import { fetchRecentFiveMinuteBars } from "@alea/lib/livePrices/binancePerp/fetchRecentFiveMinuteBars";
+import type { FiveMinuteAtrTracker } from "@alea/lib/livePrices/fiveMinuteAtrTracker";
 import type { FiveMinuteEmaTracker } from "@alea/lib/livePrices/fiveMinuteEmaTracker";
 import { activeSlotFromHydration } from "@alea/lib/trading/live/slotHydration";
 import type {
@@ -13,22 +14,25 @@ import type { Vendor } from "@alea/lib/trading/vendor/types";
 import type { Asset } from "@alea/types/assets";
 
 /**
- * Bootstrap each asset's EMA-50 tracker with the most recent closed
- * 5m bars from the price-feed REST endpoint. The tracker needs ≥50
- * closes before it returns a non-null EMA; we pull `EMA50_BOOTSTRAP_BARS`
- * (60 by default) so an occasional missed bar over the wire doesn't
- * stall the seed. Failures are logged and the runner proceeds —
- * decisions just stay in the `warmup` skip state until the live
- * stream catches up.
+ * Bootstrap each asset's moving trackers (EMA-50 and ATR-14) with the
+ * most recent closed 5m bars from the price-feed REST endpoint. EMA
+ * needs ≥50 closes; ATR needs ≥14. We pull `EMA50_BOOTSTRAP_BARS`
+ * (60 by default) which seeds both with margin to spare, and fetch
+ * once per asset so the two trackers share a single network round-
+ * trip. Failures are logged and the runner proceeds — decisions
+ * just stay in the `warmup` skip state until the live stream catches
+ * up.
  */
-export async function hydrateEmas({
+export async function hydrateMovingTrackers({
   assets,
   emas,
+  atrs,
   signal,
   emit,
 }: {
   readonly assets: readonly Asset[];
   readonly emas: Map<Asset, FiveMinuteEmaTracker>;
+  readonly atrs: Map<Asset, FiveMinuteAtrTracker>;
   readonly signal: AbortSignal;
   readonly emit: (event: LiveEvent) => void;
 }): Promise<void> {
@@ -42,23 +46,24 @@ export async function hydrateEmas({
         count: EMA50_BOOTSTRAP_BARS,
         signal,
       });
-      const tracker = emas.get(asset);
-      if (tracker !== undefined) {
-        for (const bar of bars) {
-          tracker.append(bar);
-        }
+      const ema = emas.get(asset);
+      const atr = atrs.get(asset);
+      for (const bar of bars) {
+        ema?.append(bar);
+        atr?.append(bar);
       }
-      const ema = tracker?.currentValue();
+      const emaValue = ema?.currentValue();
+      const atrValue = atr?.currentValue();
       emit({
         kind: "info",
         atMs: Date.now(),
-        message: `${labelAsset(asset)} hydrated ${bars.length} closed 5m bars, ema50=${ema === null || ema === undefined ? "warming" : ema.toFixed(2)}`,
+        message: `${labelAsset(asset)} hydrated ${bars.length} closed 5m bars, ema50=${emaValue === null || emaValue === undefined ? "warming" : emaValue.toFixed(2)}, atr14=${atrValue === null || atrValue === undefined ? "warming" : atrValue.toFixed(2)}`,
       });
     } catch (error) {
       emit({
         kind: "warn",
         atMs: Date.now(),
-        message: `${labelAsset(asset)} ema bootstrap failed: ${(error as Error).message}`,
+        message: `${labelAsset(asset)} tracker bootstrap failed: ${(error as Error).message}`,
       });
     }
   }

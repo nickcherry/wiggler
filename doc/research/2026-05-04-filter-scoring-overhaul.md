@@ -1,5 +1,15 @@
 # 2026-05-04 — Filter scoring overhaul
 
+> **Note on numbers in this doc:** the calibration figures below were
+> computed with `SUMMARY_MIN_SAMPLES = 300`. We later bumped that floor
+> to 2000 (see
+> [doc/research/2026-05-04-sample-floor.md](./2026-05-04-sample-floor.md))
+> after finding a low-bp sample-composition artifact. Absolute
+> percentages here are slightly inflated relative to current dashboard
+> values; the **conclusions and methodology stand**. Skip-selection
+> bias as documented here is a real, unresolved-by-the-floor-bump
+> phenomenon — the bump is orthogonal to it.
+
 ## Takeaway
 
 The original filter scoring (signed-area pp·bp delta vs the global

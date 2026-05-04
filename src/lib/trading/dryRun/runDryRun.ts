@@ -2,6 +2,10 @@ import { EMA50_BOOTSTRAP_BARS } from "@alea/constants/trading";
 import { fetchRecentFiveMinuteBars } from "@alea/lib/livePrices/binancePerp/fetchRecentFiveMinuteBars";
 import { streamBinancePerpLive } from "@alea/lib/livePrices/binancePerp/streamBinancePerpLive";
 import {
+  createFiveMinuteAtrTracker,
+  type FiveMinuteAtrTracker,
+} from "@alea/lib/livePrices/fiveMinuteAtrTracker";
+import {
   createFiveMinuteEmaTracker,
   type FiveMinuteEmaTracker,
 } from "@alea/lib/livePrices/fiveMinuteEmaTracker";
@@ -75,12 +79,14 @@ export async function runDryRun({
   signal,
 }: DryRunParams): Promise<void> {
   const emas = new Map<Asset, FiveMinuteEmaTracker>();
+  const atrs = new Map<Asset, FiveMinuteAtrTracker>();
   const lastTick = new Map<Asset, LivePriceTick>();
   const windows = new Map<Asset, AssetWindowState>();
   const books = new Map<Asset, UpDownBook>();
 
   for (const asset of assets) {
     emas.set(asset, createFiveMinuteEmaTracker());
+    atrs.set(asset, createFiveMinuteAtrTracker());
   }
 
   emit({
@@ -100,16 +106,17 @@ export async function runDryRun({
         signal,
       });
       const tracker = emas.get(asset);
-      if (tracker !== undefined) {
-        for (const bar of bars) {
-          tracker.append(bar);
-        }
+      const atrTracker = atrs.get(asset);
+      for (const bar of bars) {
+        tracker?.append(bar);
+        atrTracker?.append(bar);
       }
       const ema = tracker?.currentValue();
+      const atr = atrTracker?.currentValue();
       emit({
         kind: "info",
         atMs: Date.now(),
-        message: `${labelAsset(asset)} hydrated ${bars.length} closed 5m bars, ema50=${ema === null || ema === undefined ? "warming" : ema.toFixed(2)}`,
+        message: `${labelAsset(asset)} hydrated ${bars.length} closed 5m bars, ema50=${ema === null || ema === undefined ? "warming" : ema.toFixed(2)}, atr14=${atr === null || atr === undefined ? "warming" : atr.toFixed(2)}`,
       });
     } catch (error) {
       emit({
@@ -131,15 +138,14 @@ export async function runDryRun({
     },
     onBarClose: (bar: ClosedFiveMinuteBar) => {
       const tracker = emas.get(bar.asset);
-      if (tracker === undefined) {
-        return;
-      }
-      const incorporated = tracker.append(bar);
-      if (incorporated) {
+      const atrTracker = atrs.get(bar.asset);
+      const emaIncorporated = tracker !== undefined && tracker.append(bar);
+      const atrIncorporated = atrTracker !== undefined && atrTracker.append(bar);
+      if (emaIncorporated || atrIncorporated) {
         emit({
           kind: "info",
           atMs: Date.now(),
-          message: `${labelAsset(bar.asset)} 5m bar closed @ ${new Date(bar.openTimeMs).toISOString().slice(11, 16)} UTC, close=${bar.close}, ema50=${tracker.currentValue()?.toFixed(2) ?? "warming"}`,
+          message: `${labelAsset(bar.asset)} 5m bar closed @ ${new Date(bar.openTimeMs).toISOString().slice(11, 16)} UTC, close=${bar.close}, ema50=${tracker?.currentValue()?.toFixed(2) ?? "warming"}, atr14=${atrTracker?.currentValue()?.toFixed(2) ?? "warming"}`,
         });
       }
     },
@@ -244,11 +250,13 @@ export async function runDryRun({
       }
       const tick = lastTick.get(asset);
       const tracker = emas.get(asset);
+      const atrTracker = atrs.get(asset);
       const market = ws.market;
       const book = books.get(asset);
       if (
         tick === undefined ||
         tracker === undefined ||
+        atrTracker === undefined ||
         market === null ||
         ws.line === null
       ) {
@@ -262,6 +270,7 @@ export async function runDryRun({
         line: ws.line,
         currentPrice: tick.mid,
         ema50: tracker.currentValue(),
+        atr14: atrTracker.currentValue(),
         upBestBid: book?.up.bestBid ?? null,
         downBestBid: book?.down.bestBid ?? null,
         upTokenId: market.upRef,

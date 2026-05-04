@@ -36,6 +36,12 @@ const table: ProbabilityTable = {
           4: [],
         },
       },
+      sweetSpot: {
+        startBp: 0,
+        endBp: 100,
+        calibrationScore: 0.01,
+        coverageFraction: 0.5,
+      },
     },
   ],
 };
@@ -45,8 +51,11 @@ const baseInputs = {
   windowStartMs: WINDOW_START,
   nowMs: WINDOW_START + 2 * ONE_MINUTE, // [+2m, +3m) → remaining = 3
   line: 100,
-  currentPrice: 100.05, // distanceBp = 5
-  ema50: 99, // line >= ema → up regime; currentSide=up → aligned
+  currentPrice: 100.05, // distance = 0.05, distanceBp = 5
+  ema50: 99, // diagnostic only; aligned no longer keys off EMA
+  // distance_from_line_atr classification: aligned iff
+  // |distance| >= 0.5 × atr14. Here 0.05 >= 0.5 × 0.04 = 0.02 → aligned = true.
+  atr14: 0.04,
   upBestBid: 0.6,
   downBestBid: 0.1,
   upTokenId: "TOKEN_UP",
@@ -72,8 +81,8 @@ describe("evaluateDecision", () => {
     expect(decision.other.edge).toBeCloseTo(1 - 0.85 - 0.1, 9);
   });
 
-  it("returns warmup before the EMA tracker is seeded", () => {
-    const decision = evaluateDecision({ ...baseInputs, ema50: null });
+  it("returns warmup before the ATR tracker is seeded", () => {
+    const decision = evaluateDecision({ ...baseInputs, atr14: null });
     expect(decision.kind).toBe("skip");
     if (decision.kind === "skip") {
       expect(decision.reason).toBe("warmup");
@@ -142,10 +151,11 @@ describe("evaluateDecision", () => {
     }
   });
 
-  it("flips the regime classification when line < ema", () => {
+  it("flips aligned to false when distance < 0.5 × ATR", () => {
     const decision = evaluateDecision({
       ...baseInputs,
-      ema50: 101, // line=100 < ema=101 → down regime; currentSide=up → not aligned
+      // distance = 0.05; 0.5 × atr14 = 0.05 × 1.5 = 0.15 → 0.05 < 0.15 → not aligned.
+      atr14: 0.3,
     });
     // notAligned table at remaining=3, distance=5 → P(currentSide=up wins) = 0.6.
     // currentSide=up so ourP_up = 0.6, ourP_down = 0.4.
@@ -155,7 +165,6 @@ describe("evaluateDecision", () => {
     if (decision.kind !== "trade") {
       return;
     }
-    expect(decision.snapshot.regime).toBe("down");
     expect(decision.snapshot.aligned).toBe(false);
     expect(decision.chosen.side).toBe("down");
     expect(decision.chosen.edge).toBeCloseTo(0.3, 9);

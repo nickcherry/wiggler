@@ -1,3 +1,4 @@
+import { createFiveMinuteAtrTracker } from "@alea/lib/livePrices/fiveMinuteAtrTracker";
 import { createFiveMinuteEmaTracker } from "@alea/lib/livePrices/fiveMinuteEmaTracker";
 import type { LivePriceTick } from "@alea/lib/livePrices/types";
 import { applyFill } from "@alea/lib/trading/live/applyFill";
@@ -54,6 +55,12 @@ const table: ProbabilityTable = {
         },
       },
       notAligned: { byRemaining: { 1: [], 2: [], 3: [], 4: [] } },
+      sweetSpot: {
+        startBp: 0,
+        endBp: 100,
+        calibrationScore: 0.01,
+        coverageFraction: 0.5,
+      },
     },
   ],
 };
@@ -127,6 +134,26 @@ function emas() {
       open: 99,
       high: 100,
       low: 98,
+      close: 99,
+    });
+  }
+  return new Map([["btc" as const, tracker]]);
+}
+
+function atrs() {
+  // Small bar range → small ATR-14, so the test's tick distance of
+  // 0.05 (currentPrice 100.05 − line 100) clears the
+  // |distance| ≥ 0.5 × ATR threshold and the snapshot resolves as
+  // `aligned = true`. ATR ≈ 0.05 here → 0.5 × ATR = 0.025 < 0.05.
+  const tracker = createFiveMinuteAtrTracker();
+  for (let i = 50; i >= 1; i -= 1) {
+    tracker.append({
+      asset: "btc",
+      openTimeMs: WINDOW_START - i * 5 * 60_000,
+      closeTimeMs: WINDOW_START - (i - 1) * 5 * 60_000,
+      open: 99,
+      high: 99.025,
+      low: 98.975,
       close: 99,
     });
   }
@@ -226,6 +253,7 @@ async function runPlacement({
     window: windowRecord(),
     lastTick: lastTick(),
     emas: emas(),
+    atrs: atrs(),
     books: books(),
     table,
     minEdge: 0.05,

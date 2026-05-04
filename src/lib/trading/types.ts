@@ -57,11 +57,33 @@ export const probabilitySurfaceSchema = z.object({
 export type ProbabilitySurface = z.infer<typeof probabilitySurfaceSchema>;
 
 /**
- * Per-asset payload: two surfaces (aligned with the EMA-50 regime vs.
- * against it) plus the window count each was derived from. `windowCount`
- * here is the number of *5m windows*, not the number of snapshots; each
- * window contributes up to four snapshots (one per remaining-minute slot)
- * and is split between the two surfaces by the alignment filter.
+ * The contiguous bp range where the active filter does most of its
+ * work. Computed at training-data analysis time and applied as a
+ * bucket-level filter when generating the probability table — buckets
+ * outside this range are dropped, so the live lookup naturally returns
+ * `null` there and the runner skips the trade. See
+ * doc/research/2026-05-04-sweet-spot.md for the rationale.
+ */
+export const sweetSpotSchema = z.object({
+  startBp: z.int().nonnegative(),
+  endBp: z.int().nonnegative(),
+  calibrationScore: z.number(),
+  coverageFraction: z.number().min(0).max(1),
+});
+export type SweetSpot = z.infer<typeof sweetSpotSchema>;
+
+/**
+ * Per-asset payload: two surfaces produced by the active filter
+ * (`distance_from_line_atr` as of the May 2026 promotion: `aligned` =
+ * "decisively away" iff `|distance| ≥ 0.5 × ATR-14`, `notAligned` =
+ * "near the line"), plus the window count each was derived from and
+ * the per-asset sweet-spot range that bounds the persisted buckets.
+ *
+ * `windowCount` is the number of *5m windows*, not snapshots; each
+ * window contributes up to four snapshots (one per remaining-minute
+ * slot) and is split between the two surfaces by the filter. Names
+ * `aligned` / `notAligned` are kept for back-compat with the existing
+ * runtime code; they don't refer to EMA-50 alignment anymore.
  */
 export const assetProbabilitiesSchema = z.object({
   asset: assetSchema,
@@ -69,6 +91,7 @@ export const assetProbabilitiesSchema = z.object({
   alignedWindowShare: z.number().min(0).max(1),
   aligned: probabilitySurfaceSchema,
   notAligned: probabilitySurfaceSchema,
+  sweetSpot: sweetSpotSchema,
 });
 export type AssetProbabilities = z.infer<typeof assetProbabilitiesSchema>;
 

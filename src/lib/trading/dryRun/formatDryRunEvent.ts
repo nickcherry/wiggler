@@ -39,7 +39,7 @@ function formatDecision({
       `line=${s.line.toFixed(decimalsFor({ asset: s.asset }))}`,
       `px=${s.currentPrice.toFixed(decimalsFor({ asset: s.asset }))}`,
       `${distanceLabel({ snapshot: s })}`,
-      `ema=${s.ema50.toFixed(decimalsFor({ asset: s.asset }))}`,
+      `ema=${s.ema50 === null ? "—" : s.ema50.toFixed(decimalsFor({ asset: s.asset }))}`,
       `${alignmentLabel({ aligned: s.aligned })}`,
       `ourP=${decision.chosen.ourProbability.toFixed(3)}`,
       `mkt(up=${formatBid({ value: decision.chosen.side === "up" ? decision.chosen.bid : decision.other.bid })} down=${formatBid({ value: decision.chosen.side === "down" ? decision.chosen.bid : decision.other.bid })})`,

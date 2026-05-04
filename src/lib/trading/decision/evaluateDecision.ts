@@ -16,11 +16,22 @@ export type DecisionInputs = {
   readonly currentPrice: number;
   /**
    * Most recent EMA-50 evaluated *through and including* the last
-   * CLOSED 5m bar — i.e. the "EMA just before the current window
-   * started" the training pipeline conditions on. `null` when the
-   * tracker is still warming up (fewer than 50 closed bars seen).
+   * CLOSED 5m bar. Retained for diagnostic logging on the
+   * `DecisionSnapshot`; **no longer the conditioning variable for
+   * the probability lookup** since we promoted to the
+   * `distance_from_line_atr` filter (see `atr14` below). `null`
+   * until ≥50 closed bars have been seen.
    */
   readonly ema50: number | null;
+  /**
+   * Most recent Wilder ATR-14 evaluated *through and including* the
+   * last CLOSED 5m bar. Used to compute the `decisivelyAway`
+   * classification: `decisivelyAway = |currentPrice − line| ≥ 0.5 ×
+   * ATR-14`. This matches the training-side
+   * `distanceFromLineAtrFilter` exactly. `null` until ≥14 closed
+   * bars have been seen — the runner skips with `warmup` until then.
+   */
+  readonly atr14: number | null;
   /** Best bid for the up-YES token, or `null` if nothing is resting. */
   readonly upBestBid: number | null;
   /** Best bid for the down-YES token, or `null` if nothing is resting. */
@@ -75,7 +86,7 @@ export function evaluateDecision(inputs: DecisionInputs): TradeDecision {
       down: null,
     };
   }
-  if (inputs.ema50 === null) {
+  if (inputs.atr14 === null || inputs.atr14 <= 0) {
     return {
       kind: "skip",
       reason: "warmup",
@@ -86,13 +97,21 @@ export function evaluateDecision(inputs: DecisionInputs): TradeDecision {
     };
   }
 
-  const distanceBp = Math.floor(
-    (Math.abs(inputs.currentPrice - inputs.line) / inputs.line) * 10_000 + 1e-9,
-  );
+  const distanceAbs = Math.abs(inputs.currentPrice - inputs.line);
+  const distanceBp = Math.floor((distanceAbs / inputs.line) * 10_000 + 1e-9);
   const currentSide: LeadingSide =
     inputs.currentPrice >= inputs.line ? "up" : "down";
-  const regime: LeadingSide = inputs.line >= inputs.ema50 ? "up" : "down";
-  const aligned = currentSide === regime;
+  // EMA-50 regime kept for diagnostic logging only; the decision
+  // doesn't condition on it anymore. We compute when EMA is available.
+  const regime: LeadingSide | null =
+    inputs.ema50 === null ? null : inputs.line >= inputs.ema50 ? "up" : "down";
+  // Filter classification: `decisivelyAway = |distance| >= 0.5 × ATR-14`.
+  // Mirrors `distanceFromLineAtrFilter.classify` in the training
+  // pipeline. `aligned` is named for back-compat with the existing
+  // probability-table surface naming (true → "decisively away" surface,
+  // false → "near the line" surface); rename to `decisivelyAway` is a
+  // separate, mechanical pass.
+  const aligned = distanceAbs >= 0.5 * inputs.atr14;
 
   const snapshot: DecisionSnapshot = {
     asset: inputs.asset,

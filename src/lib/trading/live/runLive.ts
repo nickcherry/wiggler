@@ -5,6 +5,10 @@ import {
 } from "@alea/constants/trading";
 import { streamBinancePerpLive } from "@alea/lib/livePrices/binancePerp/streamBinancePerpLive";
 import {
+  createFiveMinuteAtrTracker,
+  type FiveMinuteAtrTracker,
+} from "@alea/lib/livePrices/fiveMinuteAtrTracker";
+import {
   createFiveMinuteEmaTracker,
   type FiveMinuteEmaTracker,
 } from "@alea/lib/livePrices/fiveMinuteEmaTracker";
@@ -21,6 +25,7 @@ import { evaluateDecision } from "@alea/lib/trading/decision/evaluateDecision";
 import { applyFill } from "@alea/lib/trading/live/applyFill";
 import { cancelResidualOrders } from "@alea/lib/trading/live/cancelResidualOrders";
 import {
+  atrReadyForWindow,
   emaReadyForWindow,
   tickCanCaptureLine,
   tickIsFresh,
@@ -29,7 +34,7 @@ import {
 import { bootstrapLifetimePnl } from "@alea/lib/trading/live/lifetimePnlBootstrap";
 import {
   hydrateAssetMarket,
-  hydrateEmas,
+  hydrateMovingTrackers,
 } from "@alea/lib/trading/live/marketHydration";
 import { placeWithRetry } from "@alea/lib/trading/live/placement";
 import type {
@@ -117,10 +122,12 @@ export async function runLive({
   }
 
   const emas = new Map<Asset, FiveMinuteEmaTracker>();
+  const atrs = new Map<Asset, FiveMinuteAtrTracker>();
   for (const asset of assets) {
     emas.set(asset, createFiveMinuteEmaTracker());
+    atrs.set(asset, createFiveMinuteAtrTracker());
   }
-  await hydrateEmas({ assets, emas, signal, emit });
+  await hydrateMovingTrackers({ assets, emas, atrs, signal, emit });
   if (signal.aborted) {
     return;
   }
@@ -138,12 +145,15 @@ export async function runLive({
     },
     onBarClose: (bar) => {
       lastClosedBars.set(bar.asset, bar);
-      const tracker = emas.get(bar.asset);
-      if (tracker !== undefined && tracker.append(bar)) {
+      const ema = emas.get(bar.asset);
+      const atr = atrs.get(bar.asset);
+      const emaAccepted = ema !== undefined && ema.append(bar);
+      const atrAccepted = atr !== undefined && atr.append(bar);
+      if (emaAccepted || atrAccepted) {
         emit({
           kind: "info",
           atMs: Date.now(),
-          message: `${labelAsset(bar.asset)} 5m close ${new Date(bar.openTimeMs).toISOString().slice(11, 16)} UTC: close=${bar.close}, ema50=${tracker.currentValue()?.toFixed(2) ?? "warming"}`,
+          message: `${labelAsset(bar.asset)} 5m close ${new Date(bar.openTimeMs).toISOString().slice(11, 16)} UTC: close=${bar.close}, ema50=${ema?.currentValue()?.toFixed(2) ?? "warming"}, atr14=${atr?.currentValue()?.toFixed(2) ?? "warming"}`,
         });
       }
     },
@@ -309,6 +319,7 @@ export async function runLive({
         nowMs,
         lastTick,
         emas,
+        atrs,
         books,
         table,
         minEdge,
@@ -438,6 +449,7 @@ function stepAsset({
   nowMs,
   lastTick,
   emas,
+  atrs,
   books,
   table,
   minEdge,
@@ -453,6 +465,7 @@ function stepAsset({
   readonly nowMs: number;
   readonly lastTick: ReadonlyMap<Asset, LivePriceTick>;
   readonly emas: ReadonlyMap<Asset, FiveMinuteEmaTracker>;
+  readonly atrs: ReadonlyMap<Asset, FiveMinuteAtrTracker>;
   readonly books: BookCache;
   readonly table: ProbabilityTable;
   readonly minEdge: number;
@@ -501,10 +514,12 @@ function stepAsset({
 
   const tick = lastTick.get(asset);
   const tracker = emas.get(asset);
+  const atrTracker = atrs.get(asset);
   const market = record.market;
   if (
     tick === undefined ||
     tracker === undefined ||
+    atrTracker === undefined ||
     market === null ||
     record.hydrationStatus !== "ready" ||
     record.line === null
@@ -521,6 +536,13 @@ function stepAsset({
   if (ema50 === null) {
     return;
   }
+  const atr14 = atrReadyForWindow({
+    tracker: atrTracker,
+    windowStartMs: window.windowStartMs,
+  });
+  if (atr14 === null) {
+    return;
+  }
   const book = usableBookForMarket({
     book: books.get(market.vendorRef),
     vendorRef: market.vendorRef,
@@ -534,6 +556,7 @@ function stepAsset({
     line: record.line,
     currentPrice: tick.mid,
     ema50,
+    atr14,
     upBestBid: book?.up.bestBid ?? null,
     downBestBid: book?.down.bestBid ?? null,
     upTokenId: market.upRef,
@@ -572,6 +595,7 @@ function stepAsset({
       window,
       lastTick,
       emas,
+      atrs,
       books,
       table,
       minEdge,

@@ -1,5 +1,18 @@
 # 2026-05-04 — Sweet-spot detection
 
+> **Note on numbers in this doc:** the calibration figures below were
+> computed with `SUMMARY_MIN_SAMPLES = 300`. We later bumped that floor
+> to 2000 (see
+> [doc/research/2026-05-04-sample-floor.md](./2026-05-04-sample-floor.md)).
+> Absolute calibration percentages and sweet-spot bp ranges in this
+> doc reflect the pre-bump scoring; the current dashboard's numbers are
+> different (population calibrations are lower, sweet-spot ranges
+> shifted up at the low end, restricted calibrations are higher). The
+> *concepts* — the algorithm, threshold rationale, trading-discipline
+> framing, edge cases — are unaffected. Treat this as the methodology
+> doc; treat the live dashboard as the source of truth for current
+> numbers.
+
 ## Takeaway
 
 A filter's `calibrationScore` averages information gain across the whole

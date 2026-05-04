@@ -2,10 +2,19 @@ import type { LeadingSide, RemainingMinutes } from "@alea/lib/trading/types";
 import type { Asset } from "@alea/types/assets";
 
 /**
- * Per-snapshot data computed from the live feed and the EMA tracker. The
- * decision evaluator and the dry-run logger both consume this same
- * shape — there's no second layer that re-derives `aligned` or
- * `distanceBp` from raw inputs.
+ * Per-snapshot data computed from the live feed and the moving
+ * trackers. The decision evaluator and the dry-run logger both
+ * consume this same shape — there's no second layer that re-derives
+ * `aligned` or `distanceBp` from raw inputs.
+ *
+ * As of the `distance_from_line_atr` promotion, `aligned` is the
+ * filter classification `|distance| >= 0.5 × atr14` (`true` =
+ * "decisively away"), NOT the previous `currentSide === ema50_regime`.
+ * `ema50` and `regime` are retained for diagnostic logging only — the
+ * runner still tracks EMA-50 alongside ATR-14 because operator-facing
+ * messages and dry-run output reference it. `regime` may be `null`
+ * if the EMA tracker is still warming up but the ATR tracker has
+ * seeded.
  */
 export type DecisionSnapshot = {
   readonly asset: Asset;
@@ -15,8 +24,8 @@ export type DecisionSnapshot = {
   readonly currentPrice: number;
   readonly distanceBp: number;
   readonly remaining: RemainingMinutes;
-  readonly ema50: number;
-  readonly regime: LeadingSide;
+  readonly ema50: number | null;
+  readonly regime: LeadingSide | null;
   readonly currentSide: LeadingSide;
   readonly aligned: boolean;
 };

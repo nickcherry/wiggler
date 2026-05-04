@@ -1,3 +1,4 @@
+import type { FiveMinuteAtrTracker } from "@alea/lib/livePrices/fiveMinuteAtrTracker";
 import type { FiveMinuteEmaTracker } from "@alea/lib/livePrices/fiveMinuteEmaTracker";
 import { FIVE_MINUTES_MS } from "@alea/lib/livePrices/fiveMinuteWindow";
 import type {
@@ -95,6 +96,31 @@ export function emaReadyForWindow({
     return null;
   }
   return ema;
+}
+
+/**
+ * Sister of `emaReadyForWindow` for the ATR-14 tracker. Returns the
+ * tracker's current value only if the last bar incorporated is the
+ * one ending exactly at the current window's start — same staleness
+ * rule as EMA, so the live filter classification matches the
+ * "evaluated through and including the prior closed bar" convention
+ * the training pipeline uses.
+ */
+export function atrReadyForWindow({
+  tracker,
+  windowStartMs,
+}: {
+  readonly tracker: FiveMinuteAtrTracker;
+  readonly windowStartMs: number;
+}): number | null {
+  const atr = tracker.currentValue();
+  if (atr === null) {
+    return null;
+  }
+  if (tracker.lastBarOpenMs() !== windowStartMs - FIVE_MINUTES_MS) {
+    return null;
+  }
+  return atr;
 }
 
 export function exactSettlementBar({
