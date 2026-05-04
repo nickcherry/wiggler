@@ -74,7 +74,9 @@ export function computeDryAggregateMetrics({
       }),
     }),
     unfilledCounterfactual: computeFillMetrics({
-      resolutions: resolutions.filter((r) => r.order.canonicalFilledShares <= 0),
+      resolutions: resolutions.filter(
+        (r) => r.order.canonicalFilledShares <= 0,
+      ),
       select: (resolution) => ({
         shares: resolution.order.sharesIfFilled,
         latencyMs: 0,
@@ -105,7 +107,7 @@ function computeFillMetrics({
     if (resolution.order.side === resolution.officialWinningSide) {
       wins += 1;
     }
-    pnlUsd += computePnlUsd({
+    pnlUsd += computeDryPnlUsd({
       shares: fill.shares,
       price: resolution.order.limitPrice,
       won: resolution.order.side === resolution.officialWinningSide,
@@ -117,7 +119,8 @@ function computeFillMetrics({
   return {
     orderCount: resolutions.length,
     filledCount,
-    fillRate: resolutions.length === 0 ? null : filledCount / resolutions.length,
+    fillRate:
+      resolutions.length === 0 ? null : filledCount / resolutions.length,
     winRate: filledCount === 0 ? null : wins / filledCount,
     pnlUsd,
     meanFillLatencyMs: mean(latencies),
@@ -126,7 +129,7 @@ function computeFillMetrics({
   };
 }
 
-function computePnlUsd({
+export function computeDryPnlUsd({
   shares,
   price,
   won,

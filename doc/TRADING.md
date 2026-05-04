@@ -155,7 +155,7 @@ Polymarket happens to expose it today:
 | `prepareMakerLimitBuy` | Validate/round/size a maker BUY without signing it       | Local/read-only                                   |
 | `placeMakerLimitBuy`   | Sign + post a `postOnly: true` GTD limit BUY             | One REST POST (signed)                            |
 | `cancelOrder`          | Cancel a resting order by id                             | One REST POST (signed)                            |
-| `streamMarketData`     | Public market book/trade/resolution updates             | One public WS, auto-reconnecting                  |
+| `streamMarketData`     | Public market book/trade/resolution updates              | One public WS, auto-reconnecting                  |
 | `streamUserFills`      | Long-lived WS for our wallet's fill events               | One auth WS, auto-reconnecting                    |
 | `hydrateMarketState`   | Open orders + cumulative fills for one market            | Two parallel REST GETs (signed)                   |
 | `resolveMarketOutcome` | Read official token winner for a market                  | One public REST GET                               |
@@ -282,9 +282,9 @@ official outcome source, with REST resolution as fallback.
 `wss://ws-subscriptions-clob.polymarket.com/ws/user`. Authenticated
 user channel used only by live trading.
 
-| Stream       | Usage                                       | Frequency                                                                                                 |
-| ------------ | ------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
-| `/ws/market` | Public market book/trade/resolution events | Continuous, narrowed to active token IDs; dry-run resubscribes on market discovery                        |
+| Stream       | Usage                                       | Frequency                                                                                                  |
+| ------------ | ------------------------------------------- | ---------------------------------------------------------------------------------------------------------- |
+| `/ws/market` | Public market book/trade/resolution events  | Continuous, narrowed to active token IDs; dry-run resubscribes on market discovery                         |
 | `/ws/user`   | Real-time fill notifications for our wallet | Continuous, narrowed to active conditionIds; live resubscribes on every market discovery (~once per 5 min) |
 
 Reconnect schedule mirrors the live price feed: `[1, 2, 5, 10, 30] s`.
@@ -301,10 +301,10 @@ loop. A failed send logs a `warn` and keeps moving.
 
 ### Filesystem
 
-| Path                                   | Usage                   | Frequency                                   |
-| -------------------------------------- | ----------------------- | ------------------------------------------- |
-| `tmp/lifetime-pnl.json` (atomic write) | Lifetime PnL checkpoint | Read at boot; rewritten after startup reconciliation and once per window-end |
-| `tmp/dry-trading/dry-trading_<timestamp>.jsonl` | Dry-trading session ledger | New file per dry-run session; append session/window/order records |
+| Path                                            | Usage                      | Frequency                                                                    |
+| ----------------------------------------------- | -------------------------- | ---------------------------------------------------------------------------- |
+| `tmp/lifetime-pnl.json` (atomic write)          | Lifetime PnL checkpoint    | Read at boot; rewritten after startup reconciliation and once per window-end |
+| `tmp/dry-trading/dry-trading_<timestamp>.jsonl` | Dry-trading session ledger | New file per dry-run session; append session/window/order records            |
 
 ## Failure modes and recovery
 
@@ -312,17 +312,17 @@ The runner is built to keep going through every transient failure
 that doesn't put real money at risk. Cataloged so an operator
 reading a long log stretch knows what's normal:
 
-| Symptom                                      | What's happening                                | Runner behaviour                                                                                                                   |
-| -------------------------------------------- | ----------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
-| `binance-perp ws disconnected`               | Socket dropped (network blip, Binance hiccup)   | Exponential reconnect; price decisions are stale until it returns                                                                  |
-| `polymarket user ws disconnected`            | Same, on the user channel                       | Same exponential reconnect; fills missed during the gap surface on next hydration                                                  |
-| `${asset} no polymarket market for window …` | Slug not yet in gamma-api                       | Skip this asset for the window; retry on next 5m boundary                                                                          |
-| `${asset} postOnly rejection (#N)`           | Price moved between book read and post          | Re-fetch book → re-evaluate → retry; counted in window summary as `Cross-book rejections`                                          |
-| `${asset} place failed (after retry)`        | Generic post error, even after one silent retry | Skip this asset for the window; fire-and-forget Telegram alert                                                                     |
+| Symptom                                      | What's happening                                          | Runner behaviour                                                                                                                   |
+| -------------------------------------------- | --------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
+| `binance-perp ws disconnected`               | Socket dropped (network blip, Binance hiccup)             | Exponential reconnect; price decisions are stale until it returns                                                                  |
+| `polymarket user ws disconnected`            | Same, on the user channel                                 | Same exponential reconnect; fills missed during the gap surface on next hydration                                                  |
+| `${asset} no polymarket market for window …` | Slug not yet in gamma-api                                 | Skip this asset for the window; retry on next 5m boundary                                                                          |
+| `${asset} postOnly rejection (#N)`           | Price moved between book read and post                    | Re-fetch book → re-evaluate → retry; counted in window summary as `Cross-book rejections`                                          |
+| `${asset} place failed (after retry)`        | Generic post error, even after one silent retry           | Skip this asset for the window; fire-and-forget Telegram alert                                                                     |
 | `lifetime pnl reconciliation failed`         | Startup venue-truth scan failed after a checkpoint loaded | Keep the loaded checkpoint and continue; operator can run `trading:hydrate-lifetime-pnl` manually                                  |
-| `lifetime pnl persist failed`                | Disk error on the checkpoint write              | Continue; the in-memory accumulator is still correct, next window will retry the persist                                           |
-| `window summary telegram send failed`        | Telegram API hiccup                             | Continue; the next window's summary will reflect the same lifetime total                                                           |
-| `${asset} state hydration failed`            | `getOpenOrders` or `getTrades` failed at boot   | Slot starts empty; if there was a leftover open order on the venue we'll observe its fill via the user WS, or cancel it at wrap-up |
+| `lifetime pnl persist failed`                | Disk error on the checkpoint write                        | Continue; the in-memory accumulator is still correct, next window will retry the persist                                           |
+| `window summary telegram send failed`        | Telegram API hiccup                                       | Continue; the next window's summary will reflect the same lifetime total                                                           |
+| `${asset} state hydration failed`            | `getOpenOrders` or `getTrades` failed at boot             | Slot starts empty; if there was a leftover open order on the venue we'll observe its fill via the user WS, or cancel it at wrap-up |
 
 What the runner explicitly **doesn't** do, by design:
 
@@ -427,9 +427,15 @@ Dry fills are queue-aware by default:
 Each session writes `tmp/dry-trading/dry-trading_<timestamp>.jsonl`.
 The ledger appends `session_start`, `virtual_order`,
 `window_checkpoint`, `window_finalized`, and `session_stop` records.
-Finalized windows include canonical queue-aware fill metrics plus
-optimistic touch, all-orders-filled, and unfilled-order counterfactual
-PnL/win-rate views.
+The console prints virtual-order lines as they are prepared and a
+multi-line dry summary after each market finalizes. The same virtual
+placement and per-window dry summary bodies are sent to Telegram using
+`TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID`; they are explicitly labelled
+as dry-run messages and no venue order is signed or posted. Finalized
+windows include canonical queue-aware fill metrics plus optimistic
+touch, all-orders-filled, and unfilled-order counterfactual PnL/win-rate
+views. Dry totals are session-to-date only, unlike live trading's
+lifetime venue PnL.
 
 ### `trading:live --commit`
 

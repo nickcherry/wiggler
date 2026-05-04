@@ -24,11 +24,11 @@ export function formatDryRunEvent({
     case "decision":
       return `${ts} ${formatDecision({ decision: event.decision })}`;
     case "virtual-order":
-      return `${ts} ${pc.green("DRY ORDER")} ${pc.bold(labelAsset(event.asset))} ${event.order.side.toUpperCase()} @${event.order.limitPrice.toFixed(3)} shares=${event.order.sharesIfFilled.toFixed(2)} queue=${event.order.queueAheadShares === null ? "unknown" : event.order.queueAheadShares.toFixed(2)}`;
+      return `${ts} ${pc.green("DRY ORDER")} ${pc.bold(labelAsset(event.asset))} ${event.order.side.toUpperCase()} limit=${formatLimitPrice({ value: event.order.limitPrice })} stake=$${formatStake({ stakeUsd: event.stakeUsd })} shares=${event.order.sharesIfFilled.toFixed(2)} queue=${event.order.queueAheadShares === null ? "unknown" : event.order.queueAheadShares.toFixed(2)} p=${event.modelProbability.toFixed(3)} edge=${event.edge === null ? "--" : formatSigned({ value: event.edge })} line=${event.line.toFixed(decimalsFor({ asset: event.asset }))} px=${event.entryPrice.toFixed(decimalsFor({ asset: event.asset }))}`;
     case "virtual-fill":
       return `${ts} ${pc.green("DRY FILL")} ${pc.bold(labelAsset(event.asset))} ${event.order.side.toUpperCase()} shares=${event.order.canonicalFilledShares.toFixed(2)} latency=${event.order.canonicalFirstFillAtMs === null ? "?" : `${event.order.canonicalFirstFillAtMs - event.order.placedAtMs}ms`}`;
     case "window-finalized":
-      return `${ts} ${pc.bold("DRY WINDOW")} ${new Date(event.windowStartMs).toISOString().slice(11, 16)}→${new Date(event.windowEndMs).toISOString().slice(11, 16)} orders=${event.metrics.orderCount} filled=${event.metrics.canonical.filledCount} pnl=${formatSignedUsd({ value: event.metrics.canonical.pnlUsd })} allFilled=${formatSignedUsd({ value: event.metrics.allOrdersFilled.pnlUsd })}`;
+      return `${ts} ${pc.bold(`=== dry window ${new Date(event.windowStartMs).toISOString().slice(11, 16)} → ${new Date(event.windowEndMs).toISOString().slice(11, 16)} ===`)}\n${event.body}`;
   }
 }
 
@@ -124,9 +124,23 @@ function formatSigned({ value }: { readonly value: number }): string {
   return `${sign}${value.toFixed(3)}`;
 }
 
-function formatSignedUsd({ value }: { readonly value: number }): string {
-  const sign = value >= 0 ? "+" : "";
-  return `${sign}$${Math.abs(value).toFixed(2)}`;
+function formatStake({ stakeUsd }: { readonly stakeUsd: number }): string {
+  if (Number.isInteger(stakeUsd)) {
+    return String(stakeUsd);
+  }
+  return stakeUsd.toFixed(2);
+}
+
+function formatLimitPrice({ value }: { readonly value: number }): string {
+  let str = value.toFixed(3);
+  while (str.endsWith("0") && decimalPlaces({ value: str }) > 2) {
+    str = str.slice(0, -1);
+  }
+  return `$${str}`;
+}
+
+function decimalPlaces({ value }: { readonly value: string }): number {
+  return value.split(".")[1]?.length ?? 0;
 }
 
 function decimalsFor({ asset }: { readonly asset: Asset }): number {

@@ -34,6 +34,12 @@ export type DryRunEvent =
       readonly atMs: number;
       readonly asset: Asset;
       readonly order: SimulatedDryOrder;
+      readonly stakeUsd: number;
+      readonly entryPrice: number;
+      readonly line: number;
+      readonly modelProbability: number;
+      readonly edge: number | null;
+      readonly body: string;
     }
   | {
       readonly kind: "virtual-fill";
@@ -47,4 +53,6 @@ export type DryRunEvent =
       readonly windowStartMs: number;
       readonly windowEndMs: number;
       readonly metrics: DryAggregateMetrics;
+      readonly sessionMetrics: DryAggregateMetrics;
+      readonly body: string;
     };

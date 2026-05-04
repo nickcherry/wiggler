@@ -23,11 +23,17 @@ import type {
   ClosedFiveMinuteBar,
   LivePriceTick,
 } from "@alea/lib/livePrices/types";
+import { sendTelegramMessage } from "@alea/lib/telegram/sendTelegramMessage";
 import {
   applyTradeToSimulatedOrder,
   createSimulatedDryOrder,
   type SimulatedDryOrder,
 } from "@alea/lib/trading/dryRun/fillSimulation";
+import { formatDryOrderPrepared } from "@alea/lib/trading/dryRun/formatDryOrderPrepared";
+import {
+  type DryWindowSummaryOrder,
+  formatDryWindowSummary,
+} from "@alea/lib/trading/dryRun/formatDryWindowSummary";
 import {
   createDryTradingJsonlWriter,
   type DryTradingJsonlWriter,
@@ -72,6 +78,8 @@ export type DryRunParams = {
   readonly minEdge: number;
   readonly priceSource?: LivePriceSource;
   readonly logWriter?: DryTradingJsonlWriter;
+  readonly telegramBotToken?: string;
+  readonly telegramChatId?: string;
   readonly emit: (event: DryRunEvent) => void;
   readonly signal: AbortSignal;
 };
@@ -88,11 +96,18 @@ export async function runDryRun({
   minEdge,
   priceSource = binancePerpLivePriceSource,
   logWriter,
+  telegramBotToken,
+  telegramChatId,
   emit,
   signal,
 }: DryRunParams): Promise<void> {
   const writer = logWriter ?? (await createDryTradingJsonlWriter());
   const caps = requireDryRunCapabilities({ vendor });
+  const notifyTelegram = createDryTelegramNotifier({
+    telegramBotToken,
+    telegramChatId,
+    emit,
+  });
 
   const emas = new Map<Asset, FiveMinuteEmaTracker>();
   const atrs = new Map<Asset, FiveMinuteAtrTracker>();
@@ -101,7 +116,10 @@ export async function runDryRun({
   const books: BookCache = new Map();
   const windows = new Map<number, DryWindowState>();
   const tokenIndex = new Map<string, { asset: Asset; windowStartMs: number }>();
-  const marketIndex = new Map<string, { asset: Asset; windowStartMs: number }>();
+  const marketIndex = new Map<
+    string,
+    { asset: Asset; windowStartMs: number }
+  >();
   const finalizedResolutions: DryOrderResolution[] = [];
 
   await writer.append({
@@ -114,6 +132,7 @@ export async function runDryRun({
       minEdge,
       stakeUsd: STAKE_USD,
       tableRange: formatTableRange({ table }),
+      telegramAlerts: notifyTelegram !== null,
     },
   });
 
@@ -204,6 +223,7 @@ export async function runDryRun({
           emit,
           caps,
           priceSource,
+          notifyTelegram,
           signal,
         });
       },
@@ -281,6 +301,7 @@ export async function runDryRun({
         lastClosedBars,
         finalizedResolutions,
         writer,
+        notifyTelegram,
         signal,
         emit,
       });
@@ -303,6 +324,7 @@ export async function runDryRun({
         table,
         minEdge,
         writer,
+        notifyTelegram,
         signal,
         emit,
       });
@@ -351,6 +373,11 @@ type DryVendorCapabilities = {
   readonly resolveMarketOutcome: NonNullable<Vendor["resolveMarketOutcome"]>;
 };
 
+type DryTelegramNotifier = (params: {
+  readonly text: string;
+  readonly context: string;
+}) => void;
+
 type DryWindowState = {
   readonly window: WindowRecord;
   readonly perAsset: Map<Asset, DryAssetState>;
@@ -363,7 +390,10 @@ type DryWindowState = {
 
 type DryAssetState = {
   readonly record: AssetWindowRecord;
-  readonly decisionsByRemaining: Map<number, ReturnType<typeof evaluateRecordDecision>>;
+  readonly decisionsByRemaining: Map<
+    number,
+    ReturnType<typeof evaluateRecordDecision>
+  >;
   order: DryOrderEnvelope | null;
   proxyOutcome: DryProxyOutcome | null;
   officialOutcome: "up" | "down" | null;
@@ -412,6 +442,33 @@ function requireDryRunCapabilities({
     prepareMakerLimitBuy: vendor.prepareMakerLimitBuy.bind(vendor),
     streamMarketData: vendor.streamMarketData.bind(vendor),
     resolveMarketOutcome: vendor.resolveMarketOutcome.bind(vendor),
+  };
+}
+
+function createDryTelegramNotifier({
+  telegramBotToken,
+  telegramChatId,
+  emit,
+}: {
+  readonly telegramBotToken: string | undefined;
+  readonly telegramChatId: string | undefined;
+  readonly emit: (event: DryRunEvent) => void;
+}): DryTelegramNotifier | null {
+  if (telegramBotToken === undefined || telegramChatId === undefined) {
+    return null;
+  }
+  return ({ text, context }) => {
+    void sendTelegramMessage({
+      botToken: telegramBotToken,
+      chatId: telegramChatId,
+      text,
+    }).catch((error) => {
+      emit({
+        kind: "warn",
+        atMs: Date.now(),
+        message: `${context} send failed: ${(error as Error).message}`,
+      });
+    });
   };
 }
 
@@ -550,8 +607,14 @@ async function hydrateDryAssetMarket({
     }
     assetState.record.market = market;
     assetState.record.hydrationStatus = "ready";
-    tokenIndex.set(market.upRef, { asset, windowStartMs: state.window.windowStartMs });
-    tokenIndex.set(market.downRef, { asset, windowStartMs: state.window.windowStartMs });
+    tokenIndex.set(market.upRef, {
+      asset,
+      windowStartMs: state.window.windowStartMs,
+    });
+    tokenIndex.set(market.downRef, {
+      asset,
+      windowStartMs: state.window.windowStartMs,
+    });
     marketIndex.set(market.vendorRef, {
       asset,
       windowStartMs: state.window.windowStartMs,
@@ -584,6 +647,7 @@ function stepDryAsset({
   table,
   minEdge,
   writer,
+  notifyTelegram,
   signal,
   emit,
 }: {
@@ -598,6 +662,7 @@ function stepDryAsset({
   readonly table: ProbabilityTable;
   readonly minEdge: number;
   readonly writer: DryTradingJsonlWriter;
+  readonly notifyTelegram: DryTelegramNotifier | null;
   readonly signal: AbortSignal;
   readonly emit: (event: DryRunEvent) => void;
 }): void {
@@ -689,6 +754,7 @@ function stepDryAsset({
       table,
       minEdge,
       writer,
+      notifyTelegram,
       signal,
       emit,
     });
@@ -707,6 +773,7 @@ async function prepareDryOrder({
   table,
   minEdge,
   writer,
+  notifyTelegram,
   signal,
   emit,
 }: {
@@ -721,6 +788,7 @@ async function prepareDryOrder({
   readonly table: ProbabilityTable;
   readonly minEdge: number;
   readonly writer: DryTradingJsonlWriter;
+  readonly notifyTelegram: DryTelegramNotifier | null;
   readonly signal: AbortSignal;
   readonly emit: (event: DryRunEvent) => void;
 }): Promise<void> {
@@ -833,7 +901,36 @@ async function prepareDryOrder({
     feesUsd: 0,
     feeRateBpsAvg: 0,
   };
-  emit({ kind: "virtual-order", atMs: Date.now(), asset, order });
+  const body = formatDryOrderPrepared({
+    asset,
+    side: prepared.side,
+    stakeUsd: STAKE_USD,
+    underlyingPrice: tick.mid,
+    linePrice: line,
+    limitPrice: prepared.limitPrice,
+    sharesIfFilled: prepared.sharesIfFilled,
+    modelProbability: decision.chosen.ourProbability,
+    edge: decision.chosen.edge,
+    queueAheadShares,
+    windowEndMs: state.window.windowEndMs,
+    nowMs: Date.now(),
+  });
+  emit({
+    kind: "virtual-order",
+    atMs: Date.now(),
+    asset,
+    order,
+    stakeUsd: STAKE_USD,
+    entryPrice: tick.mid,
+    line,
+    modelProbability: decision.chosen.ourProbability,
+    edge: decision.chosen.edge,
+    body,
+  });
+  notifyTelegram?.({
+    text: body,
+    context: `${labelAsset(asset)} dry virtual-order alert`,
+  });
   await writer.append({
     type: "virtual_order",
     atMs: Date.now(),
@@ -852,18 +949,26 @@ function handleMarketDataEvent({
   emit,
   caps,
   priceSource,
+  notifyTelegram,
   signal,
 }: {
   readonly event: MarketDataEvent;
   readonly windows: Map<number, DryWindowState>;
   readonly books: BookCache;
-  readonly tokenIndex: ReadonlyMap<string, { asset: Asset; windowStartMs: number }>;
-  readonly marketIndex: ReadonlyMap<string, { asset: Asset; windowStartMs: number }>;
+  readonly tokenIndex: ReadonlyMap<
+    string,
+    { asset: Asset; windowStartMs: number }
+  >;
+  readonly marketIndex: ReadonlyMap<
+    string,
+    { asset: Asset; windowStartMs: number }
+  >;
   readonly finalizedResolutions: DryOrderResolution[];
   readonly writer: DryTradingJsonlWriter;
   readonly emit: (event: DryRunEvent) => void;
   readonly caps: DryVendorCapabilities;
   readonly priceSource: LivePriceSource;
+  readonly notifyTelegram: DryTelegramNotifier | null;
   readonly signal: AbortSignal;
 }): void {
   if (event.kind === "book" || event.kind === "best-bid-ask") {
@@ -882,6 +987,7 @@ function handleMarketDataEvent({
           priceSource,
           finalizedResolutions,
           writer,
+          notifyTelegram,
           signal,
           emit,
           appendCheckpointIfPending: false,
@@ -946,7 +1052,10 @@ function applyBookEvent({
   readonly event: Extract<MarketDataEvent, { kind: "book" | "best-bid-ask" }>;
   readonly windows: ReadonlyMap<number, DryWindowState>;
   readonly books: BookCache;
-  readonly tokenIndex: ReadonlyMap<string, { asset: Asset; windowStartMs: number }>;
+  readonly tokenIndex: ReadonlyMap<
+    string,
+    { asset: Asset; windowStartMs: number }
+  >;
 }): void {
   const indexed = tokenIndex.get(event.outcomeRef);
   if (indexed === undefined) {
@@ -993,7 +1102,10 @@ function applyResolvedEvent({
 }: {
   readonly event: MarketDataResolvedEvent;
   readonly windows: ReadonlyMap<number, DryWindowState>;
-  readonly marketIndex: ReadonlyMap<string, { asset: Asset; windowStartMs: number }>;
+  readonly marketIndex: ReadonlyMap<
+    string,
+    { asset: Asset; windowStartMs: number }
+  >;
 }): void {
   const indexed = marketIndex.get(event.vendorRef);
   if (indexed === undefined || event.winningSide === null) {
@@ -1017,6 +1129,7 @@ function scheduleDryWindowCheckpoint({
   lastClosedBars,
   finalizedResolutions,
   writer,
+  notifyTelegram,
   signal,
   emit,
 }: {
@@ -1027,6 +1140,7 @@ function scheduleDryWindowCheckpoint({
   readonly lastClosedBars: Map<Asset, ClosedFiveMinuteBar>;
   readonly finalizedResolutions: DryOrderResolution[];
   readonly writer: DryTradingJsonlWriter;
+  readonly notifyTelegram: DryTelegramNotifier | null;
   readonly signal: AbortSignal;
   readonly emit: (event: DryRunEvent) => void;
 }): void {
@@ -1041,6 +1155,7 @@ function scheduleDryWindowCheckpoint({
         lastClosedBars,
         finalizedResolutions,
         writer,
+        notifyTelegram,
         signal,
         emit,
         appendCheckpointIfPending: true,
@@ -1057,6 +1172,7 @@ async function finalizeDryWindow({
   lastClosedBars,
   finalizedResolutions,
   writer,
+  notifyTelegram,
   signal,
   emit,
   appendCheckpointIfPending,
@@ -1067,6 +1183,7 @@ async function finalizeDryWindow({
   readonly lastClosedBars?: Map<Asset, ClosedFiveMinuteBar>;
   readonly finalizedResolutions: DryOrderResolution[];
   readonly writer: DryTradingJsonlWriter;
+  readonly notifyTelegram: DryTelegramNotifier | null;
   readonly signal: AbortSignal;
   readonly emit: (event: DryRunEvent) => void;
   readonly appendCheckpointIfPending: boolean;
@@ -1089,8 +1206,7 @@ async function finalizeDryWindow({
         atMs: Date.now(),
         windowStartMs: state.window.windowStartMs,
         windowEndMs: state.window.windowEndMs,
-        status:
-          pending.length > 0 ? "official-pending" : "official-ready",
+        status: pending.length > 0 ? "official-pending" : "official-ready",
         orders: serializeWindowOrders({ state }),
       });
     }
@@ -1101,6 +1217,7 @@ async function finalizeDryWindow({
         priceSource,
         finalizedResolutions,
         writer,
+        notifyTelegram,
         signal,
         emit,
       });
@@ -1113,6 +1230,12 @@ async function finalizeDryWindow({
     const sessionMetrics = computeDryAggregateMetrics({
       resolutions: finalizedResolutions,
     });
+    const body = formatDryWindowSummary({
+      assets: [...state.perAsset.keys()],
+      orders: dryWindowSummaryOrders({ state }),
+      windowMetrics,
+      sessionMetrics,
+    });
     state.finalized = true;
     await writer.append({
       type: "window_finalized",
@@ -1124,6 +1247,7 @@ async function finalizeDryWindow({
         window: windowMetrics,
         session: sessionMetrics,
       },
+      summary: body,
     });
     emit({
       kind: "window-finalized",
@@ -1131,6 +1255,12 @@ async function finalizeDryWindow({
       windowStartMs: state.window.windowStartMs,
       windowEndMs: state.window.windowEndMs,
       metrics: windowMetrics,
+      sessionMetrics,
+      body,
+    });
+    notifyTelegram?.({
+      text: body,
+      context: `dry window ${new Date(state.window.windowStartMs).toISOString().slice(11, 16)} summary`,
     });
   } finally {
     state.finalizing = false;
@@ -1143,6 +1273,7 @@ function scheduleOfficialRetry({
   priceSource,
   finalizedResolutions,
   writer,
+  notifyTelegram,
   signal,
   emit,
 }: {
@@ -1151,6 +1282,7 @@ function scheduleOfficialRetry({
   readonly priceSource: LivePriceSource;
   readonly finalizedResolutions: DryOrderResolution[];
   readonly writer: DryTradingJsonlWriter;
+  readonly notifyTelegram: DryTelegramNotifier | null;
   readonly signal: AbortSignal;
   readonly emit: (event: DryRunEvent) => void;
 }): void {
@@ -1165,6 +1297,7 @@ function scheduleOfficialRetry({
       priceSource,
       finalizedResolutions,
       writer,
+      notifyTelegram,
       signal,
       emit,
       appendCheckpointIfPending: false,
@@ -1272,6 +1405,33 @@ function orderResolutionsForWindow({
   return out;
 }
 
+function dryWindowSummaryOrders({
+  state,
+}: {
+  readonly state: DryWindowState;
+}): DryWindowSummaryOrder[] {
+  const out: DryWindowSummaryOrder[] = [];
+  for (const assetState of state.perAsset.values()) {
+    const envelope = assetState.order;
+    if (envelope === null || assetState.officialOutcome === null) {
+      continue;
+    }
+    out.push({
+      asset: envelope.order.asset,
+      side: envelope.order.side,
+      limitPrice: envelope.order.limitPrice,
+      sharesIfFilled: envelope.order.sharesIfFilled,
+      placedAtMs: envelope.order.placedAtMs,
+      canonicalFilledShares: envelope.order.canonicalFilledShares,
+      canonicalFirstFillAtMs: envelope.order.canonicalFirstFillAtMs,
+      touchFilledAtMs: envelope.order.touchFilledAtMs,
+      officialWinningSide: assetState.officialOutcome,
+      proxyWinningSide: assetState.proxyOutcome?.winningSide ?? null,
+    });
+  }
+  return out;
+}
+
 async function refreshBook({
   vendor,
   market,
@@ -1330,7 +1490,9 @@ function queueAheadAtLimit({
   if (levels === undefined) {
     return null;
   }
-  const level = levels.find((entry) => Math.abs(entry.price - limitPrice) < 1e-9);
+  const level = levels.find(
+    (entry) => Math.abs(entry.price - limitPrice) < 1e-9,
+  );
   return level?.size ?? 0;
 }
 

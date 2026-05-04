@@ -1205,7 +1205,8 @@ Purpose:
 - Does not open user fill stream.
 - Does not hydrate lifetime PnL.
 - Does not require Polymarket credentials.
-- Does not send Telegram messages.
+- Requires Telegram token/chat id and sends explicitly labelled dry-run
+  virtual-order and per-window summary messages.
 - Writes a timestamped JSONL session ledger under `tmp/dry-trading/`.
 
 Flow:

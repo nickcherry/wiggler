@@ -1,4 +1,5 @@
 import { assetValues } from "@alea/constants/assets";
+import { env } from "@alea/constants/env";
 import { MIN_EDGE } from "@alea/constants/trading";
 import { CliUsageError } from "@alea/lib/cli/CliUsageError";
 import { defineCommand } from "@alea/lib/cli/defineCommand";
@@ -20,10 +21,9 @@ import { z } from "zod";
  */
 export const tradingDryRunCommand = defineCommand({
   name: "trading:dry-run",
-  summary:
-    "Simulate live trading against real feeds without placing orders",
+  summary: "Simulate live trading against real feeds without placing orders",
   description:
-    "Loads the committed probability table, hydrates moving trackers from the configured live price source, opens live price and Polymarket public market-data websockets, runs the same decision and maker-order preparation path as trading:live, and simulates queue-aware fills instead of signing or posting orders. Appends JSONL session/window records under tmp/dry-trading/ and exits cleanly on SIGINT.",
+    "Loads the committed probability table, hydrates moving trackers from the configured live price source, opens live price and Polymarket public market-data websockets, runs the same decision and maker-order preparation path as trading:live, and simulates queue-aware fills instead of signing or posting orders. Sends Telegram alerts for virtual orders and per-window dry summaries, appends JSONL session/window records under tmp/dry-trading/, and exits cleanly on SIGINT.",
   options: [
     defineValueOption({
       key: "assets",
@@ -55,13 +55,20 @@ export const tradingDryRunCommand = defineCommand({
     "bun alea trading:dry-run --min-edge 0.08",
   ],
   output:
-    "Streams a one-line-per-event log: boot status, ws/connect cycles, per-minute decisions, virtual orders/fills, and finalized dry-window summaries. Writes a timestamped JSONL session log under tmp/dry-trading/.",
+    "Streams a one-line-per-event log: boot status, ws/connect cycles, per-minute decisions, virtual orders/fills, and multi-line finalized dry-window summaries with session totals. Sends the same virtual-order and window-summary bodies to Telegram. Writes a timestamped JSONL session log under tmp/dry-trading/.",
   sideEffects:
-    "Opens live price and Polymarket public market-data WebSockets; calls price-source REST at boot and settlement; polls Polymarket gamma-api/CLOB read endpoints; appends JSONL files under alea/tmp/dry-trading/. No orders are placed, cancelled, signed, or authenticated.",
+    "Opens live price and Polymarket public market-data WebSockets; calls price-source REST at boot and settlement; polls Polymarket gamma-api/CLOB read endpoints; sends Telegram messages using TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID; appends JSONL files under alea/tmp/dry-trading/. No orders are placed, cancelled, signed, or authenticated.",
   async run({ io, options }) {
     if (probabilityTable.assets.length === 0) {
       throw new CliUsageError(
         "probability table is empty — run `bun alea trading:gen-probability-table` first.",
+      );
+    }
+    const telegramBotToken = env.telegramBotToken;
+    const telegramChatId = env.telegramChatId;
+    if (telegramBotToken === undefined || telegramChatId === undefined) {
+      throw new CliUsageError(
+        "TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID must be set; the dry trader sends virtual-placement and window-summary alerts on every cycle.",
       );
     }
 
@@ -81,6 +88,8 @@ export const tradingDryRunCommand = defineCommand({
         assets: options.assets,
         table: probabilityTable,
         minEdge: options.minEdge,
+        telegramBotToken,
+        telegramChatId,
         signal: controller.signal,
         emit: (event) => {
           io.writeStdout(`${formatDryRunEvent({ event })}\n`);
