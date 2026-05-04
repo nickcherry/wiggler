@@ -153,14 +153,14 @@ realized profit (the lagging indicator).
 - **Bimodal info gain (two peaks separated by a trough).** A
   contiguous range either covers both peaks plus the trough between
   them, or only one peak. The algorithm picks the wider option iff
-  the union sums to ≥ 70%; otherwise picks one peak. Probably the
-  right call for trading discipline (contiguous ranges are easier to
-  act on), but worth flagging if a future filter shows clear bimodal
-  behaviour.
-- **Tiny range.** If 70% of gain lives in `[10, 12]` (a 3-bp window),
-  the sweet spot is real but you'd rarely trade in it. Coverage will
-  be low (e.g. 10–15%); the visual cue on the dashboard is the very
-  narrow gold overlay band.
+  the union reaches the configured capture threshold; otherwise picks
+  one peak. Probably the right call for trading discipline (contiguous
+  ranges are easier to act on), but worth flagging if a future filter
+  shows clear bimodal behaviour.
+- **Tiny range.** If most gain lives in `[10, 12]` (a 3-bp window), the
+  sweet spot is real but you'd rarely trade in it. Coverage will be low
+  (e.g. 10–15%); the visual cue on the dashboard is the very narrow
+  gold overlay band.
 - **Below-floor buckets in the range.** Coverage uses
   `snapshots_in_floor_passing_buckets / snapshotsTotal` while the
   population calibration uses `snapshotsTotal` directly. There's a

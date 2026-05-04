@@ -53,11 +53,12 @@ export type DecisionInputs = {
  *
  *   1. Floor `(now - windowStart)` to one of {1,2,3,4} minutes
  *      remaining. Out-of-window or pre-window → skip.
- *   2. EMA-50 not seeded → skip (`warmup`). The bot doesn't trade on
- *      regime data it doesn't yet have.
- *   3. Compute current side, distance, and EMA-50 alignment;
- *      look up the probability table bucket. Missing bucket (very-far-
- *      from-line tail) → skip (`no-bucket`).
+ *   2. ATR-14 not seeded → skip (`warmup`). The active probability
+ *      surface is conditioned on distance from the line in ATR terms.
+ *   3. Compute current side, bp distance, and the active filter's
+ *      `aligned` flag (`|price - line| >= 0.5 * ATR-14`); look up the
+ *      probability table bucket. Missing bucket (outside the sweet
+ *      spot, too thin, or very-far-from-line tail) → skip (`no-bucket`).
  *   4. Compute per-side edges. Buying the up-YES at its best bid pays
  *      out 1 USDC if up wins, so `edge_up = ourP_up − bid_up`.
  *      Symmetrically for down. We always quote against bids because

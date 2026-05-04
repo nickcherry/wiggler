@@ -145,11 +145,11 @@ The active filter set is the array exported from
 runner, cache layer, and renderer all consume filters generically through
 this list — none of them special-cases a particular filter id.
 
-The registry is intentionally broad: it currently includes every filter
-we've ever shipped (active dashboard winners, unregistered cousins, and
-filters restored from earlier prune commits). The breadth is deliberate
-so we can re-evaluate older filters under updated scoring without losing
-data.
+The registry is intentionally focused: it currently includes the
+production champion (`distance_from_line_atr`) plus the EMA-50 alignment
+benchmark retained for comparison. Retired filters are documented in the
+research archive so they can be reconstructed later without keeping every
+historical experiment active in the dashboard.
 
 ### Adding a filter
 

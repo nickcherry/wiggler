@@ -49,7 +49,7 @@ contributing roughly nothing in expectation across the population.
 | `recent_breakout_aligned` | 0.07% | 66% | 0.08 | 0.10 | 0.07 | 0.06 | 0.06 | Purge |
 | `rsi_extreme_against_side` | 0.06% | 93% | 0.09 | 0.09 | 0.04 | 0.05 | 0.04 | Purge — see compound notes |
 | `volume_high_aligned` | 0.06% | 0% | 0.08 | 0.09 | 0.06 | 0.05 | 0.04 | Purge |
-| `ema_50_5m_alignment` | 0.06% | 0% | 0.07 | 0.09 | 0.05 | 0.04 | 0.06 | **Keep — live trader's `aligned`** |
+| `ema_50_5m_alignment` | 0.06% | 0% | 0.07 | 0.09 | 0.05 | 0.04 | 0.06 | **Keep — benchmark for former production alignment signal** |
 | `rsi_14_5m_alignment` | 0.06% | 0% | 0.06 | 0.10 | 0.05 | 0.04 | 0.05 | Purge |
 | `ema_20_5m_alignment` | 0.05% | 0% | 0.06 | 0.09 | 0.05 | 0.03 | 0.04 | Purge |
 | `ma_50_5m_alignment` | 0.05% | 0% | 0.05 | 0.07 | 0.05 | 0.04 | 0.05 | Purge |

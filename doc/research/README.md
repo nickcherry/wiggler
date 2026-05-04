@@ -42,7 +42,7 @@ contained — read it cold.
   reference for "should I bother re-implementing X?".
 - [2026-05-04 — Sweet-spot detection](./2026-05-04-sweet-spot.md):
   why we identify the contiguous bp range that captures most of a
-  filter's edge, the algorithm we use, the choice of 70% as the
+  filter's edge, the algorithm we use, the choice of 80% as the
   info-gain capture threshold, and the trading-discipline
   interpretation. Includes the threshold trade-off table for the
   champion filter.

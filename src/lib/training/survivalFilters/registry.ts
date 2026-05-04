@@ -1,20 +1,29 @@
 import { distanceFromLineAtrFilter } from "@alea/lib/training/survivalFilters/distanceFromLineAtr/filter";
+import {
+  distanceFromLineAtr3Filter,
+  distanceFromLineAtr4Filter,
+} from "@alea/lib/training/survivalFilters/distanceFromLineAtrCandidates/filter";
 import { ema505mAlignmentFilter } from "@alea/lib/training/survivalFilters/ema505mAlignment/filter";
 import type { SurvivalFilter } from "@alea/lib/training/survivalFilters/types";
 
 /**
- * The active filter set. Two filters today, narrowed down from the 28
- * we'd shipped historically after the 2026-05-04 scoring overhaul (see
+ * The active dashboard filter set. It stays focused on production
+ * candidates and direct comparators, narrowed down from the 28 we'd
+ * shipped historically after the 2026-05-04 scoring overhaul (see
  * [doc/research/2026-05-04-filter-archive.md](../../../../doc/research/2026-05-04-filter-archive.md)
  * for the calibration table that drove the prune):
  *
- *   - `distance_from_line_atr` — the training-side champion. Universal
- *     coverage, ~0.6–0.9% calibration improvement vs no-filter across
- *     all five assets, the strongest single filter we've found.
- *   - `ema_50_5m_alignment` — kept registered because the live trader's
- *     `aligned` term in `src/lib/trading/computeAssetProbabilities.ts`
- *     calls `.classify()` on this filter directly. It's also useful to
- *     have on the dashboard as the head-to-head benchmark for any
+ *   - `distance_from_line_atr_3` — the latest training-side candidate.
+ *     The 2026-05-04 ATR period sweep found it beats ATR-14 on all five
+ *     assets and wins the equal-asset average.
+ *   - `distance_from_line_atr_4` — near-tied comparator. It won more
+ *     individual assets than ATR-3 but slightly trailed the equal-asset
+ *     average.
+ *   - `distance_from_line_atr` — the existing ATR-14 champion/prod
+ *     comparison filter. Keep it visible so dashboard comparisons stay
+ *     anchored to the current production setup.
+ *   - `ema_50_5m_alignment` — kept registered as a stable head-to-head
+ *     benchmark for the former production alignment signal and for any
  *     future filter we evaluate.
  *
  * The other 26 retired filters are documented (with per-asset scores
@@ -29,6 +38,8 @@ import type { SurvivalFilter } from "@alea/lib/training/survivalFilters/types";
  * staying focused.
  */
 export const survivalFilters: readonly SurvivalFilter[] = [
+  distanceFromLineAtr3Filter,
+  distanceFromLineAtr4Filter,
   distanceFromLineAtrFilter,
   ema505mAlignmentFilter,
 ];

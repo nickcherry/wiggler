@@ -17,8 +17,10 @@ export type ProbabilityLookup = {
  * Reads a single bucket out of the table for the given live snapshot.
  *
  * Inputs:
- *   - `aligned` — does the side currently in the lead match the EMA-50
- *     regime evaluated *just before* this 5m window started.
+ *   - `aligned` — legacy surface name for the active filter's true
+ *     half. Today this means the snapshot is "decisively away" from
+ *     the line: `|price - line| >= 0.5 * ATR-14`, matching
+ *     `distance_from_line_atr`.
  *   - `remaining` — minutes left in the window, floored to one of
  *     {1,2,3,4} by the live runner.
  *   - `distanceBp` — `floor(|price - line| / line * 10000)`, matching

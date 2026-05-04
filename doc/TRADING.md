@@ -377,8 +377,9 @@ Error placing SOL ↑ order: polymarket clob 502 (gateway timeout)
 
 `bun alea trading:gen-probability-table` reads the local Postgres
 for the configured training candle series (binance-perp, 5m + 1m),
-walks the snapshot pipeline once, applies only the EMA-50 alignment
-filter, and overwrites
+walks the snapshot pipeline once, applies the `distance_from_line_atr`
+filter (`aligned` = decisively away from the line), restricts buckets
+to the per-asset sweet-spot range, and overwrites
 `src/lib/trading/probabilityTable/probabilityTable.generated.ts`
 plus a JSON sidecar in `tmp/`. Run this whenever the underlying
 training data has been refreshed and you want the live trader to use
