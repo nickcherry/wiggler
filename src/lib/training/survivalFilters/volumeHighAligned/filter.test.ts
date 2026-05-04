@@ -38,7 +38,10 @@ function emptyContext(): SurvivalSnapshotContext {
   };
 }
 
-function buildSnapshot(currentSide: SurvivalSide, ctx: SurvivalSnapshotContext): SurvivalSnapshot {
+function buildSnapshot(
+  currentSide: SurvivalSide,
+  ctx: SurvivalSnapshotContext,
+): SurvivalSnapshot {
   return {
     windowStartMs: 0,
     year: "2025",

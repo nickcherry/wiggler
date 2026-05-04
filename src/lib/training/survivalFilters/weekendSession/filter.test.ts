@@ -37,7 +37,11 @@ function emptyContext(): SurvivalSnapshotContext {
   };
 }
 
-function buildSnapshot(year: number, month: number, day: number): SurvivalSnapshot {
+function buildSnapshot(
+  year: number,
+  month: number,
+  day: number,
+): SurvivalSnapshot {
   const ms = Date.UTC(year, month, day, 12, 0, 0);
   return {
     windowStartMs: ms,

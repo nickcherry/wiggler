@@ -28,7 +28,7 @@
 - Database access lives under `src/lib/db/`.
 - Database schema changes are managed through TypeScript migrations under `src/lib/db/migrations/`.
 - Internal engineering and architecture docs live under `doc/`.
-- Scratch files and temporary artifacts must not live in the repository. Use `/tmp` for one-offs.
+- One-off scratch files belong in `/tmp`. CLI artifacts that are part of an operator workflow belong in repo-local, gitignored `tmp/` so companion `*:chart` commands can find them later. Neither category should be committed.
 
 ## Modules And Files
 
@@ -36,8 +36,8 @@
 - Prefer one exported function per file. Multiple exported constants in one file are fine when they belong together (for example, an enum-like list of values).
 - Name files after the primary exported symbol when practical. For exported-function files, use camelCase filenames that match the exported symbol.
 - Keep imports static and at the top of the file. Do not use dynamic `import()`.
-- Prefer absolute internal imports via `@alea/*` instead of deep relative paths.
-- Group imports by source: third-party first, then `@alea/*`, then local relatives if any. The TypeScript and Bun toolchain will tolerate either ordering, but consistency makes diffs cleaner.
+- Use absolute internal imports via `@alea/*` instead of source-relative paths.
+- Import order is enforced by `simple-import-sort`: third-party first, then `@alea/*`, then any explicitly allowed local relatives. The TypeScript and Bun toolchain will tolerate other ordering, but the linter is the source of truth for diffs.
 
 ## Function And API Design
 

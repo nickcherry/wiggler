@@ -299,8 +299,7 @@ export function* computeSurvivalSnapshots({
     const ma50x5m = ma20Index?.smaAt({ windowStartMs, period: 50 }) ?? null;
     const ema20x5m = ma20Index?.ema20At({ windowStartMs }) ?? null;
     const ema50x5m = ma20Index?.ema50At({ windowStartMs }) ?? null;
-    const ema50SlopePct =
-      ma20Index?.ema50SlopePctAt({ windowStartMs }) ?? null;
+    const ema50SlopePct = ma20Index?.ema50SlopePctAt({ windowStartMs }) ?? null;
     const rsi14x5m = ma20Index?.rsi14At({ windowStartMs }) ?? null;
     const roc20Pct = ma20Index?.roc20PctAt({ windowStartMs }) ?? null;
     const atr14x5m = ma20Index?.atrAt({ windowStartMs, period: 14 }) ?? null;
@@ -506,17 +505,13 @@ type FiveMinuteIndex = {
     readonly windowStartMs: number;
     readonly period: 50;
   }) => { readonly high: number; readonly low: number } | null;
-  readonly prevBarAt: (input: {
-    readonly windowStartMs: number;
-  }) => {
+  readonly prevBarAt: (input: { readonly windowStartMs: number }) => {
     readonly open: number;
     readonly high: number;
     readonly low: number;
     readonly close: number;
   } | null;
-  readonly prevPrevBarAt: (input: {
-    readonly windowStartMs: number;
-  }) => {
+  readonly prevPrevBarAt: (input: { readonly windowStartMs: number }) => {
     readonly open: number;
     readonly high: number;
     readonly low: number;
@@ -1109,11 +1104,7 @@ function computeWilderAtrSeries({
     if (prevClose === undefined) {
       return out;
     }
-    tr[i] = Math.max(
-      h - l,
-      Math.abs(h - prevClose),
-      Math.abs(prevClose - l),
-    );
+    tr[i] = Math.max(h - l, Math.abs(h - prevClose), Math.abs(prevClose - l));
   }
   // Seed with simple average of first `period` TR values.
   let sum = 0;

@@ -16,8 +16,7 @@ const SUNDAY = 0;
 export const weekendSessionFilter: SurvivalFilter = {
   id: "weekend_session",
   displayName: "Weekend (UTC Sat/Sun)",
-  description:
-    "Is the window on a weekend (UTC Saturday or Sunday)?",
+  description: "Is the window on a weekend (UTC Saturday or Sunday)?",
   trueLabel: "weekend",
   falseLabel: "weekday",
   version: 1,

@@ -1,0 +1,53 @@
+# Polymarket Integration
+
+This is the source map for the Polymarket behavior Alea depends on. When the
+live implementation has to rely on an observed payload shape that differs from
+the official docs, record the shape and observation date here before encoding
+the assumption in code.
+
+## Endpoint Constants
+
+The canonical URL set lives in
+[`src/constants/polymarket.ts`](../src/constants/polymarket.ts):
+
+- CLOB REST: `https://clob.polymarket.com`
+- Gamma API: `https://gamma-api.polymarket.com`
+- CLOB market WebSocket: `wss://ws-subscriptions-clob.polymarket.com/ws/market`
+- CLOB user WebSocket: `wss://ws-subscriptions-clob.polymarket.com/ws/user`
+- Real Time Data Socket: `wss://ws-live-data.polymarket.com`
+
+## Official Docs
+
+- [Developer endpoints](https://docs.polymarket.com/developers) — base REST,
+  Data API, WebSocket, and RTDS endpoints.
+- [Markets and events](https://docs.polymarket.com/concepts/markets-events) —
+  slug-based Gamma event discovery and market identifiers.
+- [RTDS WebSocket](https://docs.polymarket.com/market-data/websocket/rtds) —
+  real-time Chainlink crypto price stream used as the latency/reliability
+  baseline.
+- [CLOB order and trade methods](https://docs.polymarket.com/developers/CLOB/orders/cancel-orders) —
+  cancel response shape, open orders, and authenticated trade history.
+- [CLOB user channel](https://docs.polymarket.com/market-data/websocket/user-channel) —
+  authenticated fill/order updates scoped by condition IDs.
+- [WebSocket quickstart](https://docs.polymarket.com/quickstart/websocket/WSS-Quickstart) —
+  channel list and subscription shapes.
+
+## Current Assumptions
+
+- 5-minute crypto event slugs use
+  `<asset>-updown-5m-<windowStartUnixSeconds>`. `discoverPolymarketMarket`
+  reads `GET /events?slug=<slug>` and expects a binary `Up` / `Down` market
+  with two CLOB token IDs.
+- RTDS `crypto_prices_chainlink` frames provide the Chainlink-derived crypto
+  reference prices. The latency experiment filters that topic to `btc/usd`;
+  the reliability experiment maps every requested `<asset>/usd` symbol.
+- CLOB `/book?token_id=<tokenId>` is public and returns bid/ask level arrays
+  with string prices and sizes. Alea scans levels and picks best bid/ask
+  rather than trusting array order.
+- Live order placement is maker-only. Polymarket does not expose a stable
+  machine-readable post-only rejection code through the TypeScript client, so
+  the adapter translates known rejection phrases into
+  `PostOnlyRejectionError`.
+- The user WebSocket subscription uses `markets` populated with condition IDs,
+  not token IDs. Fill frames are normalized into Alea's vendor-agnostic
+  `FillEvent` shape.

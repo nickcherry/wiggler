@@ -110,8 +110,7 @@ function buildBalancedSnapshots({
         // → false, null → skip.
         context: {
           ...emptyContext(),
-          ma20x5m:
-            decision === true ? 1 : decision === false ? -1 : null,
+          ma20x5m: decision === true ? 1 : decision === false ? -1 : null,
         },
       }),
     );
@@ -342,7 +341,9 @@ describe("applySurvivalFilters", () => {
       filters: [probeFilter],
     });
     const score = perFilter[0]?.summary.scoresByRemaining[1].true;
-    if (score === undefined) {throw new Error("expected score");}
+    if (score === undefined) {
+      throw new Error("expected score");
+    }
     expect(score.coverageBp).toBe(2);
     // Mean delta should be heavily pulled toward the dense bucket's +5pp,
     // not the unweighted midpoint of (5 + 30) / 2 = 17.5.

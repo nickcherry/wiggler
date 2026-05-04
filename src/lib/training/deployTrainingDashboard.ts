@@ -5,8 +5,8 @@ import { resolve as resolvePath } from "node:path";
 /**
  * Deploys a freshly-rendered dashboard to the `alea` Cloudflare Worker
  * (https://alea.nickcherryjiggz.workers.dev). Copies the rendered HTML
- * to `tmp/web/index.html`, drops a tiny `_headers` file so the dashboard
- * is served as the index, and shells out to `wrangler deploy`.
+ * to `tmp/web/index.html`, writes a small deploy-source note, and shells
+ * out to `wrangler deploy`.
  *
  * Wrangler config lives at `wrangler.toml` in the project root. It maps
  * `tmp/web/` to the worker's static-assets directory; we don't ship any

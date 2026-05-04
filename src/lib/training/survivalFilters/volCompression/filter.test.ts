@@ -38,7 +38,10 @@ function emptyContext(): SurvivalSnapshotContext {
   };
 }
 
-function buildSnapshot(currentSide: SurvivalSide, ctx: SurvivalSnapshotContext): SurvivalSnapshot {
+function buildSnapshot(
+  currentSide: SurvivalSide,
+  ctx: SurvivalSnapshotContext,
+): SurvivalSnapshot {
   return {
     windowStartMs: 0,
     year: "2025",
@@ -56,12 +59,20 @@ function buildSnapshot(currentSide: SurvivalSide, ctx: SurvivalSnapshotContext):
 
 describe("volCompressionFilter", () => {
   it("true when ATR-14 < ATR-50 (compressed regime)", () => {
-    const snap = buildSnapshot("up", { ...emptyContext(), atr14x5m: 4, atr50x5m: 6 });
+    const snap = buildSnapshot("up", {
+      ...emptyContext(),
+      atr14x5m: 4,
+      atr50x5m: 6,
+    });
     expect(volCompressionFilter.classify(snap, snap.context)).toBe(true);
   });
 
   it("false when ATR-14 ≥ ATR-50 (expanded regime)", () => {
-    const snap = buildSnapshot("up", { ...emptyContext(), atr14x5m: 8, atr50x5m: 6 });
+    const snap = buildSnapshot("up", {
+      ...emptyContext(),
+      atr14x5m: 8,
+      atr50x5m: 6,
+    });
     expect(volCompressionFilter.classify(snap, snap.context)).toBe(false);
   });
 

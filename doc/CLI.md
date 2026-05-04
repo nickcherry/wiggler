@@ -12,7 +12,7 @@ Everything that matters is reachable through one non-interactive entrypoint:
 
 - Use one entrypoint: `bun alea`.
 - Operator workflows belong under `bun alea <command>`, not ad hoc package scripts.
-- `package.json` scripts are for repo maintenance only: typecheck, test, format, and the `alea` wrapper.
+- `package.json` scripts are for repo maintenance only: typecheck, test, lint, format, and the `alea` wrapper.
 - Commands must stay non-interactive by default.
 - Help output must be enough for a human or agent to understand side effects before running the command.
 - Parsing and validation belong in the command definition (Zod schemas on every option/positional), not in downstream business logic.
@@ -29,6 +29,9 @@ Everything that matters is reachable through one non-interactive entrypoint:
 - `latency:*`
   `latency:capture`
   `latency:chart`
+- `reliability:*`
+  `reliability:capture`
+  `reliability:chart`
 - `training:*`
   `training:distributions`
 - `telegram:*`

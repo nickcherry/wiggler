@@ -72,7 +72,9 @@ describe("distanceAtrWithEmaAlignedFilter", () => {
       snapshotPrice: 110.6,
       ctx: { ...emptyContext(), atr14x5m: 1, ema50x5m: 100 },
     });
-    expect(distanceAtrWithEmaAlignedFilter.classify(snap, snap.context)).toBe(true);
+    expect(distanceAtrWithEmaAlignedFilter.classify(snap, snap.context)).toBe(
+      true,
+    );
   });
 
   it("decisive but EMA against = false", () => {
@@ -82,7 +84,9 @@ describe("distanceAtrWithEmaAlignedFilter", () => {
       snapshotPrice: 90.6,
       ctx: { ...emptyContext(), atr14x5m: 1, ema50x5m: 100 },
     });
-    expect(distanceAtrWithEmaAlignedFilter.classify(snap, snap.context)).toBe(false);
+    expect(distanceAtrWithEmaAlignedFilter.classify(snap, snap.context)).toBe(
+      false,
+    );
   });
 
   it("aligned but not decisive = false", () => {
@@ -92,7 +96,9 @@ describe("distanceAtrWithEmaAlignedFilter", () => {
       snapshotPrice: 110.2,
       ctx: { ...emptyContext(), atr14x5m: 1, ema50x5m: 100 },
     });
-    expect(distanceAtrWithEmaAlignedFilter.classify(snap, snap.context)).toBe(false);
+    expect(distanceAtrWithEmaAlignedFilter.classify(snap, snap.context)).toBe(
+      false,
+    );
   });
 
   it("skips when missing context", () => {
@@ -102,6 +108,8 @@ describe("distanceAtrWithEmaAlignedFilter", () => {
       snapshotPrice: 110.6,
       ctx: emptyContext(),
     });
-    expect(distanceAtrWithEmaAlignedFilter.classify(snap, snap.context)).toBe("skip");
+    expect(distanceAtrWithEmaAlignedFilter.classify(snap, snap.context)).toBe(
+      "skip",
+    );
   });
 });

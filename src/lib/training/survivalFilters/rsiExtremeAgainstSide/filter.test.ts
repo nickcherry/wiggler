@@ -38,7 +38,10 @@ function emptyContext(): SurvivalSnapshotContext {
   };
 }
 
-function buildSnapshot(currentSide: SurvivalSide, ctx: SurvivalSnapshotContext): SurvivalSnapshot {
+function buildSnapshot(
+  currentSide: SurvivalSide,
+  ctx: SurvivalSnapshotContext,
+): SurvivalSnapshot {
   return {
     windowStartMs: 0,
     year: "2025",
@@ -62,7 +65,9 @@ describe("rsiExtremeAgainstSideFilter", () => {
 
   it("RSI ≥ 70 + UP side = with extreme", () => {
     const snap = buildSnapshot("up", { ...emptyContext(), rsi14x5m: 75 });
-    expect(rsiExtremeAgainstSideFilter.classify(snap, snap.context)).toBe(false);
+    expect(rsiExtremeAgainstSideFilter.classify(snap, snap.context)).toBe(
+      false,
+    );
   });
 
   it("RSI ≤ 30 + UP side = fading extreme", () => {
@@ -72,11 +77,15 @@ describe("rsiExtremeAgainstSideFilter", () => {
 
   it("skips when RSI is mid-range", () => {
     const snap = buildSnapshot("up", { ...emptyContext(), rsi14x5m: 55 });
-    expect(rsiExtremeAgainstSideFilter.classify(snap, snap.context)).toBe("skip");
+    expect(rsiExtremeAgainstSideFilter.classify(snap, snap.context)).toBe(
+      "skip",
+    );
   });
 
   it("skips when RSI unavailable", () => {
     const snap = buildSnapshot("up", emptyContext());
-    expect(rsiExtremeAgainstSideFilter.classify(snap, snap.context)).toBe("skip");
+    expect(rsiExtremeAgainstSideFilter.classify(snap, snap.context)).toBe(
+      "skip",
+    );
   });
 });

@@ -51,7 +51,7 @@ export default [
           patterns: [
             {
               group: ["./*", "../*"],
-              message: "Use absolute imports via @wiggler/*",
+              message: "Use absolute imports via @alea/*",
             },
           ],
         },
@@ -62,7 +62,7 @@ export default [
           object: "process",
           property: "env",
           message:
-            "Access environment variables through @wiggler/constants/env so application dependencies stay centralized.",
+            "Access environment variables through @alea/constants/env so application dependencies stay centralized.",
         },
       ],
       "no-unused-vars": "off",

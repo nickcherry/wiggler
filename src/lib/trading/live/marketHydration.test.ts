@@ -78,7 +78,11 @@ function vendorWith({
     async cancelOrder() {
       throw new Error("not used");
     },
-    streamUserFills(_input: { readonly markets: readonly TradableMarket[] } & UserStreamCallbacks) {
+    streamUserFills(
+      _input: {
+        readonly markets: readonly TradableMarket[];
+      } & UserStreamCallbacks,
+    ) {
       return { stop: async () => {} };
     },
     async hydrateMarketState() {

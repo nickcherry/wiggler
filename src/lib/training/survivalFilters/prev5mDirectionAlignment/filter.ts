@@ -23,7 +23,8 @@ export const prev5mDirectionAlignmentFilter: SurvivalFilter = {
     if (prev === null) {
       return "skip";
     }
-    const prevDirection: "up" | "down" = prev.close >= prev.open ? "up" : "down";
+    const prevDirection: "up" | "down" =
+      prev.close >= prev.open ? "up" : "down";
     return prevDirection === snapshot.currentSide;
   },
 };
