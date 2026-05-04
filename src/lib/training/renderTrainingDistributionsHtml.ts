@@ -539,6 +539,64 @@ export function renderTrainingDistributionsHtml({
       min-height: 260px;
       max-height: 260px;
     }
+
+    /* Mobile / narrow-viewport tweaks. The base layout assumes there's
+       enough horizontal room for the filter title, a row of pills, and
+       a chevron in the same line, plus a full-width tab strip with
+       inline score badges. On phones nothing fits, so we re-stack
+       things into two rows and condense the per-tab content to a
+       single line each. */
+    @media (max-width: 720px) {
+      details.filter-section > summary {
+        padding: 14px 16px;
+        gap: 10px;
+      }
+      details.filter-section > summary > .filter-summary-title {
+        font-size: 16px;
+        flex: 1 1 auto;
+      }
+      details.filter-section > summary > .filter-summary-chevron {
+        flex: 0 0 auto;
+        margin-left: auto;
+      }
+      details.filter-section > summary > .filter-summary-scores {
+        flex: 1 1 100%;
+        order: 3;
+        justify-content: flex-start;
+        margin-left: 0;
+        gap: 6px;
+      }
+      .filter-summary-score {
+        flex: 1 1 calc(50% - 3px);
+        min-width: 0;
+      }
+
+      .filter-section-body { padding: 0 14px 18px; gap: 12px; }
+
+      .filter-tabs {
+        display: flex;
+        width: 100%;
+        align-self: stretch;
+        overflow-x: auto;
+        scrollbar-width: thin;
+      }
+      .filter-tab {
+        flex: 1 1 0;
+        padding: 8px 10px;
+        font-size: 11px;
+        letter-spacing: 0.08em;
+        white-space: nowrap;
+      }
+      .filter-tab .filter-tab-delta {
+        margin-left: 8px;
+        white-space: nowrap;
+      }
+
+      .chart-frame { padding: 10px 8px 6px; }
+      .chart-host { height: 320px; min-height: 320px; max-height: 320px; }
+      .filter-delta-frame { padding: 10px 8px 6px; }
+      .filter-delta-host { height: 220px; min-height: 220px; max-height: 220px; }
+    }
   </style>
 </head>
 <body>
@@ -786,7 +844,7 @@ export function renderTrainingDistributionsHtml({
             stroke: chartTokens.axisStroke,
             font: chartTokens.axisFont,
             labelFont: chartTokens.axisFont,
-            label: "% of times side held to 5m close",
+            label: "hold rate %",
             labelSize: 28,
             grid: { stroke: chartTokens.gridStroke, width: 1 },
             ticks: { stroke: chartTokens.axisTickStroke, width: 1, size: 5 },
@@ -979,7 +1037,7 @@ export function renderTrainingDistributionsHtml({
             stroke: chartTokens.axisStroke,
             font: chartTokens.axisFont,
             labelFont: chartTokens.axisFont,
-            label: "% of times side held to 5m close",
+            label: "hold rate %",
             labelSize: 28,
             grid: { stroke: chartTokens.gridStroke, width: 1 },
             ticks: { stroke: chartTokens.axisTickStroke, width: 1, size: 5 },
@@ -1176,7 +1234,7 @@ export function renderTrainingDistributionsHtml({
             stroke: chartTokens.axisStroke,
             font: chartTokens.axisFont,
             labelFont: chartTokens.axisFont,
-            label: "edge over baseline (pp)",
+            label: "vs baseline (Δ%)",
             labelSize: 28,
             grid: { stroke: chartTokens.gridStroke, width: 1 },
             ticks: { stroke: chartTokens.axisTickStroke, width: 1, size: 5 },
