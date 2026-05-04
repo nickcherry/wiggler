@@ -192,30 +192,39 @@ function toScanTrade(trade: RawTrade): ScanTrade {
   };
 }
 
+const rawTradeSchema = z
+  .object({
+    id: z.string(),
+    market: z.string(),
+    asset_id: z.string(),
+    side: z.string(),
+    size: z.string(),
+    price: z.string(),
+    fee_rate_bps: z.string(),
+    status: z.string().optional(),
+    match_time: z.string().optional(),
+    last_update: z.string().optional(),
+    trader_side: z.string().optional(),
+  })
+  .passthrough();
+
 const paginatedTradesSchema = z
   .object({
     limit: z.number().optional(),
     count: z.number().optional(),
     next_cursor: z.string().optional(),
-    data: z.array(
-      z
-        .object({
-          id: z.string(),
-          market: z.string(),
-          asset_id: z.string(),
-          side: z.string(),
-          size: z.string(),
-          price: z.string(),
-          fee_rate_bps: z.string(),
-          status: z.string().optional(),
-          match_time: z.string().optional(),
-          last_update: z.string().optional(),
-          trader_side: z.string().optional(),
-        })
-        .passthrough(),
-    ),
+    data: z.array(rawTradeSchema).optional(),
+    trades: z.array(rawTradeSchema).optional(),
   })
-  .passthrough();
+  .passthrough()
+  .refine(
+    (response) => response.data !== undefined || response.trades !== undefined,
+    "expected data or trades array",
+  )
+  .transform((response) => ({
+    ...response,
+    data: response.trades ?? response.data ?? [],
+  }));
 
 const marketResolutionSchema = z
   .object({
