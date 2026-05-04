@@ -57,6 +57,16 @@ to `P(currentSide settles winning)`, derived empirically from the
 training data. Buckets thinner than `MIN_BUCKET_SAMPLES` (200) are
 dropped at generation; the runtime never sees them.
 
+> **Active filter is under review.** The training-side scoring
+> overhaul (see [TRAINING_DOMAIN.md § Scoring methodology](./TRAINING_DOMAIN.md#scoring-methodology))
+> identifies `distance_from_line_atr` as the strongest single filter
+> across all five assets — meaningfully ahead of `ema_50_5m_alignment`
+> on calibration vs the global baseline. Switching the live trader
+> to it requires regenerating the probability table on the new
+> conditioning variable and re-running [`trading:dry-run`](#commands)
+> end-to-end before going live. Tracked as a future change; the
+> current production path still keys off `aligned`.
+
 ## Architecture
 
 The runner is vendor-agnostic. Anything Polymarket-specific is
