@@ -107,13 +107,50 @@ export type SurvivalFilterResult = {
 };
 
 /**
- * Summary metrics for one filter against the baseline. Designed to feed
- * both the per-section header line and (later) a global filter ranking.
+ * Per-`(remaining-minutes, half)` score against the baseline. The score
+ * is the **signed area between the half's win-rate line and the baseline
+ * line**, integrated over distance:
  *
- * All bp-delta fields use the convention "negative = good": a more
- * negative number means the filter reaches the same win-rate target
- * with less distance from the line, which is exactly the
- * point-of-no-return signal we trade on.
+ *     score = Σ over comparable bp buckets of (halfWinRate − baselineWinRate)
+ *
+ * Units are pp·bp (percentage-points × basis-points), but we render it
+ * as a dimensionless number — relative magnitude is what matters for
+ * ranking.
+ *
+ * Convention: **positive = filter half beats baseline** (higher
+ * survival probability than the unconditional curve). A filter that
+ * improves confidence at most distances accumulates a big positive
+ * area; one that's flat-vs-baseline averages near zero; one that
+ * underperforms accumulates negative area. Both signs are tradeable —
+ * positive scores are "do-trade" signals, negative are "avoid-trade".
+ *
+ * "Comparable" = a bp bucket where BOTH the half and the baseline clear
+ * the sample-count floor at that distance. We never compare against a
+ * missing reference point.
+ */
+export type SurvivalScore = {
+  readonly score: number;
+  /** Number of bp buckets where the half-vs-baseline comparison was valid. */
+  readonly coverageBp: number;
+  /**
+   * Mean per-bucket delta = `score / coverageBp`. A rate that strips
+   * coverage out so two filters compare on edge magnitude alone.
+   * `null` when `coverageBp === 0`.
+   */
+  readonly meanDeltaPp: number | null;
+  /** Largest single-bucket positive delta. `null` when no comparable buckets. */
+  readonly maxDeltaPp: number | null;
+  /** Largest single-bucket negative delta (your "min punishment"). */
+  readonly minDeltaPp: number | null;
+};
+
+/**
+ * Summary metrics for one filter against the baseline. Holds one
+ * `SurvivalScore` per `(remaining-minutes, half)` cell so the dashboard
+ * can compare every config of every filter on the same scale.
+ *
+ * Notably absent: any `bestImprovementBp` field. The score's sign +
+ * magnitude carries the story; bp-delta phrasing was confusing.
  */
 export type SurvivalFilterSummary = {
   readonly snapshotsTotal: number;
@@ -124,32 +161,20 @@ export type SurvivalFilterSummary = {
   readonly occurrenceTrue: number;
   readonly occurrenceFalse: number;
   /**
-   * Best (most negative) bp delta between the `true` half and baseline
-   * across all `(remainingMinutes, target win rate)` cells where both
-   * sides clear the sample-count floor. `null` when no comparable cell
-   * exists.
+   * One score per `(remaining-minutes, half)` config. Renderer uses
+   * this to badge each tab, sort tabs by `|score|`, default to the
+   * largest-`|score|` tab, and mark the asset-wide best (most positive)
+   * + worst (most negative) configs across all filters.
    */
-  readonly bestImprovementBpTrue: number | null;
-  /** Same as above for the `false` half. */
-  readonly bestImprovementBpFalse: number | null;
-  /**
-   * Per-remaining-minutes best improvement for each side. The renderer
-   * uses these to label the time-bucket tabs and to pick which tab to
-   * default to (the bucket whose `min(true, false)` is most negative).
-   */
-  readonly bestImprovementByRemaining: Readonly<
+  readonly scoresByRemaining: Readonly<
     Record<
       SurvivalRemainingMinutes,
       {
-        readonly trueBp: number | null;
-        readonly falseBp: number | null;
+        readonly true: SurvivalScore;
+        readonly false: SurvivalScore;
       }
     >
   >;
-  /** Reserved for a later rubric. Higher = more useful. */
-  readonly score: number | null;
-  /** Reserved for a later rubric. Categorical readout. */
-  readonly verdict: "strong" | "promising" | "neutral" | "weak" | "thin" | null;
 };
 
 /**

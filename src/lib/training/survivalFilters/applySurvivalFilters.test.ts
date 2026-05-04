@@ -12,10 +12,9 @@ import { describe, expect, it } from "bun:test";
 
 function emptyContext(): SurvivalSnapshotContext {
   return {
-    prev1mDirection: null,
     prev5mDirection: null,
     prev5mClose: null,
-    last3x1mDirections: null,
+    last3x5mDirections: null,
     ma20x5m: null,
   };
 }
@@ -86,9 +85,9 @@ function buildBalancedSnapshots({
         // Encode decision in context so a probe filter can recover it.
         context: {
           ...emptyContext(),
-          // We tag with `prev1mDirection` since the existing field type
+          // We tag with `prev5mDirection` since the existing field type
           // accepts it; the probe filter reads this.
-          prev1mDirection:
+          prev5mDirection:
             decision === true ? "up" : decision === false ? "down" : null,
         },
       }),
@@ -104,7 +103,7 @@ function buildBalancedSnapshots({
         survived,
         context: {
           ...emptyContext(),
-          prev1mDirection: "down",
+          prev5mDirection: "down",
         },
       }),
     );
@@ -120,10 +119,10 @@ const probeFilter: SurvivalFilter = {
   falseLabel: "F",
   version: 1,
   classify: (snapshot, context) => {
-    if (context.prev1mDirection === null) {
+    if (context.prev5mDirection === null) {
       return "skip";
     }
-    return context.prev1mDirection === "up";
+    return context.prev5mDirection === "up";
   },
 };
 
@@ -159,7 +158,7 @@ describe("applySurvivalFilters", () => {
           remaining: 1,
           distanceBp: 5,
           survived: i < 540, // 90%
-          context: { ...emptyContext(), prev1mDirection: "up" },
+          context: { ...emptyContext(), prev5mDirection: "up" },
         }),
       );
     }
@@ -170,7 +169,7 @@ describe("applySurvivalFilters", () => {
           remaining: 1,
           distanceBp: 5,
           survived: i < 300, // 50%
-          context: { ...emptyContext(), prev1mDirection: "down" },
+          context: { ...emptyContext(), prev5mDirection: "down" },
         }),
       );
     }
@@ -213,11 +212,16 @@ describe("applySurvivalFilters", () => {
     expect(falseBucket?.survived).toBe(300);
   });
 
-  it("computes bestImprovementBpTrue as the most negative bp delta vs baseline", () => {
-    // Construct a tiny scenario: at 1m left, baseline reaches 60% win
-    // rate at 5 bp; whenTrue reaches it at 2 bp (improvement of 3 bp);
-    // whenFalse reaches at 8 bp (worsening of 3 bp). Best improvement
-    // for true should be -3.
+  it("scores each (remaining, half) as the signed area of pp deltas vs baseline", () => {
+    // Construct a scenario at 1m left where the true half consistently
+    // outperforms baseline and the false half consistently underperforms.
+    // At 3 distinct bp buckets {2, 5, 8}, with samples:
+    //   bucket 2: true=60%, false=20% → combined 40%
+    //   bucket 5: true=80%, false=40% → combined 60%
+    //   bucket 8: true=95%, false=60% → combined 77.5%
+    // → baseline pp at each bucket: 40, 60, 77.5
+    // → true delta vs baseline: +20, +20, +17.5 → score = +57.5
+    // → false delta vs baseline: -20, -20, -17.5 → score = -57.5
     const snapshots: SurvivalSnapshot[] = [];
     const push = (
       distanceBp: number,
@@ -235,21 +239,12 @@ describe("applySurvivalFilters", () => {
             survived: i < survivedCount,
             context: {
               ...emptyContext(),
-              prev1mDirection: side === "true" ? "up" : "down",
+              prev5mDirection: side === "true" ? "up" : "down",
             },
           }),
         );
       }
     };
-    // baseline = 60% at distance 5 → need ~60% combined at 5
-    // whenTrue = 60% at distance 2 → at distance 2 only the true half
-    //   needs to hit 60%
-    // whenFalse = 60% at distance 8 → at distance 8 only the false half
-    //   needs to hit 60%
-    // Need >= SAMPLE_FLOOR samples per (remaining, distance, side).
-    // Strategy: at distance 2, true=60%, false=20% (combined 40%).
-    //           at distance 5, true=80%, false=40% (combined 60%).
-    //           at distance 8, true=95%, false=60% (combined 77.5%).
     push(2, "true", Math.round(0.6 * SAMPLE_FLOOR), SAMPLE_FLOOR);
     push(2, "false", Math.round(0.2 * SAMPLE_FLOOR), SAMPLE_FLOOR);
     push(5, "true", Math.round(0.8 * SAMPLE_FLOOR), SAMPLE_FLOOR);
@@ -265,23 +260,26 @@ describe("applySurvivalFilters", () => {
     if (result === undefined) {
       throw new Error("expected result");
     }
-    expect(result.summary.bestImprovementBpTrue).not.toBeNull();
-    // Best improvement for the true half is at the 60% column: baseline
-    // = 5 bp, true = 2 bp → -3.
-    expect(result.summary.bestImprovementBpTrue).toBeLessThanOrEqual(-3);
-    // Best improvement for the false half is non-negative (false half
-    // never helps, only hurts in this scenario).
-    expect(result.summary.bestImprovementBpFalse ?? 0).toBeGreaterThanOrEqual(
-      0,
-    );
+    const trueScore = result.summary.scoresByRemaining[1].true;
+    const falseScore = result.summary.scoresByRemaining[1].false;
+    expect(trueScore.coverageBp).toBe(3);
+    expect(falseScore.coverageBp).toBe(3);
+    expect(trueScore.score).toBeCloseTo(57.5, 5);
+    expect(falseScore.score).toBeCloseTo(-57.5, 5);
+    // Decorative metrics
+    expect(trueScore.maxDeltaPp).toBeCloseTo(20, 5);
+    expect(trueScore.minDeltaPp).toBeCloseTo(17.5, 5);
+    expect(falseScore.maxDeltaPp).toBeCloseTo(-17.5, 5);
+    expect(falseScore.minDeltaPp).toBeCloseTo(-20, 5);
+    expect(trueScore.meanDeltaPp).toBeCloseTo(57.5 / 3, 5);
   });
 
-  it("leaves score and verdict null in v1", () => {
+  it("returns zero-coverage scores when nothing clears the sample floor", () => {
     const snapshots = buildBalancedSnapshots({
       remaining: 1,
       distanceBp: 5,
       trueClassifier: () => true,
-      totalEach: 600,
+      totalEach: 50, // below SAMPLE_FLOOR
       trueWinRate: 0.7,
       falseWinRate: 0.5,
     });
@@ -289,7 +287,9 @@ describe("applySurvivalFilters", () => {
       snapshots,
       filters: [probeFilter],
     });
-    expect(perFilter[0]?.summary.score).toBeNull();
-    expect(perFilter[0]?.summary.verdict).toBeNull();
+    const trueScore = perFilter[0]?.summary.scoresByRemaining[1].true;
+    expect(trueScore?.coverageBp).toBe(0);
+    expect(trueScore?.score).toBe(0);
+    expect(trueScore?.meanDeltaPp).toBeNull();
   });
 });

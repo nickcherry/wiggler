@@ -131,6 +131,14 @@ export type SurvivalFilterResultPayload = {
   readonly summary: SurvivalFilterSummaryPayload;
 };
 
+export type SurvivalScorePayload = {
+  readonly score: number;
+  readonly coverageBp: number;
+  readonly meanDeltaPp: number | null;
+  readonly maxDeltaPp: number | null;
+  readonly minDeltaPp: number | null;
+};
+
 export type SurvivalFilterSummaryPayload = {
   readonly snapshotsTotal: number;
   readonly snapshotsTrue: number;
@@ -138,20 +146,21 @@ export type SurvivalFilterSummaryPayload = {
   readonly snapshotsSkipped: number;
   readonly occurrenceTrue: number;
   readonly occurrenceFalse: number;
-  readonly bestImprovementBpTrue: number | null;
-  readonly bestImprovementBpFalse: number | null;
   /**
-   * Per-remaining-minutes best improvement for each half. Powers the
-   * dashboard's time-bucket tab badges and the default-tab selection.
+   * Per-`(remaining-minutes, half)` score against baseline. Positive =
+   * filter half outperforms baseline (do-trade signal); negative =
+   * filter half underperforms (avoid-trade signal); near-zero =
+   * indistinguishable from baseline.
    */
-  readonly bestImprovementByRemaining: Readonly<
+  readonly scoresByRemaining: Readonly<
     Record<
       SurvivalRemainingMinutes,
-      { readonly trueBp: number | null; readonly falseBp: number | null }
+      {
+        readonly true: SurvivalScorePayload;
+        readonly false: SurvivalScorePayload;
+      }
     >
   >;
-  readonly score: number | null;
-  readonly verdict: "strong" | "promising" | "neutral" | "weak" | "thin" | null;
 };
 
 export type TrainingDistributionsPayload = {

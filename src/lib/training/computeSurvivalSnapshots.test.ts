@@ -60,62 +60,6 @@ describe("computeSurvivalSnapshots", () => {
     expect(snapshots.map((s) => s.remaining)).toEqual([4, 3, 2, 1]);
   });
 
-  it("populates prev1mDirection from the candle just before the snapshot's 1m candle", () => {
-    // Six candles: c[-1] then a full 5m window. c[-1] closes down (prev
-    // direction = down). For snapshot at +1m (4m left), the previous 1m
-    // candle is c[-1].
-    const startMs = Date.UTC(2025, 0, 1, 0, 0, 0);
-    const candles1m: Candle[] = [
-      // c[-1]: 00:-1 → not aligned to 5m boundary, just sits before the
-      // window. open 100, close 99 → down.
-      buildCandle({
-        timestamp: new Date(startMs - MS_PER_1M),
-        open: 100,
-        close: 99,
-      }),
-      ...buildContiguous1m({
-        startMs,
-        closes: [101, 102, 103, 104, 105],
-      }),
-    ];
-    const snapshots = [...computeSurvivalSnapshots({ candles1m })];
-    // Snapshot at +1m (4m left): previous 1m is c[-1] which closed down.
-    expect(snapshots[0]?.context.prev1mDirection).toBe("down");
-    // Snapshot at +2m (3m left): previous 1m is c0 (close 101 vs open 99)
-    // which is up.
-    expect(snapshots[1]?.context.prev1mDirection).toBe("up");
-  });
-
-  it("populates last3x1mDirections only when three preceding candles exist", () => {
-    const startMs = Date.UTC(2025, 0, 1, 0, 0, 0);
-    // Three candles before the window, all up.
-    const lookbackCloses = [101, 102, 103];
-    const candles1m: Candle[] = [];
-    let prev = 100;
-    for (let i = 0; i < lookbackCloses.length; i += 1) {
-      const ts = new Date(startMs - (3 - i) * MS_PER_1M);
-      const close = lookbackCloses[i] ?? prev;
-      candles1m.push(buildCandle({ timestamp: ts, open: prev, close }));
-      prev = close;
-    }
-    candles1m.push(
-      ...buildContiguous1m({ startMs, closes: [104, 105, 106, 107, 108] }),
-    );
-    const snapshots = [...computeSurvivalSnapshots({ candles1m })];
-    // Snapshot at +1m: last 3 are the lookback candles, all up.
-    expect(snapshots[0]?.context.last3x1mDirections).toEqual([
-      "up",
-      "up",
-      "up",
-    ]);
-    // Snapshot at +4m: last 3 are c0, c1, c2 — all up.
-    expect(snapshots[3]?.context.last3x1mDirections).toEqual([
-      "up",
-      "up",
-      "up",
-    ]);
-  });
-
   it("returns null prev5m + ma20 context when 5m series isn't supplied", () => {
     const candles1m = buildContiguous1m({
       startMs: Date.UTC(2025, 0, 1, 0, 0, 0),
@@ -125,6 +69,7 @@ describe("computeSurvivalSnapshots", () => {
     expect(snapshot?.context.prev5mDirection).toBeNull();
     expect(snapshot?.context.prev5mClose).toBeNull();
     expect(snapshot?.context.ma20x5m).toBeNull();
+    expect(snapshot?.context.last3x5mDirections).toBeNull();
   });
 
   it("populates prev5m direction + close from the 5m candle ending at window start", () => {
@@ -145,6 +90,57 @@ describe("computeSurvivalSnapshots", () => {
     const [snapshot] = [...computeSurvivalSnapshots({ candles1m, candles5m })];
     expect(snapshot?.context.prev5mDirection).toBe("down");
     expect(snapshot?.context.prev5mClose).toBe(100);
+  });
+
+  it("last3x5mDirections returns null until three prior 5m bars exist", () => {
+    const windowStart = Date.UTC(2025, 0, 1, 0, 10, 0);
+    const candles1m = buildContiguous1m({
+      startMs: windowStart,
+      closes: [101, 102, 103, 104, 105],
+    });
+    // Only one prior 5m bar — covering [0:05, 0:10).
+    const candles5m: Candle[] = [
+      buildCandle({
+        timestamp: new Date(windowStart - MS_PER_5M),
+        open: 100,
+        close: 100,
+        timeframe: "5m",
+      }),
+    ];
+    const [snapshot] = [...computeSurvivalSnapshots({ candles1m, candles5m })];
+    expect(snapshot?.context.last3x5mDirections).toBeNull();
+  });
+
+  it("last3x5mDirections returns the 3 most recent completed 5m bars in chronological order", () => {
+    const windowStart = Date.UTC(2025, 0, 1, 0, 15, 0);
+    const candles1m = buildContiguous1m({
+      startMs: windowStart,
+      closes: [101, 102, 103, 104, 105],
+    });
+    // Three prior 5m bars, all aligned to standard boundaries:
+    //   [0:00, 0:05) → up, [0:05, 0:10) → down, [0:10, 0:15) → up.
+    const candles5m: Candle[] = [
+      buildCandle({
+        timestamp: new Date(windowStart - 3 * MS_PER_5M),
+        open: 100,
+        close: 105,
+        timeframe: "5m",
+      }),
+      buildCandle({
+        timestamp: new Date(windowStart - 2 * MS_PER_5M),
+        open: 105,
+        close: 102,
+        timeframe: "5m",
+      }),
+      buildCandle({
+        timestamp: new Date(windowStart - MS_PER_5M),
+        open: 102,
+        close: 108,
+        timeframe: "5m",
+      }),
+    ];
+    const [snapshot] = [...computeSurvivalSnapshots({ candles1m, candles5m })];
+    expect(snapshot?.context.last3x5mDirections).toEqual(["up", "down", "up"]);
   });
 
   it("ma20x5m is null until 20 prior 5m closes are available", () => {

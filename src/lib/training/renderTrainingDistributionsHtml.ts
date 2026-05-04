@@ -84,6 +84,21 @@ const FILTER_COLORS = {
   whenFalse: "#d85a4f",
 } as const;
 
+/**
+ * Color scheme for the delta-from-baseline charts. Line strokes are a
+ * non-green/red pair (cool blue for true, warm gold for false) so that
+ * the green/red fill semantic — green above the neutral line, red below
+ * — never collides with the line color. The line just identifies which
+ * half; the fill carries "is this slice above or below baseline?".
+ */
+const DELTA_COLORS = {
+  trueLine: "#5b95ff",
+  falseLine: "#d7aa45",
+  fillAbove: { r: 70, g: 195, b: 123 },
+  fillBelow: { r: 216, g: 90, b: 79 },
+  zeroRule: "rgba(215, 170, 69, 0.45)",
+} as const;
+
 type DashboardAssetSlice = {
   readonly asset: string;
   readonly assetUpper: string;
@@ -118,23 +133,35 @@ type FilterSlice = {
     readonly snapshotsSkipped: number;
     readonly occurrenceTrue: number;
     readonly occurrenceFalse: number;
-    readonly bestImprovementBpTrue: number | null;
-    readonly bestImprovementBpFalse: number | null;
-    readonly bestImprovementByRemaining: Readonly<
+    readonly scoresByRemaining: Readonly<
       Record<
         SurvivalRemainingMinutes,
-        { readonly trueBp: number | null; readonly falseBp: number | null }
+        { readonly true: ScoreSlice; readonly false: ScoreSlice }
       >
     >;
   };
   /**
    * Pre-picked best remaining-minutes bucket: the one whose
-   * `min(trueBp, falseBp)` improvement is most negative (i.e. the filter
-   * tightens the point of no return most). `4` is used as a fallback
-   * when no bucket has a measurable improvement, so the chart always
-   * has something to default to.
+   * `max(|true.score|, |false.score|)` is largest. That's where the
+   * filter has its strongest signal in either direction (do-trade or
+   * avoid-trade). `4` is used as a fallback when no bucket has any
+   * comparable data, so the chart always has something to default to.
    */
   readonly defaultRemaining: SurvivalRemainingMinutes;
+};
+
+/**
+ * Mirror of `SurvivalScorePayload` reshaped for the renderer. Same
+ * fields, copied through `toFilterSlice` so the JSON serialized into
+ * the page is the renderer's canonical view of the score (no further
+ * normalization on the client).
+ */
+type ScoreSlice = {
+  readonly score: number;
+  readonly coverageBp: number;
+  readonly meanDeltaPp: number | null;
+  readonly maxDeltaPp: number | null;
+  readonly minDeltaPp: number | null;
 };
 
 type FilterSurfaceArrays = Readonly<
@@ -383,6 +410,42 @@ export function renderTrainingDistributionsHtml({
     .filter-tab .filter-tab-delta-bad { color: var(--alea-red); }
     .filter-tab.active .filter-tab-delta-good { color: var(--alea-green); }
     .filter-tab.active .filter-tab-delta-bad { color: var(--alea-red); }
+    /* Asset-wide best/worst hotspot dots, prepended to the tab label. */
+    .filter-tab .filter-tab-dot {
+      display: inline-block;
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      margin-right: 8px;
+      vertical-align: middle;
+      box-shadow: 0 0 0 2px rgba(0, 0, 0, 0.4);
+    }
+    .filter-tab .filter-tab-dot-best { background: var(--alea-green); }
+    .filter-tab .filter-tab-dot-worst { background: var(--alea-red); }
+
+    /* Delta-from-baseline chart, stacked under each filter's main chart. */
+    .filter-delta-frame {
+      position: relative;
+      border-radius: 10px;
+      background:
+        radial-gradient(circle at 92% 10%, rgba(215, 170, 69, 0.05), transparent 36%),
+        linear-gradient(180deg, rgba(15, 27, 18, 0.6), rgba(7, 9, 10, 0.4));
+      border: 1px solid var(--alea-border-muted);
+      padding: 12px 8px 6px;
+    }
+    .filter-delta-host {
+      position: relative;
+      width: 100%;
+      height: 260px;
+      min-height: 260px;
+      max-height: 260px;
+    }
+    .filter-delta-caption {
+      margin: 0 0 4px 4px;
+      color: var(--alea-text-subtle);
+      font-size: 11px;
+      letter-spacing: 0.04em;
+    }
   </style>
 </head>
 <body>
@@ -409,9 +472,9 @@ export function renderTrainingDistributionsHtml({
         </header>
 
         <div class="alea-section-rule">
-          <h2>Point-of-No-Return Levels</h2>
+          <h2>Baseline</h2>
         </div>
-        <p class="survival-helper">Minimum distance from the 5m start line needed for the current side to historically survive. Each line shows the empirical win rate at every distance bucket given the time remaining in the window. Baseline only — no volatility, candle-shape, or regime filters are included. Buckets with fewer than ${SURVIVAL_MIN_SAMPLES.toLocaleString()} snapshots are hidden.</p>
+        <p class="survival-helper">Unconditional point-of-no-return surface: at every distance from the 5m start line and every minutes-remaining bucket, the historical win rate of the side currently leading. Filter overlays below split the same data by simple binary context filters and read deltas against this curve. Buckets with fewer than ${SURVIVAL_MIN_SAMPLES.toLocaleString()} snapshots are hidden.</p>
 
         <div class="survival-section" id="survival-section">
           <p class="alea-card-meta" id="survival-meta"></p>
@@ -482,6 +545,33 @@ export function renderTrainingDistributionsHtml({
       if (v == null || !Number.isFinite(v)) return "—";
       return v.toFixed(2) + "%";
     };
+
+    // Auto-fit the y-axis to actual data range, clamped to [0, 100] for
+    // the % charts. The hard-coded [0, 100] was wasting most of the
+    // chart's vertical real estate because survival rates rarely touch
+    // either extreme — cropping to (min - pad, max + pad) makes the
+    // mid-section actually readable. Pads are floored so charts with a
+    // tight range still get some breathing room.
+    function autoFitPercentYRange({ yArrays, includeReferenceFifty }) {
+      let lo = Infinity;
+      let hi = -Infinity;
+      for (const ys of yArrays) {
+        for (const v of ys) {
+          if (v == null || !Number.isFinite(v)) continue;
+          if (v < lo) lo = v;
+          if (v > hi) hi = v;
+        }
+      }
+      if (!Number.isFinite(lo) || !Number.isFinite(hi)) return [0, 100];
+      // Keep the 50% reference visible when it's near (or just outside)
+      // the data range, so the chart can show the coin-flip line for
+      // intuition; skip when the data is way above 50% to stop wasting
+      // height showing the line in isolation.
+      if (includeReferenceFifty && lo > 50 && lo - 50 < 10) lo = 50;
+      const span = Math.max(5, hi - lo);
+      const pad = Math.max(2, span * 0.08);
+      return [Math.max(0, lo - pad), Math.min(100, hi + pad)];
+    }
 
     // Largest distance bucket index where any of the given y arrays still
     // has a (finite) value. Returns the matching bp + a small pad so the
@@ -757,10 +847,16 @@ export function renderTrainingDistributionsHtml({
         height: h,
         legend: { show: false },
         padding: [16, 18, 8, 8],
-        scales: {
-          x: { time: false, range: [0, xMax] },
-          y: { range: [0, 100] },
-        },
+        scales: (() => {
+          const yRange = autoFitPercentYRange({
+            yArrays: yArrays,
+            includeReferenceFifty: true,
+          });
+          return {
+            x: { time: false, range: [0, xMax] },
+            y: { range: yRange },
+          };
+        })(),
         cursor: {
           points: { show: false },
           drag: { setScale: false, x: false, y: false },
@@ -857,20 +953,31 @@ export function renderTrainingDistributionsHtml({
       return pct < 10 ? pct.toFixed(1) + "%" : Math.round(pct) + "%";
     }
 
+    // Picks the "headline" score for a tab: the half whose |score| is
+    // largest, returning the signed score. The badge sign tells you
+    // which way it leans (positive = do-trade, negative = avoid-trade).
+    function pickTabSignedScore(remainingEntry) {
+      const trueOk = remainingEntry.true.coverageBp > 0;
+      const falseOk = remainingEntry.false.coverageBp > 0;
+      if (!trueOk && !falseOk) return null;
+      const trueAbs = trueOk ? Math.abs(remainingEntry.true.score) : -1;
+      const falseAbs = falseOk ? Math.abs(remainingEntry.false.score) : -1;
+      return trueAbs >= falseAbs
+        ? remainingEntry.true.score
+        : remainingEntry.false.score;
+    }
+
+    function formatScore(value) {
+      if (value === null || value === undefined || !Number.isFinite(value)) return "—";
+      const rounded = Math.round(value);
+      return (rounded > 0 ? "+" : rounded < 0 ? "−" : "") + Math.abs(rounded);
+    }
+
     function formatTabBadge(remainingEntry) {
-      // The tab badge surfaces "best improvement at this bucket" using
-      // the most-negative of trueBp/falseBp. Negative = good = filter
-      // tightens the threshold here. Empty when neither half is
-      // measurable above the sample-count floor.
-      const candidates = [];
-      if (remainingEntry.trueBp != null) candidates.push(remainingEntry.trueBp);
-      if (remainingEntry.falseBp != null) candidates.push(remainingEntry.falseBp);
-      if (candidates.length === 0) return "";
-      const delta = Math.min.apply(null, candidates);
-      if (delta === 0) return ' <span class="filter-tab-delta">·</span>';
-      const sign = delta < 0 ? "↓" + Math.abs(delta) : "↑" + delta;
-      const cls = delta < 0 ? "filter-tab-delta-good" : "filter-tab-delta-bad";
-      return ' <span class="filter-tab-delta ' + cls + '">' + sign + ' bp</span>';
+      const signed = pickTabSignedScore(remainingEntry);
+      if (signed === null) return "";
+      const cls = signed > 0 ? "filter-tab-delta-good" : signed < 0 ? "filter-tab-delta-bad" : "";
+      return ' <span class="filter-tab-delta ' + cls + '">' + formatScore(signed) + '</span>';
     }
 
     function buildFilterChart({ host, filter, remaining }) {
@@ -895,7 +1002,15 @@ export function renderTrainingDistributionsHtml({
         height: h,
         legend: { show: false },
         padding: [16, 18, 8, 8],
-        scales: { x: { time: false, range: [0, xMax] }, y: { range: [0, 100] } },
+        scales: {
+          x: { time: false, range: [0, xMax] },
+          y: {
+            range: autoFitPercentYRange({
+              yArrays: [baselineY, trueY, falseY],
+              includeReferenceFifty: true,
+            }),
+          },
+        },
         cursor: { points: { show: false }, drag: { setScale: false, x: false, y: false } },
         series: [
           {},
@@ -946,7 +1061,203 @@ export function renderTrainingDistributionsHtml({
       }
     }
 
-    function renderFilterSection(filter) {
+    // ----------------------------------------------------------------
+    // Delta chart: same x-axis as the main chart but the y-axis is
+    // (filter_winRate − baseline_winRate) in pp. Two lines (true/false)
+    // — no baseline line drawn (baseline = the y=0 axis). Per-slice
+    // density fills under each line, green where the slice is above
+    // baseline and red where below; opacity scales with the bucket's
+    // sample count so sparse slices look faint and trustworthy ones
+    // look bold.
+    // ----------------------------------------------------------------
+
+    const deltaColors = ${JSON.stringify(DELTA_COLORS)};
+
+    // Build the per-line "(filter delta in pp, sample count)" arrays for
+    // a given remaining-minutes bucket. A delta value is null when
+    // either side (filter half or baseline) lacks a usable bucket at
+    // that bp.
+    function buildDeltaLine({ filter, half, remaining }) {
+      const baselineEntry = filter.baseline[remaining];
+      const halfEntry = filter[half === "true" ? "whenTrue" : "whenFalse"][remaining];
+      const xs = filter.distancesBp;
+      const deltas = [];
+      const counts = [];
+      for (let i = 0; i < xs.length; i++) {
+        const baseV = baselineEntry.winRate[i];
+        const halfV = halfEntry.winRate[i];
+        if (baseV == null || halfV == null) {
+          deltas.push(null);
+        } else {
+          deltas.push(halfV - baseV);
+        }
+        counts.push(halfEntry.sampleCount[i] || 0);
+      }
+      return { deltas: deltas, counts: counts };
+    }
+
+    function buildDeltaChart({ host, filter, remaining }) {
+      if (typeof uPlot === "undefined") {
+        host.innerHTML = '<pre class="chart-error">uPlot global is undefined</pre>';
+        return null;
+      }
+      const w = host.clientWidth || host.getBoundingClientRect().width || 800;
+      const h = host.clientHeight || 260;
+      if (w === 0 || h === 0) {
+        host.innerHTML = '<pre class="chart-error">chart host has zero size: ' + w + 'x' + h + '</pre>';
+        return null;
+      }
+      const xs = filter.distancesBp.slice();
+      const trueLine = buildDeltaLine({ filter: filter, half: "true", remaining: remaining });
+      const falseLine = buildDeltaLine({ filter: filter, half: "false", remaining: remaining });
+      const xMax = autoFitMaxBp({ xs: xs, yArrays: [trueLine.deltas, falseLine.deltas] });
+
+      // Y-axis bounds: symmetric around 0 with a small pad. We don't
+      // want it to drift to wildly asymmetric ranges that visually
+      // distort which side is bigger.
+      let extreme = 0;
+      for (const a of [trueLine.deltas, falseLine.deltas]) {
+        for (const v of a) {
+          if (v != null && Number.isFinite(v) && Math.abs(v) > extreme) {
+            extreme = Math.abs(v);
+          }
+        }
+      }
+      const yPad = Math.max(2, extreme * 0.15);
+      const yMax = extreme === 0 ? 5 : extreme + yPad;
+
+      // Densest slice across both halves; per-slice opacity is
+      // count / maxCount, with a small floor so non-empty slices remain
+      // visible.
+      let maxCount = 0;
+      for (const a of [trueLine.counts, falseLine.counts]) {
+        for (const v of a) {
+          if (v > maxCount) maxCount = v;
+        }
+      }
+      const fillOpacityFor = (count) => {
+        if (maxCount === 0 || count === 0) return 0;
+        const ratio = count / maxCount;
+        // Floor at 0.06 so a slice barely above the sample threshold
+        // is still visible; cap at 0.55 so nothing washes out the line.
+        return Math.max(0.06, Math.min(0.55, ratio * 0.55));
+      };
+
+      // Draw a per-bin trapezoid from the line down to y=0, colored by
+      // the average sign of the bin's two endpoints, with opacity from
+      // the bin's average sample count. Done in a uPlot draw hook so
+      // we can do per-slice opacity (uPlot's built-in fill is uniform).
+      const drawDensityFill = (u, deltas, counts) => {
+        const ctx = u.ctx;
+        const yZeroPx = u.valToPos(0, "y", true);
+        for (let i = 0; i < xs.length - 1; i++) {
+          const v0 = deltas[i];
+          const v1 = deltas[i + 1];
+          if (v0 == null || v1 == null) continue;
+          const c0 = counts[i] || 0;
+          const c1 = counts[i + 1] || 0;
+          const avgCount = (c0 + c1) / 2;
+          const opacity = fillOpacityFor(avgCount);
+          if (opacity <= 0) continue;
+          const x0Px = u.valToPos(xs[i], "x", true);
+          const x1Px = u.valToPos(xs[i + 1], "x", true);
+          const y0Px = u.valToPos(v0, "y", true);
+          const y1Px = u.valToPos(v1, "y", true);
+          // Color decision: average sign of v0 and v1. If both above 0,
+          // green. Both below, red. Crossing zero, split into two
+          // sub-trapezoids at the zero crossing.
+          const drawTrap = (xa, ya, xb, yb, color) => {
+            ctx.fillStyle = 'rgba(' + color.r + ',' + color.g + ',' + color.b + ',' + opacity + ')';
+            ctx.beginPath();
+            ctx.moveTo(xa, yZeroPx);
+            ctx.lineTo(xa, ya);
+            ctx.lineTo(xb, yb);
+            ctx.lineTo(xb, yZeroPx);
+            ctx.closePath();
+            ctx.fill();
+          };
+          const sameSign = (v0 >= 0 && v1 >= 0) || (v0 <= 0 && v1 <= 0);
+          if (sameSign) {
+            const color = (v0 + v1) / 2 >= 0 ? deltaColors.fillAbove : deltaColors.fillBelow;
+            drawTrap(x0Px, y0Px, x1Px, y1Px, color);
+          } else {
+            // Find the zero crossing's x position via linear interp.
+            const t = v0 / (v0 - v1);
+            const xCrossVal = xs[i] + t * (xs[i + 1] - xs[i]);
+            const xCrossPx = u.valToPos(xCrossVal, "x", true);
+            const firstColor = v0 >= 0 ? deltaColors.fillAbove : deltaColors.fillBelow;
+            const secondColor = v1 >= 0 ? deltaColors.fillAbove : deltaColors.fillBelow;
+            drawTrap(x0Px, y0Px, xCrossPx, yZeroPx, firstColor);
+            drawTrap(xCrossPx, yZeroPx, x1Px, y1Px, secondColor);
+          }
+        }
+      };
+
+      const data = [xs, trueLine.deltas.slice(), falseLine.deltas.slice()];
+      const opts = {
+        width: w,
+        height: h,
+        legend: { show: false },
+        padding: [12, 18, 8, 8],
+        scales: { x: { time: false, range: [0, xMax] }, y: { range: [-yMax, yMax] } },
+        cursor: { points: { show: false }, drag: { setScale: false, x: false, y: false } },
+        series: [
+          {},
+          { label: filter.trueLabel, stroke: deltaColors.trueLine, width: 2, spanGaps: false, points: { show: false } },
+          { label: filter.falseLabel, stroke: deltaColors.falseLine, width: 2, spanGaps: false, points: { show: false } },
+        ],
+        axes: [
+          {
+            stroke: chartTokens.axisStroke,
+            font: chartTokens.axisFont,
+            grid: { stroke: chartTokens.gridStroke, width: 1 },
+            ticks: { stroke: chartTokens.axisTickStroke, width: 1, size: 5 },
+            values: (u, splits) => splits.map(formatBp),
+          },
+          {
+            stroke: chartTokens.axisStroke,
+            font: chartTokens.axisFont,
+            grid: { stroke: chartTokens.gridStroke, width: 1 },
+            ticks: { stroke: chartTokens.axisTickStroke, width: 1, size: 5 },
+            values: (u, splits) => splits.map((v) => (v > 0 ? '+' : '') + Math.round(v) + ' pp'),
+            size: 60,
+          },
+        ],
+        hooks: {
+          // Density fills first (under the lines), then the zero rule,
+          // then uPlot draws the line strokes on top.
+          drawClear: [
+            (u) => {
+              drawDensityFill(u, trueLine.deltas, trueLine.counts);
+              drawDensityFill(u, falseLine.deltas, falseLine.counts);
+            },
+          ],
+          drawAxes: [
+            (u) => {
+              const yPos = u.valToPos(0, "y", true);
+              const ctx = u.ctx;
+              ctx.save();
+              ctx.strokeStyle = deltaColors.zeroRule;
+              ctx.lineWidth = 1;
+              ctx.setLineDash([4, 4]);
+              ctx.beginPath();
+              ctx.moveTo(u.bbox.left, yPos);
+              ctx.lineTo(u.bbox.left + u.bbox.width, yPos);
+              ctx.stroke();
+              ctx.restore();
+            },
+          ],
+        },
+      };
+      try {
+        return new uPlot(opts, data, host);
+      } catch (err) {
+        host.innerHTML = '<pre class="chart-error">uPlot threw: ' + (err && err.message ? err.message : String(err)) + '</pre>';
+        return null;
+      }
+    }
+
+    function renderFilterSection(filter, hotspots) {
       const summary = filter.summary;
       const summaryParts = [];
       if (Number.isFinite(summary.occurrenceTrue)) {
@@ -959,14 +1270,45 @@ export function renderTrainingDistributionsHtml({
           '<span class="filter-summary-pill"><span class="filter-summary-key">' + filter.falseLabel + '</span><span class="filter-summary-value">' + formatPercent(summary.occurrenceFalse) + '</span></span>'
         );
       }
-      function bestImprovementHtml(label, value) {
-        if (value === null || !Number.isFinite(value)) return "";
-        const cls = value < 0 ? "filter-summary-good" : value > 0 ? "filter-summary-bad" : "";
-        const sign = value < 0 ? "↓" + Math.abs(value) : value > 0 ? "↑" + value : "·";
-        return '<span class="filter-summary-pill"><span class="filter-summary-key">best Δ ' + label + '</span><span class="filter-summary-value ' + cls + '">' + sign + ' bp</span></span>';
+      // Pull the strongest config for THIS filter (largest |score|
+      // across remainings + halves) and surface it as the headline
+      // "edge" pill, plus the decorative max/min single-bucket deltas
+      // from that same config.
+      let bestRem = filter.defaultRemaining;
+      let bestSide = "true";
+      let bestAbs = -1;
+      for (const rem of survivalRemainingOrder) {
+        const entry = summary.scoresByRemaining[rem];
+        for (const side of ["true", "false"]) {
+          const s = entry[side];
+          if (s.coverageBp === 0) continue;
+          const a = Math.abs(s.score);
+          if (a > bestAbs) {
+            bestAbs = a;
+            bestRem = rem;
+            bestSide = side;
+          }
+        }
       }
-      summaryParts.push(bestImprovementHtml(filter.trueLabel, summary.bestImprovementBpTrue));
-      summaryParts.push(bestImprovementHtml(filter.falseLabel, summary.bestImprovementBpFalse));
+      const headline = summary.scoresByRemaining[bestRem][bestSide];
+      if (headline.coverageBp > 0) {
+        const cls = headline.score > 0 ? "filter-summary-good" : headline.score < 0 ? "filter-summary-bad" : "";
+        const sideLabel = bestSide === "true" ? filter.trueLabel : filter.falseLabel;
+        summaryParts.push(
+          '<span class="filter-summary-pill"><span class="filter-summary-key">edge ' + sideLabel + ' @ ' + bestRem + 'm</span><span class="filter-summary-value ' + cls + '">' + formatScore(headline.score) + '</span></span>'
+        );
+        const formatPp = (v) => (v > 0 ? "+" : "") + v.toFixed(1) + " pp";
+        if (headline.maxDeltaPp !== null) {
+          summaryParts.push(
+            '<span class="filter-summary-pill"><span class="filter-summary-key">peak</span><span class="filter-summary-value">' + formatPp(headline.maxDeltaPp) + '</span></span>'
+          );
+        }
+        if (headline.minDeltaPp !== null) {
+          summaryParts.push(
+            '<span class="filter-summary-pill"><span class="filter-summary-key">floor</span><span class="filter-summary-value">' + formatPp(headline.minDeltaPp) + '</span></span>'
+          );
+        }
+      }
       if (summary.snapshotsSkipped > 0) {
         summaryParts.push(
           '<span class="filter-summary-pill"><span class="filter-summary-key">skipped</span><span class="filter-summary-value">' + summary.snapshotsSkipped.toLocaleString() + '</span></span>'
@@ -977,13 +1319,39 @@ export function renderTrainingDistributionsHtml({
         '<span class="alea-legend-item"><span class="alea-legend-swatch" style="background:' + filterColors.baseline + '"></span>baseline</span>' +
         '<span class="alea-legend-item"><span class="alea-legend-swatch" style="background:' + filterColors.whenTrue + '"></span>' + filter.trueLabel + '</span>' +
         '<span class="alea-legend-item"><span class="alea-legend-swatch" style="background:' + filterColors.whenFalse + '"></span>' + filter.falseLabel + '</span>';
-      const tabsHtml = survivalRemainingOrder.map((rem) => {
+
+      // Sort tabs by |signed badge score| descending so the strongest
+      // signal sits leftmost — the one we default to. Tabs without
+      // measurable data sink to the right with no badge.
+      const tabsSorted = survivalRemainingOrder.slice().map((rem) => {
+        const signed = pickTabSignedScore(summary.scoresByRemaining[rem]);
+        return { rem: rem, signedScore: signed };
+      });
+      tabsSorted.sort((a, b) => {
+        const aMag = a.signedScore === null ? -1 : Math.abs(a.signedScore);
+        const bMag = b.signedScore === null ? -1 : Math.abs(b.signedScore);
+        return bMag - aMag;
+      });
+      const tabsHtml = tabsSorted.map((entry) => {
+        const rem = entry.rem;
         const isActive = rem === filter.defaultRemaining;
-        const badge = formatTabBadge(summary.bestImprovementByRemaining[rem]);
+        const badge = formatTabBadge(summary.scoresByRemaining[rem]);
+        // Asset-wide "best signal" / "worst signal" hotspots get a
+        // small dot before the label, so the operator can spot the
+        // top do-trade and avoid-trade configs at a glance across
+        // every filter section. Both can apply to the same tab when
+        // the binary halves split into both extremes there.
+        let dot = "";
+        if (hotspots.best && hotspots.best.filterId === filter.id && hotspots.best.remaining === rem) {
+          dot += '<span class="filter-tab-dot filter-tab-dot-best" title="strongest do-trade signal for this asset"></span>';
+        }
+        if (hotspots.worst && hotspots.worst.filterId === filter.id && hotspots.worst.remaining === rem) {
+          dot += '<span class="filter-tab-dot filter-tab-dot-worst" title="strongest avoid-trade signal for this asset"></span>';
+        }
         return (
           '<button type="button" class="filter-tab' + (isActive ? ' active' : '') +
           '" data-filter-id="' + filter.id + '" data-remaining="' + rem + '">' +
-          rem + 'm left' + badge + '</button>'
+          dot + rem + 'm left' + badge + '</button>'
         );
       }).join("");
       const sectionHtml =
@@ -996,14 +1364,27 @@ export function renderTrainingDistributionsHtml({
           '<div class="chart-frame">' +
             '<div class="chart-host filter-chart-host" data-filter-id="' + filter.id + '"></div>' +
           '</div>' +
+          '<p class="filter-delta-caption">Delta vs baseline (pp). Above the line = filter beats baseline at that distance; opacity scales with sample density.</p>' +
+          '<div class="filter-delta-frame">' +
+            '<div class="filter-delta-host" data-filter-id="' + filter.id + '"></div>' +
+          '</div>' +
         '</section>';
       if (!filterSectionsHost) return;
       filterSectionsHost.insertAdjacentHTML('beforeend', sectionHtml);
       const host = filterSectionsHost.querySelector('.filter-chart-host[data-filter-id="' + filter.id + '"]');
-      if (!host) return;
+      const deltaHost = filterSectionsHost.querySelector('.filter-delta-host[data-filter-id="' + filter.id + '"]');
+      if (!host || !deltaHost) return;
       const chart = buildFilterChart({ host: host, filter: filter, remaining: filter.defaultRemaining });
+      const deltaChart = buildDeltaChart({ host: deltaHost, filter: filter, remaining: filter.defaultRemaining });
       if (chart) {
-        filterCharts.push({ chart: chart, host: host, filter: filter, remaining: filter.defaultRemaining });
+        filterCharts.push({
+          chart: chart,
+          deltaChart: deltaChart,
+          host: host,
+          deltaHost: deltaHost,
+          filter: filter,
+          remaining: filter.defaultRemaining,
+        });
       }
     }
 
@@ -1012,9 +1393,18 @@ export function renderTrainingDistributionsHtml({
       if (entryIdx < 0) return;
       const entry = filterCharts[entryIdx];
       try { entry.chart.destroy(); } catch (e) { /* ignore */ }
+      try { if (entry.deltaChart) entry.deltaChart.destroy(); } catch (e) { /* ignore */ }
       const newChart = buildFilterChart({ host: entry.host, filter: entry.filter, remaining: remaining });
+      const newDeltaChart = buildDeltaChart({ host: entry.deltaHost, filter: entry.filter, remaining: remaining });
       if (newChart) {
-        filterCharts[entryIdx] = { chart: newChart, host: entry.host, filter: entry.filter, remaining: remaining };
+        filterCharts[entryIdx] = {
+          chart: newChart,
+          deltaChart: newDeltaChart,
+          host: entry.host,
+          deltaHost: entry.deltaHost,
+          filter: entry.filter,
+          remaining: remaining,
+        };
       }
       // Sync tab active state.
       const tabs = filterSectionsHost.querySelectorAll('.filter-tab[data-filter-id="' + filterId + '"]');
@@ -1024,6 +1414,32 @@ export function renderTrainingDistributionsHtml({
       });
     }
 
+    // Walks every (filter, remaining, half) score across the asset and
+    // returns the most-positive ("best signal" — strongest do-trade) and
+    // most-negative ("worst signal" — strongest avoid-trade). Each gets a
+    // small dot on its tab so the operator can find them at a glance.
+    function findHotspots(filters) {
+      let best = null;
+      let worst = null;
+      for (const f of filters) {
+        for (const rem of survivalRemainingOrder) {
+          const entry = f.summary.scoresByRemaining[rem];
+          for (const side of ["true", "false"]) {
+            const s = entry[side];
+            if (s.coverageBp === 0) continue;
+            const ref = { filterId: f.id, remaining: rem, half: side, score: s.score };
+            if (best === null || s.score > best.score) best = ref;
+            if (worst === null || s.score < worst.score) worst = ref;
+          }
+        }
+      }
+      // Binary filter halves are anti-correlated, so the global most-
+      // positive and most-negative scores frequently land on the SAME
+      // tab. Don't suppress one — render both dots in that case. The
+      // tab is genuinely the most extreme in both directions.
+      return { best: best, worst: worst };
+    }
+
     function renderFilters(slice) {
       clearFilterSections();
       if (!filterSectionsHost) return;
@@ -1031,8 +1447,9 @@ export function renderTrainingDistributionsHtml({
         filterSectionsHost.innerHTML = '<div class="survival-empty">No filter overlays available — needs 1m candle data.</div>';
         return;
       }
+      const hotspots = findHotspots(slice.filters);
       for (const filter of slice.filters) {
-        renderFilterSection(filter);
+        renderFilterSection(filter, hotspots);
       }
     }
 
@@ -1092,17 +1509,22 @@ export function renderTrainingDistributionsHtml({
         if (w > 0 && h > 0) survivalChart.setSize({ width: w, height: h });
       });
       survivalRo.observe(survivalChartHost);
-      // Single ResizeObserver covering every filter mini-chart host;
-      // the entry list lets us only resize the affected chart instead of
-      // looping all of them on every observation.
+      // Single ResizeObserver covers both the main chart hosts and the
+      // delta-chart hosts; the entry list lets us only resize what
+      // actually moved.
       const filterRo = new ResizeObserver((entries) => {
         for (const entry of entries) {
           const host = entry.target;
-          const match = filterCharts.find((fc) => fc.host === host);
+          const match = filterCharts.find((fc) => fc.host === host || fc.deltaHost === host);
           if (!match) continue;
           const w = host.clientWidth;
           const h = host.clientHeight;
-          if (w > 0 && h > 0) match.chart.setSize({ width: w, height: h });
+          if (w <= 0 || h <= 0) continue;
+          if (host === match.host) {
+            match.chart.setSize({ width: w, height: h });
+          } else if (match.deltaChart) {
+            match.deltaChart.setSize({ width: w, height: h });
+          }
         }
       });
       // Attach a MutationObserver so that as new chart hosts appear
@@ -1110,8 +1532,10 @@ export function renderTrainingDistributionsHtml({
       // observing them too.
       if (filterSectionsHost) {
         const mo = new MutationObserver(() => {
-          const hosts = filterSectionsHost.querySelectorAll('.filter-chart-host');
-          hosts.forEach((h) => filterRo.observe(h));
+          const mainHosts = filterSectionsHost.querySelectorAll('.filter-chart-host');
+          mainHosts.forEach((h) => filterRo.observe(h));
+          const deltaHosts = filterSectionsHost.querySelectorAll('.filter-delta-host');
+          deltaHosts.forEach((h) => filterRo.observe(h));
         });
         mo.observe(filterSectionsHost, { childList: true, subtree: true });
       }
@@ -1123,6 +1547,11 @@ export function renderTrainingDistributionsHtml({
         const w = entry.host.clientWidth;
         const h = entry.host.clientHeight;
         if (w > 0 && h > 0) entry.chart.setSize({ width: w, height: h });
+        if (entry.deltaChart) {
+          const dw = entry.deltaHost.clientWidth;
+          const dh = entry.deltaHost.clientHeight;
+          if (dw > 0 && dh > 0) entry.deltaChart.setSize({ width: dw, height: dh });
+        }
       }
     });
 
@@ -1201,50 +1630,46 @@ function toFilterSlice({
       snapshotsSkipped: result.summary.snapshotsSkipped,
       occurrenceTrue: result.summary.occurrenceTrue,
       occurrenceFalse: result.summary.occurrenceFalse,
-      bestImprovementBpTrue: result.summary.bestImprovementBpTrue,
-      bestImprovementBpFalse: result.summary.bestImprovementBpFalse,
-      bestImprovementByRemaining: result.summary.bestImprovementByRemaining,
+      scoresByRemaining: result.summary.scoresByRemaining,
     },
     defaultRemaining: pickDefaultRemaining({
-      byRemaining: result.summary.bestImprovementByRemaining,
+      scoresByRemaining: result.summary.scoresByRemaining,
     }),
   };
 }
 
 /**
- * Picks the remaining-minutes bucket that shows the strongest filter
- * effect: smallest (most negative) `min(trueBp, falseBp)` improvement.
- * Falls back to `4` (4m left) when no bucket has both halves above the
- * sample-count floor — that keeps the default deterministic and matches
- * the natural reading order of the tabs.
+ * Picks the remaining-minutes bucket whose `max(|true.score|, |false.score|)`
+ * is largest — i.e. where the filter has its strongest signal in either
+ * direction. Falls back to `4` (4m left) when no bucket has any
+ * comparable data, so the default is deterministic.
  */
 function pickDefaultRemaining({
-  byRemaining,
+  scoresByRemaining,
 }: {
-  readonly byRemaining: Readonly<
+  readonly scoresByRemaining: Readonly<
     Record<
       SurvivalRemainingMinutes,
-      { readonly trueBp: number | null; readonly falseBp: number | null }
+      {
+        readonly true: { readonly score: number; readonly coverageBp: number };
+        readonly false: { readonly score: number; readonly coverageBp: number };
+      }
     >
   >;
 }): SurvivalRemainingMinutes {
   let bestRemaining: SurvivalRemainingMinutes = 4;
-  let bestDelta: number | null = null;
+  let bestMagnitude = -1;
   for (const remaining of SURVIVAL_REMAINING_ORDER) {
-    const entry = byRemaining[remaining];
-    const candidates: number[] = [];
-    if (entry.trueBp !== null) {
-      candidates.push(entry.trueBp);
-    }
-    if (entry.falseBp !== null) {
-      candidates.push(entry.falseBp);
-    }
-    if (candidates.length === 0) {
+    const entry = scoresByRemaining[remaining];
+    if (entry.true.coverageBp === 0 && entry.false.coverageBp === 0) {
       continue;
     }
-    const delta = Math.min(...candidates);
-    if (bestDelta === null || delta < bestDelta) {
-      bestDelta = delta;
+    const magnitude = Math.max(
+      entry.true.coverageBp > 0 ? Math.abs(entry.true.score) : 0,
+      entry.false.coverageBp > 0 ? Math.abs(entry.false.score) : 0,
+    );
+    if (magnitude > bestMagnitude) {
+      bestMagnitude = magnitude;
       bestRemaining = remaining;
     }
   }

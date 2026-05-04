@@ -6,6 +6,7 @@ import type {
   SurvivalFilter,
   SurvivalFilterResult,
   SurvivalFilterSummary,
+  SurvivalScore,
 } from "@alea/lib/training/survivalFilters/types";
 import type {
   SurvivalBucket,
@@ -14,23 +15,15 @@ import type {
 } from "@alea/lib/training/types";
 
 /**
- * Sample-count floor used when scanning the surfaces for the "best
- * improvement vs baseline" summary metric. Mirrors the renderer's
- * threshold so the summary's claim about a filter's best edge matches
- * what the operator can actually see in the table.
+ * Sample-count floor used when comparing a half's bucket vs baseline's
+ * bucket: both must clear this floor for the bucket's pp delta to count
+ * toward the score. Mirrors the renderer's threshold so the score
+ * matches what the operator can actually see in the chart.
  *
- * Kept here (not imported from the renderer) so the compute layer has no
- * dependency on the rendering layer.
+ * Kept here (not imported from the renderer) so the compute layer has
+ * no dependency on the rendering layer.
  */
 const SUMMARY_MIN_SAMPLES = 300;
-
-/**
- * Win-rate targets the summary scans for the best-improvement metric.
- * Same set the renderer's threshold table uses.
- */
-const SUMMARY_TARGET_WIN_RATES: readonly number[] = [
-  60, 65, 70, 75, 80, 85, 90, 95,
-];
 
 const REMAINING_VALUES: readonly SurvivalRemainingMinutes[] = [4, 3, 2, 1];
 
@@ -155,8 +148,6 @@ export function applySurvivalFilters({
       ...materializeSurface({ raw }),
     };
   }
-  const baselineThresholds = computeThresholdMatrix({ surface: baseline });
-
   const perFilter: SurvivalFilterResult[] = [];
   for (let i = 0; i < filters.length; i += 1) {
     const filter = filters[i];
@@ -175,7 +166,7 @@ export function applySurvivalFilters({
     };
     const summary = computeSummary({
       counts: slot.counts,
-      baselineThresholds,
+      baseline,
       whenTrue,
       whenFalse,
     });
@@ -267,56 +258,14 @@ function bucketsOf({
 }
 
 // ----------------------------------------------------------------
-// Summary metrics: `bestImprovementBp` is the most negative delta (true
-// or false vs baseline) across the same `(remainingMinutes, target)`
-// matrix the renderer's threshold table shows. We compute the baseline
-// matrix once, then diff each half against it.
+// Score: signed area between the half's win-rate line and the
+// baseline's win-rate line, integrated over distance. Computed per
+// (remaining, half). See SurvivalScore docs for the convention.
 // ----------------------------------------------------------------
-
-type ThresholdMatrix = Map<
-  SurvivalRemainingMinutes,
-  Map<number, number | null>
->;
-
-function computeThresholdMatrix({
-  surface,
-}: {
-  readonly surface: SurvivalSurface;
-}): ThresholdMatrix {
-  const out: ThresholdMatrix = new Map();
-  for (const remaining of REMAINING_VALUES) {
-    const buckets = surface.byRemaining[remaining];
-    const inner = new Map<number, number | null>();
-    for (const target of SUMMARY_TARGET_WIN_RATES) {
-      inner.set(target, firstBucketReachingTarget({ buckets, target }));
-    }
-    out.set(remaining, inner);
-  }
-  return out;
-}
-
-function firstBucketReachingTarget({
-  buckets,
-  target,
-}: {
-  readonly buckets: readonly SurvivalBucket[];
-  readonly target: number;
-}): number | null {
-  for (const bucket of buckets) {
-    if (bucket.total < SUMMARY_MIN_SAMPLES) {
-      continue;
-    }
-    const winRate = (bucket.survived / bucket.total) * 100;
-    if (winRate >= target) {
-      return bucket.distanceBp;
-    }
-  }
-  return null;
-}
 
 function computeSummary({
   counts,
-  baselineThresholds,
+  baseline,
   whenTrue,
   whenFalse,
 }: {
@@ -325,30 +274,27 @@ function computeSummary({
     readonly falseCount: number;
     readonly skipCount: number;
   };
-  readonly baselineThresholds: ThresholdMatrix;
+  readonly baseline: SurvivalSurface;
   readonly whenTrue: SurvivalSurface;
   readonly whenFalse: SurvivalSurface;
 }): SurvivalFilterSummary {
   const classified = counts.trueCount + counts.falseCount;
   const occurrenceTrue = classified === 0 ? 0 : counts.trueCount / classified;
   const occurrenceFalse = classified === 0 ? 0 : counts.falseCount / classified;
-  const trueThresholds = computeThresholdMatrix({ surface: whenTrue });
-  const falseThresholds = computeThresholdMatrix({ surface: whenFalse });
-  const bestImprovementByRemaining = {} as Record<
+  const scoresByRemaining = {} as Record<
     SurvivalRemainingMinutes,
-    { trueBp: number | null; falseBp: number | null }
+    { true: SurvivalScore; false: SurvivalScore }
   >;
   for (const remaining of REMAINING_VALUES) {
-    bestImprovementByRemaining[remaining] = {
-      trueBp: bestImprovementAtRemaining({
-        baseline: baselineThresholds,
-        half: trueThresholds,
-        remaining,
+    const baselineBuckets = baseline.byRemaining[remaining];
+    scoresByRemaining[remaining] = {
+      true: scoreHalfVsBaseline({
+        halfBuckets: whenTrue.byRemaining[remaining],
+        baselineBuckets,
       }),
-      falseBp: bestImprovementAtRemaining({
-        baseline: baselineThresholds,
-        half: falseThresholds,
-        remaining,
+      false: scoreHalfVsBaseline({
+        halfBuckets: whenFalse.byRemaining[remaining],
+        baselineBuckets,
       }),
     };
   }
@@ -359,84 +305,56 @@ function computeSummary({
     snapshotsSkipped: counts.skipCount,
     occurrenceTrue,
     occurrenceFalse,
-    bestImprovementBpTrue: bestImprovement({
-      baseline: baselineThresholds,
-      half: trueThresholds,
-    }),
-    bestImprovementBpFalse: bestImprovement({
-      baseline: baselineThresholds,
-      half: falseThresholds,
-    }),
-    bestImprovementByRemaining,
-    score: null,
-    verdict: null,
+    scoresByRemaining,
   };
 }
 
-function bestImprovementAtRemaining({
-  baseline,
-  half,
-  remaining,
+/**
+ * Sums per-bucket pp deltas where both the half's bucket and the
+ * baseline's bucket clear `SUMMARY_MIN_SAMPLES`. Buckets where either
+ * side is sparse don't contribute (positively or negatively) — we don't
+ * want under-sampled noise inflating the score in either direction.
+ */
+function scoreHalfVsBaseline({
+  halfBuckets,
+  baselineBuckets,
 }: {
-  readonly baseline: ThresholdMatrix;
-  readonly half: ThresholdMatrix;
-  readonly remaining: SurvivalRemainingMinutes;
-}): number | null {
-  const baseInner = baseline.get(remaining);
-  const halfInner = half.get(remaining);
-  if (baseInner === undefined || halfInner === undefined) {
-    return null;
+  readonly halfBuckets: readonly SurvivalBucket[];
+  readonly baselineBuckets: readonly SurvivalBucket[];
+}): SurvivalScore {
+  const baselineByDistance = new Map<number, SurvivalBucket>();
+  for (const b of baselineBuckets) {
+    baselineByDistance.set(b.distanceBp, b);
   }
-  let best: number | null = null;
-  for (const target of SUMMARY_TARGET_WIN_RATES) {
-    const baseBp = baseInner.get(target);
-    const halfBp = halfInner.get(target);
-    if (
-      baseBp === undefined ||
-      baseBp === null ||
-      halfBp === undefined ||
-      halfBp === null
-    ) {
+  let score = 0;
+  let coverageBp = 0;
+  let maxDeltaPp: number | null = null;
+  let minDeltaPp: number | null = null;
+  for (const half of halfBuckets) {
+    if (half.total < SUMMARY_MIN_SAMPLES) {
       continue;
     }
-    const delta = halfBp - baseBp;
-    if (best === null || delta < best) {
-      best = delta;
-    }
-  }
-  return best;
-}
-
-function bestImprovement({
-  baseline,
-  half,
-}: {
-  readonly baseline: ThresholdMatrix;
-  readonly half: ThresholdMatrix;
-}): number | null {
-  let best: number | null = null;
-  for (const remaining of REMAINING_VALUES) {
-    const baseInner = baseline.get(remaining);
-    const halfInner = half.get(remaining);
-    if (baseInner === undefined || halfInner === undefined) {
+    const base = baselineByDistance.get(half.distanceBp);
+    if (base === undefined || base.total < SUMMARY_MIN_SAMPLES) {
       continue;
     }
-    for (const target of SUMMARY_TARGET_WIN_RATES) {
-      const baseBp = baseInner.get(target);
-      const halfBp = halfInner.get(target);
-      if (
-        baseBp === undefined ||
-        baseBp === null ||
-        halfBp === undefined ||
-        halfBp === null
-      ) {
-        continue;
-      }
-      const delta = halfBp - baseBp;
-      if (best === null || delta < best) {
-        best = delta;
-      }
+    const halfWinRate = (half.survived / half.total) * 100;
+    const baseWinRate = (base.survived / base.total) * 100;
+    const deltaPp = halfWinRate - baseWinRate;
+    score += deltaPp;
+    coverageBp += 1;
+    if (maxDeltaPp === null || deltaPp > maxDeltaPp) {
+      maxDeltaPp = deltaPp;
+    }
+    if (minDeltaPp === null || deltaPp < minDeltaPp) {
+      minDeltaPp = deltaPp;
     }
   }
-  return best;
+  return {
+    score,
+    coverageBp,
+    meanDeltaPp: coverageBp === 0 ? null : score / coverageBp,
+    maxDeltaPp,
+    minDeltaPp,
+  };
 }

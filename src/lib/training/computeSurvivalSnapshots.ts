@@ -36,32 +36,32 @@ export type SurvivalSide = "up" | "down";
  */
 export type SurvivalSnapshotContext = {
   /**
-   * Direction of the 1m candle immediately before the snapshot's 1m
-   * candle. `null` when that candle isn't present in the input series
-   * (e.g. snapshot at +1m of the very first window).
-   */
-  readonly prev1mDirection: SurvivalSide | null;
-
-  /**
-   * Direction of the 5m candle that ended at the start of the current
-   * window — derived from the five 1m candles immediately preceding this
-   * window. `null` when those five candles aren't all present.
+   * Direction of the most recent COMPLETED 5m candle as of the snapshot
+   * — i.e. the 5m bar that ended at the start of the current 5m window.
+   * Constant across all four snapshots within a window. `null` when that
+   * preceding bar isn't present in the loaded 5m series.
+   *
+   * Standard-aligned 5m boundaries (`:00`, `:05`, …): for a window
+   * `[0:10, 0:15)`, this reads the bar covering `[0:05, 0:10)`. Never
+   * leaks the future — the bar's close time strictly precedes the
+   * snapshot.
    */
   readonly prev5mDirection: SurvivalSide | null;
 
   /**
-   * Closing price of the 5m candle that ended at the start of the current
-   * window. Constant across all four snapshots in the window. Useful for
-   * comparing line vs MA, etc.
+   * Closing price of the same 5m bar `prev5mDirection` reads. Constant
+   * across the window's four snapshots; useful for line-vs-MA-style
+   * comparisons.
    */
   readonly prev5mClose: number | null;
 
   /**
-   * Directions of the three 1m candles immediately before the snapshot's
-   * 1m candle, oldest first. `null` when fewer than three preceding 1m
-   * candles are present.
+   * Directions of the three most recent COMPLETED 5m bars, oldest first.
+   * For a window `[0:10, 0:15)`, this is the bars covering `[-0:05, 0:00)`,
+   * `[0:00, 0:05)`, `[0:05, 0:10)`. Constant across the window's four
+   * snapshots. `null` when any of those three bars isn't present.
    */
-  readonly last3x1mDirections:
+  readonly last3x5mDirections:
     | readonly [SurvivalSide, SurvivalSide, SurvivalSide]
     | null;
 
@@ -94,7 +94,7 @@ const MS_PER_1M = 60 * 1000;
  * any bump, so don't rev it for non-semantic refactors. Standalone export
  * so cache callers don't need to know the file's internals.
  */
-export const SNAPSHOT_PIPELINE_VERSION = 2;
+export const SNAPSHOT_PIPELINE_VERSION = 3;
 
 /**
  * Walks the 1m candle series, emitting one `SurvivalSnapshot` per usable
@@ -131,10 +131,21 @@ export function* computeSurvivalSnapshots({
     const year = String(c0.timestamp.getUTCFullYear());
     const windowStartMs = c0.timestamp.getTime();
 
+    // All 5m context fields are constant across the window's four
+    // snapshots — the most recent completed 5m bar (and its 2 priors,
+    // and the MA-20) doesn't change inside the current window.
     const prev5mClose = ma20Index?.prevCloseAt({ windowStartMs }) ?? null;
     const prev5mDirection =
       ma20Index?.prevDirectionAt({ windowStartMs }) ?? null;
+    const last3x5mDirections =
+      ma20Index?.lastThreeDirectionsAt({ windowStartMs }) ?? null;
     const ma20x5m = ma20Index?.maAt({ windowStartMs }) ?? null;
+    // `idx` is currently only consumed by the dropped 1m lookbacks,
+    // but the iterator still needs it for callers that may want it
+    // back; keep it referenced so the type-checker doesn't complain
+    // and so future filters can hang per-snapshot lookups off it
+    // without re-plumbing.
+    void idx;
 
     for (const { candleIndex, remaining } of SNAPSHOTS) {
       const snapshotCandle = window[candleIndex];
@@ -149,19 +160,6 @@ export function* computeSurvivalSnapshots({
         (Math.abs(snapshotPrice - line) / line) * 10000 + 1e-9,
       );
 
-      // The 1m candle whose direction is the snapshot's "previous 1m"
-      // sits at series index `idx + candleIndex - 1`. Negative indices
-      // mean the lookback isn't available yet.
-      const prev1mDirection = directionAt({
-        candles: candles1m,
-        index: idx + candleIndex - 1,
-      });
-
-      const last3x1mDirections = lastThreeDirectionsAt({
-        candles: candles1m,
-        snapshotIndex: idx + candleIndex,
-      });
-
       yield {
         windowStartMs,
         year,
@@ -174,10 +172,9 @@ export function* computeSurvivalSnapshots({
         remaining,
         survived,
         context: {
-          prev1mDirection,
           prev5mDirection,
           prev5mClose,
-          last3x1mDirections,
+          last3x5mDirections,
           ma20x5m,
         },
       };
@@ -187,9 +184,10 @@ export function* computeSurvivalSnapshots({
 
 /**
  * Iterates non-overlapping 5m windows of 1m candles plus the start index
- * of each window in the source array. The index is needed by the snapshot
- * pipeline so it can read 1m candles before the window starts (for the
- * `prev1m` and `last3x1m` lookbacks).
+ * of each window in the source array. The index is currently unused by
+ * the snapshot pipeline (all context is 5m-derived) but the iterator
+ * keeps emitting it so future per-snapshot lookbacks can reuse it
+ * without re-plumbing the iterator surface.
  */
 function* iterateWindows(candles: readonly Candle[]): Generator<{
   readonly idx: number;
@@ -230,50 +228,14 @@ function* iterateWindows(candles: readonly Candle[]): Generator<{
   }
 }
 
-function directionAt({
-  candles,
-  index,
-}: {
-  readonly candles: readonly Candle[];
-  readonly index: number;
-}): SurvivalSide | null {
-  if (index < 0 || index >= candles.length) {
-    return null;
-  }
-  const candle = candles[index];
-  if (candle === undefined) {
-    return null;
-  }
-  return candle.close >= candle.open ? "up" : "down";
-}
-
-function lastThreeDirectionsAt({
-  candles,
-  snapshotIndex,
-}: {
-  readonly candles: readonly Candle[];
-  /**
-   * The series index of the snapshot's own 1m candle. The "last three"
-   * are the candles at indices `snapshotIndex - 3`, `snapshotIndex - 2`,
-   * `snapshotIndex - 1`.
-   */
-  readonly snapshotIndex: number;
-}): readonly [SurvivalSide, SurvivalSide, SurvivalSide] | null {
-  const a = directionAt({ candles, index: snapshotIndex - 3 });
-  const b = directionAt({ candles, index: snapshotIndex - 2 });
-  const c = directionAt({ candles, index: snapshotIndex - 1 });
-  if (a === null || b === null || c === null) {
-    return null;
-  }
-  return [a, b, c];
-}
-
 /**
  * Precomputed 5m-context index for fast lookups by `windowStartMs`. The
  * MA-20 at a given window is the SMA of the 20 closing prices of the 5m
  * candles ending strictly before that window starts. The previous-5m
- * direction and close are the close-vs-open and close of the 5m candle
- * that ended at exactly `windowStartMs`.
+ * direction and close describe the single 5m bar that ended at exactly
+ * `windowStartMs`. `lastThreeDirectionsAt` returns the three most recent
+ * completed 5m bars' directions (oldest first) — same "ended at or before
+ * windowStartMs" semantics as the MA, just N=3 instead of N=20.
  */
 type FiveMinuteIndex = {
   readonly maAt: (input: { readonly windowStartMs: number }) => number | null;
@@ -283,6 +245,9 @@ type FiveMinuteIndex = {
   readonly prevCloseAt: (input: {
     readonly windowStartMs: number;
   }) => number | null;
+  readonly lastThreeDirectionsAt: (input: {
+    readonly windowStartMs: number;
+  }) => readonly [SurvivalSide, SurvivalSide, SurvivalSide] | null;
 };
 
 const MA20_PERIOD = 20;
@@ -301,20 +266,21 @@ function build5mLookback({
   >();
   // Single O(n) pass over the 5m series (already sorted ascending by the
   // loader): build the prev-5m direction/close lookup, the chronological
-  // start-time array for binary search, and the running cumulative-close
-  // prefix sum used to answer MA-20 in O(1).
+  // start-time array for binary search, the per-index direction array
+  // for last-N lookups, and the running cumulative-close prefix sum
+  // used to answer MA-20 in O(1).
   const startTimes: number[] = [];
+  const directions: SurvivalSide[] = [];
   const closeAtStart = new Map<number, number>();
   let cumulative = 0;
   for (const candle of candles5m) {
     const startMs = candle.timestamp.getTime();
     const endMs = startMs + MS_PER_5M;
-    byEndMs.set(endMs, {
-      direction: candle.close >= candle.open ? "up" : "down",
-      close: candle.close,
-    });
+    const direction: SurvivalSide = candle.close >= candle.open ? "up" : "down";
+    byEndMs.set(endMs, { direction, close: candle.close });
     cumulative += candle.close;
     startTimes.push(startMs);
+    directions.push(direction);
     closeAtStart.set(startMs, cumulative);
   }
 
@@ -362,6 +328,22 @@ function build5mLookback({
     },
     prevCloseAt: ({ windowStartMs }) => {
       return byEndMs.get(windowStartMs)?.close ?? null;
+    },
+    lastThreeDirectionsAt: ({ windowStartMs }) => {
+      // Three most recent COMPLETED 5m bars at the moment the current
+      // window starts. We need bars whose start time is strictly less
+      // than `windowStartMs`. Use the same binary search as the MA path.
+      const lastIdx = indexAtOrBefore(windowStartMs);
+      if (lastIdx < 2) {
+        return null;
+      }
+      const a = directions[lastIdx - 2];
+      const b = directions[lastIdx - 1];
+      const c = directions[lastIdx];
+      if (a === undefined || b === undefined || c === undefined) {
+        return null;
+      }
+      return [a, b, c];
     },
   };
 }

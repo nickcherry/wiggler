@@ -1,8 +1,9 @@
-/.claude/
+.eslintcache
 /.cache/
+/.claude/
+/.wrangler/
 /node_modules/
 /tmp/
-.eslintcache
 
 .env
 .env.*
