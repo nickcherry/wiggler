@@ -543,43 +543,79 @@ export function renderTrainingDistributionsHtml({
     /* Mobile / narrow-viewport tweaks. The base layout assumes there's
        enough horizontal room for the filter title, a row of pills, and
        a chevron in the same line, plus a full-width tab strip with
-       inline score badges. On phones nothing fits, so we re-stack
-       things into two rows and condense the per-tab content to a
-       single line each. */
+       inline score badges. On phones we use a 2x2 grid for pills, keep
+       title + chevron locked on the same row regardless of title length
+       (CSS grid avoids the flex-wrap problem long titles caused), and
+       fade the right edge of the tab strip so the user can see there's
+       more to scroll to. */
     @media (max-width: 720px) {
+      /* Asset tabs: drop the 96px min-width so all 5 assets fit one
+         row with proportional sizing, instead of wrapping 3+2. */
+      .alea-tabs { flex-wrap: nowrap; }
+      .alea-tab {
+        min-width: 0;
+        padding: 11px 6px;
+        font-size: 11.5px;
+        letter-spacing: 0.12em;
+      }
+
+      /* Use grid for the summary so title + chevron stay locked on
+         row 1 even when the title text is long enough to take all
+         the available width — flex-wrap was pushing the chevron
+         down to row 2 for long titles. Score pills sit in row 2,
+         spanning both columns. */
       details.filter-section > summary {
+        display: grid;
+        grid-template-columns: 1fr auto;
+        grid-template-rows: auto auto;
+        column-gap: 10px;
+        row-gap: 10px;
         padding: 14px 16px;
-        gap: 10px;
       }
       details.filter-section > summary > .filter-summary-title {
-        font-size: 16px;
-        flex: 1 1 auto;
+        grid-column: 1;
+        grid-row: 1;
+        font-size: 15.5px;
+        line-height: 1.25;
+        flex: initial;
+        min-width: 0;
       }
       details.filter-section > summary > .filter-summary-chevron {
-        flex: 0 0 auto;
-        margin-left: auto;
+        grid-column: 2;
+        grid-row: 1;
+        align-self: start;
+        margin-left: 0;
+        white-space: nowrap;
       }
       details.filter-section > summary > .filter-summary-scores {
-        flex: 1 1 100%;
-        order: 3;
-        justify-content: flex-start;
+        grid-column: 1 / -1;
+        grid-row: 2;
         margin-left: 0;
         gap: 6px;
       }
       .filter-summary-score {
         flex: 1 1 calc(50% - 3px);
         min-width: 0;
+        gap: 8px;
+        padding: 5px 10px;
       }
 
       .filter-section-body { padding: 0 14px 18px; gap: 12px; }
 
+      /* Inline tab strip with a fading-right gradient so users can
+         see there's more to scroll to when 4 tabs don't fit in
+         viewport width. The mask is applied to the strip itself,
+         not the chart frame, so charts stay crisp. */
       .filter-tabs {
         display: flex;
         width: 100%;
         align-self: stretch;
         overflow-x: auto;
-        scrollbar-width: thin;
+        scrollbar-width: none;
+        -webkit-mask-image: linear-gradient(to right, black calc(100% - 24px), transparent);
+                mask-image: linear-gradient(to right, black calc(100% - 24px), transparent);
       }
+      .filter-tabs::-webkit-scrollbar { display: none; }
       .filter-tab {
         flex: 1 1 0;
         padding: 8px 10px;
@@ -592,10 +628,16 @@ export function renderTrainingDistributionsHtml({
         white-space: nowrap;
       }
 
-      .chart-frame { padding: 10px 8px 6px; }
-      .chart-host { height: 320px; min-height: 320px; max-height: 320px; }
-      .filter-delta-frame { padding: 10px 8px 6px; }
-      .filter-delta-host { height: 220px; min-height: 220px; max-height: 220px; }
+      /* Tighter chart heights on mobile — the baseline + delta charts
+         each lose ~60px of unnecessary chrome at phone widths. */
+      .chart-frame { padding: 10px 8px 4px; }
+      .chart-host { height: 280px; min-height: 280px; max-height: 280px; }
+      .filter-delta-frame { padding: 10px 8px 4px; }
+      .filter-delta-host { height: 200px; min-height: 200px; max-height: 200px; }
+
+      /* Tighter typography on the page header + survival helper. */
+      .alea-subtitle { font-size: 11.5px; }
+      .survival-helper { font-size: 12px; line-height: 1.45; }
     }
   </style>
 </head>
