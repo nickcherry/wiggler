@@ -27,6 +27,14 @@ function emptyContext(): SurvivalSnapshotContext {
     last10x5mDirections: null,
     roc5Pct: null,
     stoch14x5m: null,
+    prev5mBarVolume: null,
+    avgVolume50x5m: null,
+    avgRangeRecent5x5m: null,
+    avgRangePrior5x5m: null,
+    bars5mSinceDonchian50High: null,
+    bars5mSinceDonchian50Low: null,
+    currentMicroBarDirection: "up",
+    prevMicroDistanceBp: null,
   };
 }
 

@@ -3,7 +3,7 @@ import type {
   SurvivalSnapshot,
   SurvivalSnapshotContext,
 } from "@alea/lib/training/computeSurvivalSnapshots";
-import { roc5StrongAlignedFilter } from "@alea/lib/training/survivalFilters/roc5StrongAligned/filter";
+import { volumeHighAlignedFilter } from "@alea/lib/training/survivalFilters/volumeHighAligned/filter";
 import { describe, expect, it } from "bun:test";
 
 function emptyContext(): SurvivalSnapshotContext {
@@ -54,24 +54,39 @@ function buildSnapshot(currentSide: SurvivalSide, ctx: SurvivalSnapshotContext):
   };
 }
 
-describe("roc5StrongAlignedFilter", () => {
-  it("strong positive ROC + UP side = aligned", () => {
-    const snap = buildSnapshot("up", { ...emptyContext(), roc5Pct: 0.5 });
-    expect(roc5StrongAlignedFilter.classify(snap, snap.context)).toBe(true);
+describe("volumeHighAlignedFilter", () => {
+  it("true when volume ≥ 1.5x avg AND bar direction matches side", () => {
+    const snap = buildSnapshot("up", {
+      ...emptyContext(),
+      prev5mBarVolume: 200,
+      avgVolume50x5m: 100,
+      prev5mBar: { open: 100, high: 102, low: 99, close: 101 }, // up bar
+    });
+    expect(volumeHighAlignedFilter.classify(snap, snap.context)).toBe(true);
   });
 
-  it("strong negative ROC + UP side = against", () => {
-    const snap = buildSnapshot("up", { ...emptyContext(), roc5Pct: -0.5 });
-    expect(roc5StrongAlignedFilter.classify(snap, snap.context)).toBe(false);
+  it("false when volume high but bar direction opposes side", () => {
+    const snap = buildSnapshot("up", {
+      ...emptyContext(),
+      prev5mBarVolume: 200,
+      avgVolume50x5m: 100,
+      prev5mBar: { open: 102, high: 102, low: 99, close: 100 }, // down bar
+    });
+    expect(volumeHighAlignedFilter.classify(snap, snap.context)).toBe(false);
   });
 
-  it("skips when |ROC| < threshold", () => {
-    const snap = buildSnapshot("up", { ...emptyContext(), roc5Pct: 0.1 });
-    expect(roc5StrongAlignedFilter.classify(snap, snap.context)).toBe("skip");
+  it("false when volume below threshold", () => {
+    const snap = buildSnapshot("up", {
+      ...emptyContext(),
+      prev5mBarVolume: 110,
+      avgVolume50x5m: 100,
+      prev5mBar: { open: 100, high: 102, low: 99, close: 101 },
+    });
+    expect(volumeHighAlignedFilter.classify(snap, snap.context)).toBe(false);
   });
 
-  it("skips when ROC unavailable", () => {
+  it("skips when volume context unavailable", () => {
     const snap = buildSnapshot("up", emptyContext());
-    expect(roc5StrongAlignedFilter.classify(snap, snap.context)).toBe("skip");
+    expect(volumeHighAlignedFilter.classify(snap, snap.context)).toBe("skip");
   });
 });

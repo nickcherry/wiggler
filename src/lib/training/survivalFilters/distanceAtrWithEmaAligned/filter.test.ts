@@ -3,7 +3,7 @@ import type {
   SurvivalSnapshot,
   SurvivalSnapshotContext,
 } from "@alea/lib/training/computeSurvivalSnapshots";
-import { last3x5mMajorityAlignmentFilter } from "@alea/lib/training/survivalFilters/last3x5mMajorityAlignment/filter";
+import { distanceAtrWithEmaAlignedFilter } from "@alea/lib/training/survivalFilters/distanceAtrWithEmaAligned/filter";
 import { describe, expect, it } from "bun:test";
 
 function emptyContext(): SurvivalSnapshotContext {
@@ -40,73 +40,68 @@ function emptyContext(): SurvivalSnapshotContext {
 
 function buildSnapshot({
   currentSide,
-  context,
+  line,
+  snapshotPrice,
+  ctx,
 }: {
   readonly currentSide: SurvivalSide;
-  readonly context: SurvivalSnapshotContext;
+  readonly line: number;
+  readonly snapshotPrice: number;
+  readonly ctx: SurvivalSnapshotContext;
 }): SurvivalSnapshot {
   return {
     windowStartMs: 0,
     year: "2025",
-    line: 100,
-    finalPrice: 100,
+    line,
+    finalPrice: snapshotPrice,
     finalSide: currentSide,
-    snapshotPrice: 100,
+    snapshotPrice,
     currentSide,
     distanceBp: 0,
     remaining: 1,
     survived: true,
-    context,
+    context: ctx,
   };
 }
 
-describe("last3x5mMajorityAlignmentFilter", () => {
-  it("aligns when majority direction matches current side", () => {
+describe("distanceAtrWithEmaAlignedFilter", () => {
+  it("decisive AND ema-aligned = true", () => {
     const snap = buildSnapshot({
       currentSide: "up",
-      context: {
-        ...emptyContext(),
-        last3x5mDirections: ["up", "up", "down"],
-      },
+      line: 110,
+      snapshotPrice: 110.6,
+      ctx: { ...emptyContext(), atr14x5m: 1, ema50x5m: 100 },
     });
-    expect(last3x5mMajorityAlignmentFilter.classify(snap, snap.context)).toBe(
-      true,
-    );
+    expect(distanceAtrWithEmaAlignedFilter.classify(snap, snap.context)).toBe(true);
   });
 
-  it("does not align when majority is opposite", () => {
+  it("decisive but EMA against = false", () => {
     const snap = buildSnapshot({
       currentSide: "up",
-      context: {
-        ...emptyContext(),
-        last3x5mDirections: ["down", "down", "up"],
-      },
+      line: 90,
+      snapshotPrice: 90.6,
+      ctx: { ...emptyContext(), atr14x5m: 1, ema50x5m: 100 },
     });
-    expect(last3x5mMajorityAlignmentFilter.classify(snap, snap.context)).toBe(
-      false,
-    );
+    expect(distanceAtrWithEmaAlignedFilter.classify(snap, snap.context)).toBe(false);
   });
 
-  it("aligns when all three agree with current side", () => {
-    const snap = buildSnapshot({
-      currentSide: "down",
-      context: {
-        ...emptyContext(),
-        last3x5mDirections: ["down", "down", "down"],
-      },
-    });
-    expect(last3x5mMajorityAlignmentFilter.classify(snap, snap.context)).toBe(
-      true,
-    );
-  });
-
-  it("skips when fewer than three preceding 5m bars are available", () => {
+  it("aligned but not decisive = false", () => {
     const snap = buildSnapshot({
       currentSide: "up",
-      context: emptyContext(),
+      line: 110,
+      snapshotPrice: 110.2,
+      ctx: { ...emptyContext(), atr14x5m: 1, ema50x5m: 100 },
     });
-    expect(last3x5mMajorityAlignmentFilter.classify(snap, snap.context)).toBe(
-      "skip",
-    );
+    expect(distanceAtrWithEmaAlignedFilter.classify(snap, snap.context)).toBe(false);
+  });
+
+  it("skips when missing context", () => {
+    const snap = buildSnapshot({
+      currentSide: "up",
+      line: 110,
+      snapshotPrice: 110.6,
+      ctx: emptyContext(),
+    });
+    expect(distanceAtrWithEmaAlignedFilter.classify(snap, snap.context)).toBe("skip");
   });
 });

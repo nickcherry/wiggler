@@ -180,6 +180,55 @@ export type SurvivalSnapshotContext = {
    * fewer than 14 prior bars exist or the range is degenerate.
    */
   readonly stoch14x5m: number | null;
+
+  /**
+   * Volume of the most recent COMPLETED 5m bar (the same bar
+   * `prev5mBar` describes). `null` when no prior bar is present.
+   */
+  readonly prev5mBarVolume: number | null;
+
+  /**
+   * Mean volume across the trailing 50 completed 5m bars. Used as
+   * the baseline for spike / dryup tests against `prev5mBarVolume`.
+   * `null` until 50 prior bars exist.
+   */
+  readonly avgVolume50x5m: number | null;
+
+  /**
+   * Average range (high − low) over the last 5 completed 5m bars
+   * vs the 5 bars BEFORE that. Both null until 10 prior bars exist.
+   * Used by range-decline / range-expansion-of-trend filters.
+   */
+  readonly avgRangeRecent5x5m: number | null;
+  readonly avgRangePrior5x5m: number | null;
+
+  /**
+   * Highest high and lowest low across the trailing 50 completed
+   * 5m bars (same as `donchian50High`/`Low`) PLUS the bar-index
+   * offset at which each occurred (0 = most recent bar, 49 =
+   * oldest). Lets filters ask "how recently did we last touch the
+   * 50-bar extreme?" without storing the whole bar series.
+   */
+  readonly bars5mSinceDonchian50High: number | null;
+  readonly bars5mSinceDonchian50Low: number | null;
+
+  /**
+   * Direction of the most recent COMPLETED 1m bar inside the
+   * current 5m partial window — i.e. the candle the snapshot's
+   * close came from. At remaining=4 this is window[0], at
+   * remaining=1 it's window[3]. Always present (no warm-up
+   * needed).
+   */
+  readonly currentMicroBarDirection: SurvivalSide;
+
+  /**
+   * Distance (in bp) from line to the *previous* 1m candle's close
+   * within the current window. At remaining=4 there is no previous
+   * 1m bar, so `null`. Compared against `snapshot.distanceBp` to
+   * tell whether the side is decisively pulling away (distance
+   * growing) or fading back (distance shrinking).
+   */
+  readonly prevMicroDistanceBp: number | null;
 };
 
 const SNAPSHOTS: readonly {
@@ -202,7 +251,7 @@ const MS_PER_1M = 60 * 1000;
  * any bump, so don't rev it for non-semantic refactors. Standalone export
  * so cache callers don't need to know the file's internals.
  */
-export const SNAPSHOT_PIPELINE_VERSION = 8;
+export const SNAPSHOT_PIPELINE_VERSION = 9;
 
 /**
  * Walks the 1m candle series, emitting one `SurvivalSnapshot` per usable
@@ -267,6 +316,18 @@ export function* computeSurvivalSnapshots({
     const roc5Pct = ma20Index?.rocPctAt({ windowStartMs, period: 5 }) ?? null;
     const stoch14x5m =
       ma20Index?.stochKAt({ windowStartMs, period: 14 }) ?? null;
+    const prev5mBarVolume =
+      ma20Index?.prevBarVolumeAt({ windowStartMs }) ?? null;
+    const avgVolume50x5m =
+      ma20Index?.avgVolumeAt({ windowStartMs, period: 50 }) ?? null;
+    const avgRangeRecent5x5m =
+      ma20Index?.avgRangeAt({ windowStartMs, period: 5, offset: 0 }) ?? null;
+    const avgRangePrior5x5m =
+      ma20Index?.avgRangeAt({ windowStartMs, period: 5, offset: 5 }) ?? null;
+    const donchianAge =
+      ma20Index?.donchianAgeAt({ windowStartMs, period: 50 }) ?? null;
+    const bars5mSinceDonchian50High = donchianAge?.barsSinceHigh ?? null;
+    const bars5mSinceDonchian50Low = donchianAge?.barsSinceLow ?? null;
     // `idx` is currently only consumed by the dropped 1m lookbacks,
     // but the iterator still needs it for callers that may want it
     // back; keep it referenced so the type-checker doesn't complain
@@ -286,6 +347,23 @@ export function* computeSurvivalSnapshots({
       const distanceBp = Math.floor(
         (Math.abs(snapshotPrice - line) / line) * 10000 + 1e-9,
       );
+
+      // Per-snapshot 1m microstructure inside the partial 5m window.
+      // The bar that produced this snapshot's close is window[candleIndex];
+      // its direction is sign(close - open). For "distance growing"
+      // tests we look at the 1m bar BEFORE this one (window[candleIndex-1])
+      // — at remaining=4 that's null since we're on the first 1m bar.
+      const currentMicroBarDirection: SurvivalSide =
+        snapshotCandle.close >= snapshotCandle.open ? "up" : "down";
+      let prevMicroDistanceBp: number | null = null;
+      if (candleIndex > 0) {
+        const prevMicroBar = window[candleIndex - 1];
+        if (prevMicroBar !== undefined) {
+          prevMicroDistanceBp = Math.floor(
+            (Math.abs(prevMicroBar.close - line) / line) * 10000 + 1e-9,
+          );
+        }
+      }
 
       yield {
         windowStartMs,
@@ -318,6 +396,14 @@ export function* computeSurvivalSnapshots({
           last10x5mDirections,
           roc5Pct,
           stoch14x5m,
+          prev5mBarVolume,
+          avgVolume50x5m,
+          avgRangeRecent5x5m,
+          avgRangePrior5x5m,
+          bars5mSinceDonchian50High,
+          bars5mSinceDonchian50Low,
+          currentMicroBarDirection,
+          prevMicroDistanceBp,
         },
       };
     }
@@ -452,6 +538,25 @@ type FiveMinuteIndex = {
     readonly windowStartMs: number;
     readonly period: number;
   }) => number | null;
+  readonly prevBarVolumeAt: (input: {
+    readonly windowStartMs: number;
+  }) => number | null;
+  readonly avgVolumeAt: (input: {
+    readonly windowStartMs: number;
+    readonly period: number;
+  }) => number | null;
+  readonly avgRangeAt: (input: {
+    readonly windowStartMs: number;
+    readonly period: number;
+    readonly offset: number;
+  }) => number | null;
+  readonly donchianAgeAt: (input: {
+    readonly windowStartMs: number;
+    readonly period: number;
+  }) => {
+    readonly barsSinceHigh: number;
+    readonly barsSinceLow: number;
+  } | null;
   readonly lastThreeDirectionsAt: (input: {
     readonly windowStartMs: number;
   }) => readonly [SurvivalSide, SurvivalSide, SurvivalSide] | null;
@@ -490,19 +595,29 @@ function build5mLookback({
   const highs: number[] = [];
   const lows: number[] = [];
   const closes: number[] = [];
+  const volumes: number[] = [];
   const cumulativeCloses: number[] = []; // cumulativeCloses[i] = Σ closes[0..i]
+  const cumulativeVolumes: number[] = []; // O(1) trailing-volume averages
+  const cumulativeRanges: number[] = []; // O(1) trailing-range averages
   let cumulative = 0;
+  let cumulativeVol = 0;
+  let cumulativeRange = 0;
   for (const candle of candles5m) {
     const startMs = candle.timestamp.getTime();
     const direction: SurvivalSide = candle.close >= candle.open ? "up" : "down";
     cumulative += candle.close;
+    cumulativeVol += candle.volume;
+    cumulativeRange += candle.high - candle.low;
     startTimes.push(startMs);
     directions.push(direction);
     opens.push(candle.open);
     highs.push(candle.high);
     lows.push(candle.low);
     closes.push(candle.close);
+    volumes.push(candle.volume);
     cumulativeCloses.push(cumulative);
+    cumulativeVolumes.push(cumulativeVol);
+    cumulativeRanges.push(cumulativeRange);
   }
 
   const ema20 = computeEmaSeries({ closes, period: 20 });
@@ -746,6 +861,68 @@ function build5mLookback({
         return null;
       }
       return ((close - lo) / (hi - lo)) * 100;
+    },
+    prevBarVolumeAt: ({ windowStartMs }) => {
+      const lastIdx = indexAtOrBefore(windowStartMs);
+      if (lastIdx < 0) {
+        return null;
+      }
+      return volumes[lastIdx] ?? null;
+    },
+    avgVolumeAt: ({ windowStartMs, period }) => {
+      const lastIdx = indexAtOrBefore(windowStartMs);
+      if (lastIdx < period - 1) {
+        return null;
+      }
+      const tail = cumulativeVolumes[lastIdx];
+      const beforeHead =
+        lastIdx - period >= 0 ? cumulativeVolumes[lastIdx - period] : 0;
+      if (tail === undefined || beforeHead === undefined) {
+        return null;
+      }
+      return (tail - beforeHead) / period;
+    },
+    avgRangeAt: ({ windowStartMs, period, offset }) => {
+      const lastIdx = indexAtOrBefore(windowStartMs) - offset;
+      if (lastIdx < period - 1) {
+        return null;
+      }
+      const tail = cumulativeRanges[lastIdx];
+      const beforeHead =
+        lastIdx - period >= 0 ? cumulativeRanges[lastIdx - period] : 0;
+      if (tail === undefined || beforeHead === undefined) {
+        return null;
+      }
+      return (tail - beforeHead) / period;
+    },
+    donchianAgeAt: ({ windowStartMs, period }) => {
+      const lastIdx = indexAtOrBefore(windowStartMs);
+      if (lastIdx < period - 1) {
+        return null;
+      }
+      let hi = -Infinity;
+      let lo = Infinity;
+      let hiIdx = -1;
+      let loIdx = -1;
+      for (let k = lastIdx - period + 1; k <= lastIdx; k += 1) {
+        const h = highs[k];
+        const l = lows[k];
+        if (h === undefined || l === undefined) {
+          return null;
+        }
+        if (h > hi) {
+          hi = h;
+          hiIdx = k;
+        }
+        if (l < lo) {
+          lo = l;
+          loIdx = k;
+        }
+      }
+      return {
+        barsSinceHigh: lastIdx - hiIdx,
+        barsSinceLow: lastIdx - loIdx,
+      };
     },
     lastThreeDirectionsAt: ({ windowStartMs }) => {
       const lastIdx = indexAtOrBefore(windowStartMs);
