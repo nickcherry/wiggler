@@ -9,8 +9,14 @@ import type { Asset } from "@alea/types/assets";
  *
  *   Placed order for $20 of BTC ↑ @ $80,251.35
  *
- *   Price line is $80,253.10
+ *   Price line is $80,253.10 (+0.002%)
  *   Market expires in 2 minutes 20 seconds.
+ *
+ * The percentage in parentheses is the line's position relative to
+ * the current price — `(line − current) / current × 100`. Positive =
+ * line is above current (so the current side is DOWN, distance is
+ * negative); negative = line is below current. Three significant
+ * digits, trailing zeros stripped down to one decimal.
  */
 export function formatOrderPlaced({
   asset,
@@ -33,9 +39,54 @@ export function formatOrderPlaced({
 }): string {
   const arrow = side === "up" ? "↑" : "↓";
   const headline = `Placed order for $${formatStake({ stakeUsd })} of ${asset.toUpperCase()} ${arrow} @ ${formatPrice({ asset, value: underlyingPrice })}`;
-  const lineLabel = `Price line is ${formatPrice({ asset, value: linePrice })}`;
+  const linePctLabel = formatLineRelativePercent({
+    linePrice,
+    underlyingPrice,
+  });
+  const lineLabel = `Price line is ${formatPrice({ asset, value: linePrice })}${linePctLabel === null ? "" : ` (${linePctLabel})`}`;
   const expiresLabel = `Market expires in ${formatDuration({ ms: Math.max(0, windowEndMs - nowMs) })}.`;
   return `${headline}\n\n${lineLabel}\n${expiresLabel}`;
+}
+
+/**
+ * Formats `(line − current) / current × 100` as a percent string with
+ * an explicit sign, three-decimal precision, trailing zeros stripped
+ * down to one decimal. Returns `null` when the math is undefined
+ * (e.g. `underlyingPrice` is zero or non-finite) so the caller can
+ * omit the parens cleanly.
+ */
+function formatLineRelativePercent({
+  linePrice,
+  underlyingPrice,
+}: {
+  readonly linePrice: number;
+  readonly underlyingPrice: number;
+}): string | null {
+  if (
+    !Number.isFinite(linePrice) ||
+    !Number.isFinite(underlyingPrice) ||
+    underlyingPrice === 0
+  ) {
+    return null;
+  }
+  const pct = ((linePrice - underlyingPrice) / underlyingPrice) * 100;
+  return formatSignedPercent({ value: pct });
+}
+
+/**
+ * `0.002180 → "+0.002%"` / `0.02 → "+0.02%"` / `0.2 → "+0.2%"` /
+ * `0 → "+0.0%"` / `-1.234567 → "-1.235%"`. Three decimals max, one
+ * minimum. Always carries a sign.
+ */
+function formatSignedPercent({ value }: { readonly value: number }): string {
+  const sign = value >= 0 ? "+" : "-";
+  const abs = Math.abs(value);
+  const rounded = Math.round(abs * 1000) / 1000;
+  let str = rounded.toFixed(3);
+  while (str.endsWith("0") && !str.endsWith(".0")) {
+    str = str.slice(0, -1);
+  }
+  return `${sign}${str}%`;
 }
 
 function formatStake({ stakeUsd }: { readonly stakeUsd: number }): string {

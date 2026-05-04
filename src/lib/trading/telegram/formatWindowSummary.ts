@@ -50,26 +50,38 @@ export type WindowPlacementStats = {
 };
 
 /**
- * Composes the post-window Telegram message. Two flavours:
+ * Composes the post-window Telegram message. Layout (always):
  *
- *   - All five assets had `kind: "none"` → "No trades entered this
- *     market." plus a `Total Pnl: $0.00` line. The phrasing matches
- *     the chunk-2 spec exactly.
- *   - Otherwise → one line per asset (in the order the caller passed
- *     them in) describing what happened, then a blank line, then
- *     `Total Pnl: $X.XX` summing all net PnLs.
+ *   <per-asset list, OR "No trades entered this market.">
  *
- * When `stats` is supplied and any of its counts are non-zero, an
- * extra trailing line is appended after the Total Pnl.
+ *   Latest Window Pnl: <signed-usd>
+ *   Cross-book rejections: <N> (<M> placed after retry)   ← only when non-zero
+ *
+ *   Total Pnl: <signed-usd>
+ *
+ * The blank line between the per-asset list and the latest-window block
+ * separates the recent-market detail from aggregate stats; another
+ * blank line separates the latest-window block from the lifetime
+ * total. `Total Pnl` is cumulative across every window the running
+ * process has summarized — it resets on restart, since chunk-2 keeps
+ * the runtime DB-free.
  */
 export function formatWindowSummary({
   outcomes,
   stats,
+  totalPnlUsd,
 }: {
   readonly outcomes: readonly AssetWindowOutcome[];
   readonly stats?: WindowPlacementStats;
+  /**
+   * Lifetime PnL through and including this window — the value the
+   * runner accumulates by adding each window's net PnL as the
+   * summary fires. Pass the `latestWindowPnlUsd` argument too so the
+   * formatter can show both deltas without recomputing.
+   */
+  readonly totalPnlUsd: number;
 }): string {
-  const totalPnl = outcomes.reduce(
+  const latestWindowPnlUsd = outcomes.reduce(
     (acc, o) => acc + (o.kind === "traded" ? o.netPnlUsd : 0),
     0,
   );
@@ -83,11 +95,15 @@ export function formatWindowSummary({
     }
   }
   lines.push("");
-  lines.push(`Total Pnl: ${formatSignedUsd({ value: totalPnl })}`);
+  lines.push(
+    `Latest Window Pnl: ${formatSignedUsd({ value: latestWindowPnlUsd })}`,
+  );
   const statsLine = formatStatsLine({ stats });
   if (statsLine !== null) {
     lines.push(statsLine);
   }
+  lines.push("");
+  lines.push(`Total Pnl: ${formatSignedUsd({ value: totalPnlUsd })}`);
   return lines.join("\n");
 }
 
