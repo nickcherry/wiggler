@@ -268,10 +268,10 @@ Algorithm: for each bp bucket, compute the positive information gain
 (nats saved at that bucket vs the global baseline, summed across all
 `(remaining, half)` cells, with negatives clipped to 0). Then find the
 **narrowest contiguous `[startBp, endBp]`** whose summed gain reaches
-70% of the total. Returns `null` when the filter has no positive gain
+80% of the total. Returns `null` when the filter has no positive gain
 anywhere.
 
-The 70% threshold is tunable (`SWEET_SPOT_INFO_GAIN_THRESHOLD` in the
+The 80% threshold is tunable (`SWEET_SPOT_INFO_GAIN_THRESHOLD` in the
 compute layer). It's a policy parameter, not a magic value — see
 [the sweet-spot research note](./research/2026-05-04-sweet-spot.md)
 for the rationale and how 70% / 80% / 90% compare on real data.

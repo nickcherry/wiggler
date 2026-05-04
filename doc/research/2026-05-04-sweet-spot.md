@@ -24,12 +24,12 @@ of mixed restaurants. Restricting acted-upon snapshots to this range is
 a discipline measure: don't trust the filter's `p` outside the buckets
 where it earns its keep.
 
-We picked **70%** as the info-gain capture threshold rather than the
-conventional Pareto-style 80%, because for a *broadly-distributed* filter
-like our champion `distance_from_line_atr`, 80% gives a too-permissive
-range whose restricted calibration is barely above the population
-average. 70% gives a narrower range with a meaningfully higher
-restricted calibration, at the cost of ~15–20% lower coverage.
+We use **80%** as the info-gain capture threshold — the conventional
+Pareto-style cutoff. For our champion `distance_from_line_atr` the
+edge is broadly distributed, so tightening to 70% mostly narrows the
+range without lifting restricted calibration; the extra coverage at
+80% is worth more than the marginally crisper range at 70%. See the
+threshold-choice section below for the per-asset numbers.
 
 ## Why this exists
 
@@ -82,8 +82,8 @@ The complete implementation is in `computeSweetSpot` in
 This is the key tunable. There's no math that picks a "right" value —
 it's a policy choice about how aggressive your restriction is.
 
-For our champion `distance_from_line_atr`, here's how 70% (current
-default) compares to 80% on real data per asset:
+For our champion `distance_from_line_atr`, here's how 80% (current
+default) compares to 70% on real data per asset:
 
 | Asset | 80% range | 80% restr. | 80% cov | 70% range | 70% restr. | 70% cov |
 |---|---|---:|---:|---|---:|---:|
@@ -101,18 +101,17 @@ the same. This is because the champion's edge is broadly distributed —
 there's no tight peak to "find" by tightening; you're just shaving off
 average-density buckets at the edges.
 
-We picked 70% anyway, on the rationale that the *range* itself is what
-trading discipline would actually act on. A tighter range gives a
-crisper "where does this filter genuinely earn its keep" answer for
-the operator. The calibration percentage is a side effect; the bp
-range is the thing live trading would gate on.
+So we stay at 80%: the wider range trades through more snapshots
+without giving up meaningful per-snap quality for this filter shape.
+A tighter threshold would only pay off if the per-snap calibration
+inside the narrower range were materially higher, which it isn't here.
 
 Two implications for filters we haven't built yet:
 
-- **Sharply-peaked filters** would benefit from 70% more than the
-  champion does — the algorithm would lock onto the peak and exclude
-  the noise on either side. Calibration there would jump
-  meaningfully, not just stay flat.
+- **Sharply-peaked filters** would benefit from a tighter threshold
+  more than the champion does — the algorithm would lock onto the
+  peak and exclude the noise on either side. If we add such a filter
+  it may be worth dropping it to 70% per-section.
 - **Filters that don't beat the population score by ~1.5×+ at any
   threshold** are weak filters where the sweet-spot concept buys us
   little. The tool reads them honestly: their `sweet/pop` ratio is
@@ -174,6 +173,6 @@ realized profit (the lagging indicator).
 
 - Algorithm: [`computeSweetSpot` in applySurvivalFilters.ts](../../src/lib/training/survivalFilters/applySurvivalFilters.ts)
 - Type: [`SurvivalSweetSpot` in types.ts](../../src/lib/training/survivalFilters/types.ts)
-- Threshold constant: `SWEET_SPOT_INFO_GAIN_THRESHOLD = 0.70` (same file)
+- Threshold constant: `SWEET_SPOT_INFO_GAIN_THRESHOLD = 0.80` (same file)
 - Rendering (lift chart + overlay + meta strip): [renderTrainingDistributionsHtml.ts](../../src/lib/training/renderTrainingDistributionsHtml.ts) (`buildLiftChart`, `formatLiftMeta`)
 - Operator-facing exposition: [TRAINING_DOMAIN.md § Sweet-spot detection](../TRAINING_DOMAIN.md#sweet-spot-detection)

@@ -8,19 +8,16 @@ import type {
 /**
  * Threshold for the sweet-spot algorithm: the smallest contiguous bp
  * range that captures this fraction of a filter's total positive info
- * gain becomes the sweet spot. 0.70 picks a tighter range than the
- * conventional Pareto-style 0.80 — i.e. "act only where the bulk of
- * the edge actually lives, dropping the long flat shoulders." The
- * trade-off: lower threshold = narrower range = sharper restricted-
- * range calibration, but lower coverage (more snapshots fall outside
- * the sweet spot and don't get traded on). For our champion
- * `distance_from_line_atr`, 0.70 typically gives ≈50% coverage with
- * meaningfully higher calibration than 0.80's ≈65%.
+ * gain becomes the sweet spot. 0.80 is the conventional Pareto-style
+ * cutoff — "the range where most of the filter's work happens." The
+ * trade-off: higher threshold = wider range = more coverage, lower
+ * threshold = narrower range = sharper restricted-range calibration
+ * but fewer snapshots make it inside.
  *
  * Tunable. See doc/research/2026-05-04-sweet-spot.md for the choice
- * rationale and how the alternatives compare on real data.
+ * rationale and how 70% / 80% / 90% compare on real data.
  */
-export const SWEET_SPOT_INFO_GAIN_THRESHOLD = 0.70;
+export const SWEET_SPOT_INFO_GAIN_THRESHOLD = 0.80;
 
 /**
  * Per-bucket sample-count floor. A bucket is excluded from the sweet-
