@@ -133,10 +133,18 @@ never both, never more. The slot state machine lives in
 `src/lib/trading/state/types.ts` and the runner's tick loop refuses
 to place a new order unless the slot is `empty`.
 
-**No database.** All state is in-memory and per-window. Polymarket is
-the source of truth: on every market discovery the runner calls
+**No database.** Trading state is in-memory and per-window. Polymarket
+is the source of truth: on every market discovery the runner calls
 `getOpenOrders` + `getTrades` and re-hydrates the slot. A process
-crash and restart loses no state.
+crash and restart loses no trading state.
+
+The one exception is the lifetime PnL counter the Telegram summary
+reports as `Total Pnl`. It lives in a single small JSON checkpoint at
+`tmp/lifetime-pnl.json` (atomic write — temp file + rename, so a
+crash mid-write leaves the previous value intact) and is read on
+boot. The file embeds the wallet address; if the running funder
+doesn't match, the runner cold-starts the counter at $0 rather than
+silently inheriting another wallet's PnL. Delete the file to reset.
 
 **Telegram alerts.** Two messages per window:
 
@@ -145,14 +153,36 @@ crash and restart loses no state.
    ```
    Placed order for $20 of BTC ↑ @ $80,251.35
 
-   Price line is $80,253.10
+   Price line is $80,253.10 (+0.002%)
    Market expires in 2 minutes 20 seconds.
    ```
 
-2. ~8s after window close, a summary listing every asset's outcome
-   and a `Total Pnl:` line that includes the maker fee. If no asset
-   traded, the body reads `No trades entered this market.` followed
-   by `Total Pnl: $0.00`.
+   The `(+0.002%)` is `(line − current) / current × 100`. Positive =
+   line is above current price (current side is DOWN). Three-decimal
+   max, sign always shown.
+
+2. ~8s after window close, a per-window summary:
+
+   ```
+   BTC: ↑ @ $0.30 → won +$46.67
+   ETH: ↓ @ $0.20 → didn't fill
+   SOL: no trade
+   XRP: no trade
+   DOGE: ↓ @ $0.40 → lost -$20.00
+
+   Latest Window Pnl: +$26.67
+   Cross-book rejections: 5 (2 placed after retry)
+
+   Total Pnl: +$1,234.56
+   ```
+
+   The blank line between the per-asset list and the window stats
+   separates "what happened this window" from the aggregate numbers;
+   another blank line separates the window-scoped block from the
+   lifetime `Total Pnl`. The cross-book rejections line is appended
+   only when at least one is non-zero. If no asset traded, the body
+   reads `No trades entered this market.` and the rest of the layout
+   stays the same.
 
 **PnL formula.** When a position settles:
 
