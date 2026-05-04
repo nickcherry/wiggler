@@ -575,7 +575,7 @@ export function renderTrainingDistributionsHtml({
         <div class="alea-section-rule">
           <h2>Filter Overlays</h2>
         </div>
-        <p class="survival-helper">Each filter splits the same survival snapshots in two, so we can ask "does this slice of context tighten the point of no return?". The chart compares baseline vs filter-true vs filter-false at one remaining-time bucket — switch buckets with the tabs above each chart. The default tab is the bucket where the filter most strongly tightens the threshold (negative deltas in the badges = good).</p>
+        <p class="survival-helper">Each filter splits the same survival snapshots in two, so we can ask "does this slice of context tighten the point of no return?". The chart compares baseline vs filter-true vs filter-false at one remaining-time bucket.</p>
 
         <div class="filter-sections-host" id="filter-sections-host"></div>
       </section>
@@ -767,6 +767,9 @@ export function renderTrainingDistributionsHtml({
           {
             stroke: chartTokens.axisStroke,
             font: chartTokens.axisFont,
+            labelFont: chartTokens.axisFont,
+            label: "distance from the 5m window's open price (bp)",
+            labelSize: 28,
             grid: { stroke: chartTokens.gridStroke, width: 1 },
             ticks: { stroke: chartTokens.axisTickStroke, width: 1, size: 5 },
             values: (u, splits) => splits.map(formatBp),
@@ -774,6 +777,9 @@ export function renderTrainingDistributionsHtml({
           {
             stroke: chartTokens.axisStroke,
             font: chartTokens.axisFont,
+            labelFont: chartTokens.axisFont,
+            label: "% of times the leading side held until the 5m close",
+            labelSize: 28,
             grid: { stroke: chartTokens.gridStroke, width: 1 },
             ticks: { stroke: chartTokens.axisTickStroke, width: 1, size: 5 },
             values: (u, splits) => splits.map((v) => Math.round(v) + "%"),
@@ -954,6 +960,9 @@ export function renderTrainingDistributionsHtml({
           {
             stroke: chartTokens.axisStroke,
             font: chartTokens.axisFont,
+            labelFont: chartTokens.axisFont,
+            label: "distance from the 5m window's open price (bp)",
+            labelSize: 28,
             grid: { stroke: chartTokens.gridStroke, width: 1 },
             ticks: { stroke: chartTokens.axisTickStroke, width: 1, size: 5 },
             values: (u, splits) => splits.map(formatBp),
@@ -961,6 +970,9 @@ export function renderTrainingDistributionsHtml({
           {
             stroke: chartTokens.axisStroke,
             font: chartTokens.axisFont,
+            labelFont: chartTokens.axisFont,
+            label: "% of times the leading side held until the 5m close",
+            labelSize: 28,
             grid: { stroke: chartTokens.gridStroke, width: 1 },
             ticks: { stroke: chartTokens.axisTickStroke, width: 1, size: 5 },
             values: (u, splits) => splits.map((v) => Math.round(v) + '%'),
@@ -1145,6 +1157,9 @@ export function renderTrainingDistributionsHtml({
           {
             stroke: chartTokens.axisStroke,
             font: chartTokens.axisFont,
+            labelFont: chartTokens.axisFont,
+            label: "distance from the 5m window's open price (bp)",
+            labelSize: 28,
             grid: { stroke: chartTokens.gridStroke, width: 1 },
             ticks: { stroke: chartTokens.axisTickStroke, width: 1, size: 5 },
             values: (u, splits) => splits.map(formatBp),
@@ -1152,6 +1167,9 @@ export function renderTrainingDistributionsHtml({
           {
             stroke: chartTokens.axisStroke,
             font: chartTokens.axisFont,
+            labelFont: chartTokens.axisFont,
+            label: "filter's hold-rate minus baseline (pp)",
+            labelSize: 28,
             grid: { stroke: chartTokens.gridStroke, width: 1 },
             ticks: { stroke: chartTokens.axisTickStroke, width: 1, size: 5 },
             values: (u, splits) => splits.map((v) => (v > 0 ? '+' : '') + Math.round(v) + ' pp'),
