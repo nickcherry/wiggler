@@ -465,12 +465,15 @@ export function renderTrainingDistributionsHtml({
       color: var(--alea-gold);
     }
     /* Score pills span the full width on their own row. Pills are
-       fixed 140px so columns line up across filter sections. */
+       fixed 140px so columns line up across filter sections. The
+       gap is generous (14px) so adjacent pills don't visually
+       collide; inside each pill the rem-to-value gap is tighter
+       (8px) so the rem and its scores read as one unit. */
     details.filter-section > summary > .filter-summary-scores {
       grid-column: 1 / -1;
       grid-row: 2;
       display: flex;
-      gap: 6px;
+      gap: 14px;
       flex-wrap: wrap;
       align-items: center;
       justify-content: flex-start;
@@ -483,7 +486,7 @@ export function renderTrainingDistributionsHtml({
     .filter-summary-score {
       display: inline-flex;
       align-items: center;
-      gap: 12px;
+      gap: 8px;
       padding: 4px 10px;
       border-radius: 6px;
       background: rgba(0, 0, 0, 0.25);
@@ -587,10 +590,15 @@ export function renderTrainingDistributionsHtml({
       details.filter-section > summary > .filter-summary-chevron {
         align-self: start;
       }
+      /* Tighter pill grid on mobile: smaller between-pill gap so
+         two pills fit per row, with the inner rem-to-value gap
+         already tightened by the base style. */
+      details.filter-section > summary > .filter-summary-scores {
+        gap: 6px;
+      }
       .filter-summary-score {
         flex: 1 1 calc(50% - 3px);
         min-width: 0;
-        gap: 8px;
         padding: 5px 10px;
       }
 
@@ -1350,9 +1358,8 @@ export function renderTrainingDistributionsHtml({
         );
       }).join("");
       // Per-config score pills shown in the collapsed header. Same
-      // ordering as the tabs (sorted by magnitude desc), each with both
-      // the positive and negative score visible — the binary halves
-      // are anti-correlated so showing one was hiding half the story.
+      // 4m → 1m order as the tabs and chart legend so the operator
+      // can scan the same column across filters at a glance.
       const summaryScoresHtml = tabsSorted.map((entry) => {
         const rem = entry.rem;
         const pair = entry.pair;
