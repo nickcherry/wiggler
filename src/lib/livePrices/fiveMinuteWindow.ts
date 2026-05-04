@@ -49,17 +49,25 @@ export function remainingInWindowMs({
 }
 
 /**
- * Floors `(windowStartMs + 5min - nowMs)` down to one of {1, 2, 3, 4}
- * minutes — the same buckets the probability table is keyed by.
+ * Maps the elapsed-time inside a window to the probability table's
+ * `remaining ∈ {1, 2, 3, 4}` bucket, matching the training pipeline's
+ * snapshot convention exactly.
  *
- *   - During [+0:00, +1:00) → remaining = 4
- *   - During [+1:00, +2:00) → remaining = 3
- *   - During [+2:00, +3:00) → remaining = 2
- *   - During [+3:00, +4:00) → remaining = 1
- *   - At/past +4:00         → null (out of trading window)
+ * Training takes one snapshot per 1m candle close inside each 5m
+ * window, at +1:00, +2:00, +3:00, and +4:00, with `remaining = 5 − N`
+ * (so +1:00 → 4, +2:00 → 3, +3:00 → 2, +4:00 → 1). The bot carries the
+ * most recent snapshot forward continuously until the next boundary
+ * refreshes it:
  *
- * Returning `null` rather than 0 makes the "no longer tradable" state
- * unambiguous in call-site control flow.
+ *   - [+0:00, +1:00) → null   (no snapshot taken yet — warmup inside the window)
+ *   - [+1:00, +2:00) → 4
+ *   - [+2:00, +3:00) → 3
+ *   - [+3:00, +4:00) → 2
+ *   - [+4:00, +5:00) → 1
+ *   - [+5:00, …)     → null   (window closed)
+ *
+ * Returning `null` rather than 0 makes the "no longer tradable" and
+ * "not yet tradable" states unambiguous in call-site control flow.
  */
 export function flooredRemainingMinutes({
   windowStartMs,
@@ -69,11 +77,14 @@ export function flooredRemainingMinutes({
   readonly nowMs: number;
 }): 1 | 2 | 3 | 4 | null {
   const elapsedMs = nowMs - windowStartMs;
-  if (elapsedMs < 0 || elapsedMs >= 4 * 60_000) {
+  if (elapsedMs < 0) {
     return null;
   }
   const elapsedMinutes = Math.floor(elapsedMs / 60_000);
-  const remaining = 4 - elapsedMinutes;
+  if (elapsedMinutes < 1 || elapsedMinutes > 4) {
+    return null;
+  }
+  const remaining = 5 - elapsedMinutes;
   if (
     remaining === 1 ||
     remaining === 2 ||
