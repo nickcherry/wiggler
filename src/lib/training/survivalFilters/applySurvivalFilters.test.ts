@@ -12,10 +12,12 @@ import { describe, expect, it } from "bun:test";
 
 function emptyContext(): SurvivalSnapshotContext {
   return {
-    prev5mDirection: null,
-    prev5mClose: null,
     last3x5mDirections: null,
+    last5x5mDirections: null,
     ma20x5m: null,
+    ma50x5m: null,
+    ema20x5m: null,
+    ema50x5m: null,
   };
 }
 
@@ -82,13 +84,13 @@ function buildBalancedSnapshots({
         remaining,
         distanceBp,
         survived,
-        // Encode decision in context so a probe filter can recover it.
+        // Encode the desired classification in `ma20x5m` so the probe
+        // filter below can recover it: positive value → true, negative
+        // → false, null → skip.
         context: {
           ...emptyContext(),
-          // We tag with `prev5mDirection` since the existing field type
-          // accepts it; the probe filter reads this.
-          prev5mDirection:
-            decision === true ? "up" : decision === false ? "down" : null,
+          ma20x5m:
+            decision === true ? 1 : decision === false ? -1 : null,
         },
       }),
     );
@@ -103,7 +105,7 @@ function buildBalancedSnapshots({
         survived,
         context: {
           ...emptyContext(),
-          prev5mDirection: "down",
+          ma20x5m: -1,
         },
       }),
     );
@@ -119,10 +121,11 @@ const probeFilter: SurvivalFilter = {
   falseLabel: "F",
   version: 1,
   classify: (snapshot, context) => {
-    if (context.prev5mDirection === null) {
+    const v = context.ma20x5m;
+    if (v === null) {
       return "skip";
     }
-    return context.prev5mDirection === "up";
+    return v > 0;
   },
 };
 
@@ -158,7 +161,7 @@ describe("applySurvivalFilters", () => {
           remaining: 1,
           distanceBp: 5,
           survived: i < 540, // 90%
-          context: { ...emptyContext(), prev5mDirection: "up" },
+          context: { ...emptyContext(), ma20x5m: 1 },
         }),
       );
     }
@@ -169,7 +172,7 @@ describe("applySurvivalFilters", () => {
           remaining: 1,
           distanceBp: 5,
           survived: i < 300, // 50%
-          context: { ...emptyContext(), prev5mDirection: "down" },
+          context: { ...emptyContext(), ma20x5m: -1 },
         }),
       );
     }
@@ -239,7 +242,7 @@ describe("applySurvivalFilters", () => {
             survived: i < survivedCount,
             context: {
               ...emptyContext(),
-              prev5mDirection: side === "true" ? "up" : "down",
+              ma20x5m: side === "true" ? 1 : -1,
             },
           }),
         );
@@ -272,6 +275,61 @@ describe("applySurvivalFilters", () => {
     expect(falseScore.maxDeltaPp).toBeCloseTo(-17.5, 5);
     expect(falseScore.minDeltaPp).toBeCloseTo(-20, 5);
     expect(trueScore.meanDeltaPp).toBeCloseTo(57.5 / 3, 5);
+  });
+
+  it("weights bucket deltas by sample size: a dense bucket dominates a sparse one", () => {
+    // Two buckets at the same remaining (1m left):
+    //   bucket 2: dense, true overperforms baseline by ~+10pp
+    //   bucket 8: sparse (just above the sample floor), true overperforms by ~+30pp
+    // The unweighted score would be +40 / 2 = +20 mean. With sample
+    // weighting, bucket 2 dominates so the mean drops below +20 toward
+    // the dense bucket's +10pp.
+    const denseTotal = SAMPLE_FLOOR * 30;
+    const sparseTotal = SAMPLE_FLOOR; // just above the floor
+    const snapshots: SurvivalSnapshot[] = [];
+    const push = (
+      distanceBp: number,
+      side: "true" | "false",
+      survivedCount: number,
+      total: number,
+    ) => {
+      for (let i = 0; i < total; i += 1) {
+        snapshots.push(
+          buildSnapshot({
+            windowStartMs:
+              distanceBp * 1_000_000 + (side === "true" ? 1 : 2) * 100_000 + i,
+            remaining: 1,
+            distanceBp,
+            survived: i < survivedCount,
+            context: {
+              ...emptyContext(),
+              ma20x5m: side === "true" ? 1 : -1,
+            },
+          }),
+        );
+      }
+    };
+    // bucket 2: combined baseline 50% (true 55%, false 45%) → true delta ≈ +5pp
+    push(2, "true", Math.round(0.55 * denseTotal), denseTotal);
+    push(2, "false", Math.round(0.45 * denseTotal), denseTotal);
+    // bucket 8: combined baseline 50% (true 80%, false 20%) → true delta ≈ +30pp
+    push(8, "true", Math.round(0.8 * sparseTotal), sparseTotal);
+    push(8, "false", Math.round(0.2 * sparseTotal), sparseTotal);
+
+    const { perFilter } = applySurvivalFilters({
+      snapshots,
+      filters: [probeFilter],
+    });
+    const score = perFilter[0]?.summary.scoresByRemaining[1].true;
+    if (score === undefined) {throw new Error("expected score");}
+    expect(score.coverageBp).toBe(2);
+    // Mean delta should be heavily pulled toward the dense bucket's +5pp,
+    // not the unweighted midpoint of (5 + 30) / 2 = 17.5.
+    expect(score.meanDeltaPp).not.toBeNull();
+    expect(score.meanDeltaPp).toBeLessThan(10);
+    // Decorative max stays unweighted: still +30pp (the sparse bucket
+    // is the highest single-bucket delta).
+    expect(score.maxDeltaPp).toBeGreaterThanOrEqual(29);
   });
 
   it("returns zero-coverage scores when nothing clears the sample floor", () => {

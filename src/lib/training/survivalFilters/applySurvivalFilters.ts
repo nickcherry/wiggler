@@ -310,10 +310,29 @@ function computeSummary({
 }
 
 /**
- * Sums per-bucket pp deltas where both the half's bucket and the
- * baseline's bucket clear `SUMMARY_MIN_SAMPLES`. Buckets where either
- * side is sparse don't contribute (positively or negatively) — we don't
- * want under-sampled noise inflating the score in either direction.
+ * Sums per-bucket pp deltas weighted by sample reliability so dense
+ * (low-distance) buckets dominate sparse (long-tail) ones. Without
+ * weighting, a thinly-supported far-tail bucket carried as much weight
+ * as a densely-sampled near-line bucket — visually obvious wrong from
+ * the delta-chart density-fill, where the long tail goes faint.
+ *
+ * Per-bucket weight = `min(halfCount, baselineCount)`. Baseline always
+ * has at least as many samples as either half (baseline = trueHalf +
+ * falseHalf), so this collapses to `halfCount` in practice; written as
+ * the min so a future filter that doesn't preserve that invariant
+ * (skip-heavy filters where baseline can be smaller in some bucket)
+ * still computes correctly.
+ *
+ * The score stays in roughly the same scale as the unweighted version
+ * by normalizing through the mean: `score = weightedMeanDelta *
+ * coverageBp`. So a uniformly-sampled filter scores the same as
+ * before; a sparse-tail-driven score that previously inflated now
+ * shrinks. Decorative max/min stay unweighted — they describe
+ * single-bucket extremes, not aggregate signal.
+ *
+ * Buckets where either side is below `SUMMARY_MIN_SAMPLES` are skipped
+ * entirely (zero weight, no coverage credit) — the floor still applies
+ * before weighting.
  */
 function scoreHalfVsBaseline({
   halfBuckets,
@@ -326,7 +345,8 @@ function scoreHalfVsBaseline({
   for (const b of baselineBuckets) {
     baselineByDistance.set(b.distanceBp, b);
   }
-  let score = 0;
+  let weightedDeltaSum = 0;
+  let weightSum = 0;
   let coverageBp = 0;
   let maxDeltaPp: number | null = null;
   let minDeltaPp: number | null = null;
@@ -341,7 +361,9 @@ function scoreHalfVsBaseline({
     const halfWinRate = (half.survived / half.total) * 100;
     const baseWinRate = (base.survived / base.total) * 100;
     const deltaPp = halfWinRate - baseWinRate;
-    score += deltaPp;
+    const weight = Math.min(half.total, base.total);
+    weightedDeltaSum += deltaPp * weight;
+    weightSum += weight;
     coverageBp += 1;
     if (maxDeltaPp === null || deltaPp > maxDeltaPp) {
       maxDeltaPp = deltaPp;
@@ -350,10 +372,12 @@ function scoreHalfVsBaseline({
       minDeltaPp = deltaPp;
     }
   }
+  const weightedMeanDelta = weightSum === 0 ? 0 : weightedDeltaSum / weightSum;
+  const score = weightedMeanDelta * coverageBp;
   return {
     score,
     coverageBp,
-    meanDeltaPp: coverageBp === 0 ? null : score / coverageBp,
+    meanDeltaPp: coverageBp === 0 ? null : weightedMeanDelta,
     maxDeltaPp,
     minDeltaPp,
   };

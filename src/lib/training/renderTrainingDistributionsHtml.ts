@@ -326,30 +326,7 @@ export function renderTrainingDistributionsHtml({
     /* Filter overlay sections — one per binary filter. Same visual
        language as the survival section but with a remaining-minutes tab
        row above a single full-size chart. */
-    .filter-sections-host { display: flex; flex-direction: column; gap: 32px; }
-    .filter-section { display: flex; flex-direction: column; gap: 14px; }
-
-    .filter-summary-line {
-      margin: 0;
-      color: var(--alea-text-muted);
-      font-size: 12.5px;
-      font-variant-numeric: tabular-nums;
-      letter-spacing: 0.02em;
-    }
-    .filter-summary-line .filter-summary-pill {
-      display: inline-block;
-      margin-right: 14px;
-    }
-    .filter-summary-line .filter-summary-key {
-      color: var(--alea-text-subtle);
-      margin-right: 6px;
-    }
-    .filter-summary-line .filter-summary-value {
-      color: var(--alea-text);
-      font-weight: 500;
-    }
-    .filter-summary-line .filter-summary-good { color: var(--alea-green); }
-    .filter-summary-line .filter-summary-bad { color: var(--alea-red); }
+    .filter-sections-host { display: flex; flex-direction: column; gap: 14px; }
 
     /* Remaining-minutes tab row above each filter chart. Compact
        segmented-control feel: subtle background, antique-gold underline
@@ -423,6 +400,111 @@ export function renderTrainingDistributionsHtml({
     .filter-tab .filter-tab-dot-best { background: var(--alea-green); }
     .filter-tab .filter-tab-dot-worst { background: var(--alea-red); }
 
+    /* Collapsible filter section. Each filter is a <details> element so
+       the page can scale to a dozen+ filters without becoming a wall.
+       Collapsed state shows the filter title + a row of per-config
+       score pills so the operator can scan signal strength across all
+       filters at a glance before deciding what to expand. */
+    details.filter-section {
+      border: 1px solid var(--alea-border-muted);
+      border-radius: 12px;
+      background: linear-gradient(
+        180deg,
+        rgba(16, 23, 15, 0.7),
+        rgba(8, 10, 8, 0.5)
+      );
+      overflow: hidden;
+      transition: border-color 120ms ease;
+    }
+    details.filter-section[open] {
+      border-color: var(--alea-border);
+    }
+    details.filter-section > summary {
+      list-style: none;
+      cursor: pointer;
+      padding: 16px 20px;
+      display: flex;
+      align-items: center;
+      gap: 18px;
+      flex-wrap: wrap;
+      user-select: none;
+      transition: background-color 120ms ease;
+    }
+    details.filter-section > summary::-webkit-details-marker { display: none; }
+    details.filter-section > summary:hover {
+      background: rgba(215, 170, 69, 0.04);
+    }
+    details.filter-section > summary > .filter-summary-title {
+      font-family: var(--alea-font-display);
+      font-weight: 600;
+      font-size: 17px;
+      letter-spacing: 0.04em;
+      color: var(--alea-text);
+      margin: 0;
+      flex: 0 0 auto;
+    }
+    details.filter-section > summary > .filter-summary-chevron {
+      flex: 0 0 auto;
+      color: var(--alea-text-subtle);
+      font-size: 11px;
+      letter-spacing: 0.16em;
+      text-transform: uppercase;
+      transition: transform 160ms ease, color 120ms ease;
+      margin-left: auto;
+    }
+    details.filter-section[open] > summary > .filter-summary-chevron {
+      color: var(--alea-gold);
+    }
+    details.filter-section > summary > .filter-summary-scores {
+      display: flex;
+      gap: 6px;
+      flex-wrap: wrap;
+      align-items: center;
+    }
+    /* Score pills shown in the collapsed header — non-interactive
+       summary of the per-config scores. Same color semantics as the
+       interactive tabs so the visual language stays consistent. */
+    .filter-summary-score {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 4px 10px;
+      border-radius: 6px;
+      background: rgba(0, 0, 0, 0.25);
+      border: 1px solid var(--alea-border-faint);
+      font-family: var(--alea-font-sans);
+      font-size: 11px;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      font-variant-numeric: tabular-nums;
+      color: var(--alea-text-subtle);
+    }
+    .filter-summary-score .score-rem {
+      color: var(--alea-text-muted);
+    }
+    .filter-summary-score .score-value {
+      font-weight: 600;
+      letter-spacing: 0.04em;
+      text-transform: none;
+      font-size: 12px;
+    }
+    .filter-summary-score .score-value-good { color: var(--alea-green); }
+    .filter-summary-score .score-value-bad { color: var(--alea-red); }
+    .filter-summary-score .filter-tab-dot {
+      display: inline-block;
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      box-shadow: 0 0 0 2px rgba(0, 0, 0, 0.4);
+    }
+    /* Body of the expanded section — sits inside the details element. */
+    .filter-section-body {
+      padding: 0 20px 22px;
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+    }
+
     /* Delta-from-baseline chart, stacked under each filter's main chart. */
     .filter-delta-frame {
       position: relative;
@@ -439,12 +521,6 @@ export function renderTrainingDistributionsHtml({
       height: 260px;
       min-height: 260px;
       max-height: 260px;
-    }
-    .filter-delta-caption {
-      margin: 0 0 4px 4px;
-      color: var(--alea-text-subtle);
-      font-size: 11px;
-      letter-spacing: 0.04em;
     }
   </style>
 </head>
@@ -1138,9 +1214,12 @@ export function renderTrainingDistributionsHtml({
       const fillOpacityFor = (count) => {
         if (maxCount === 0 || count === 0) return 0;
         const ratio = count / maxCount;
-        // Floor at 0.06 so a slice barely above the sample threshold
-        // is still visible; cap at 0.55 so nothing washes out the line.
-        return Math.max(0.06, Math.min(0.55, ratio * 0.55));
+        // Floor + cap tuned upward from the original (0.06–0.55) since
+        // the dark green panel background was washing out faint slices.
+        // Floor at 0.18 so even a barely-above-floor slice has visible
+        // tint; cap at 0.85 so dense slices read as solid color without
+        // completely hiding the line on top.
+        return Math.max(0.18, Math.min(0.85, ratio * 0.85));
       };
 
       // Draw a per-bin trapezoid from the line down to y=0, colored by
@@ -1259,62 +1338,6 @@ export function renderTrainingDistributionsHtml({
 
     function renderFilterSection(filter, hotspots) {
       const summary = filter.summary;
-      const summaryParts = [];
-      if (Number.isFinite(summary.occurrenceTrue)) {
-        summaryParts.push(
-          '<span class="filter-summary-pill"><span class="filter-summary-key">' + filter.trueLabel + '</span><span class="filter-summary-value">' + formatPercent(summary.occurrenceTrue) + ' of windows</span></span>'
-        );
-      }
-      if (Number.isFinite(summary.occurrenceFalse)) {
-        summaryParts.push(
-          '<span class="filter-summary-pill"><span class="filter-summary-key">' + filter.falseLabel + '</span><span class="filter-summary-value">' + formatPercent(summary.occurrenceFalse) + '</span></span>'
-        );
-      }
-      // Pull the strongest config for THIS filter (largest |score|
-      // across remainings + halves) and surface it as the headline
-      // "edge" pill, plus the decorative max/min single-bucket deltas
-      // from that same config.
-      let bestRem = filter.defaultRemaining;
-      let bestSide = "true";
-      let bestAbs = -1;
-      for (const rem of survivalRemainingOrder) {
-        const entry = summary.scoresByRemaining[rem];
-        for (const side of ["true", "false"]) {
-          const s = entry[side];
-          if (s.coverageBp === 0) continue;
-          const a = Math.abs(s.score);
-          if (a > bestAbs) {
-            bestAbs = a;
-            bestRem = rem;
-            bestSide = side;
-          }
-        }
-      }
-      const headline = summary.scoresByRemaining[bestRem][bestSide];
-      if (headline.coverageBp > 0) {
-        const cls = headline.score > 0 ? "filter-summary-good" : headline.score < 0 ? "filter-summary-bad" : "";
-        const sideLabel = bestSide === "true" ? filter.trueLabel : filter.falseLabel;
-        summaryParts.push(
-          '<span class="filter-summary-pill"><span class="filter-summary-key">edge ' + sideLabel + ' @ ' + bestRem + 'm</span><span class="filter-summary-value ' + cls + '">' + formatScore(headline.score) + '</span></span>'
-        );
-        const formatPp = (v) => (v > 0 ? "+" : "") + v.toFixed(1) + " pp";
-        if (headline.maxDeltaPp !== null) {
-          summaryParts.push(
-            '<span class="filter-summary-pill"><span class="filter-summary-key">peak</span><span class="filter-summary-value">' + formatPp(headline.maxDeltaPp) + '</span></span>'
-          );
-        }
-        if (headline.minDeltaPp !== null) {
-          summaryParts.push(
-            '<span class="filter-summary-pill"><span class="filter-summary-key">floor</span><span class="filter-summary-value">' + formatPp(headline.minDeltaPp) + '</span></span>'
-          );
-        }
-      }
-      if (summary.snapshotsSkipped > 0) {
-        summaryParts.push(
-          '<span class="filter-summary-pill"><span class="filter-summary-key">skipped</span><span class="filter-summary-value">' + summary.snapshotsSkipped.toLocaleString() + '</span></span>'
-        );
-      }
-      const summaryHtml = summaryParts.join("");
       const legendHtml =
         '<span class="alea-legend-item"><span class="alea-legend-swatch" style="background:' + filterColors.baseline + '"></span>baseline</span>' +
         '<span class="alea-legend-item"><span class="alea-legend-swatch" style="background:' + filterColors.whenTrue + '"></span>' + filter.trueLabel + '</span>' +
@@ -1354,38 +1377,87 @@ export function renderTrainingDistributionsHtml({
           dot + rem + 'm left' + badge + '</button>'
         );
       }).join("");
+      // Per-config score pills shown in the collapsed header. Same
+      // ordering as the tabs (sorted by |score| desc), each with a
+      // signed score and the asset-wide best/worst dot if applicable.
+      const summaryScoresHtml = tabsSorted.map((entry) => {
+        const rem = entry.rem;
+        const signed = entry.signedScore;
+        const valueCls = signed === null ? "" :
+          signed > 0 ? "score-value-good" :
+          signed < 0 ? "score-value-bad" : "";
+        const valueText = signed === null ? "—" : formatScore(signed);
+        let dot = "";
+        if (hotspots.best && hotspots.best.filterId === filter.id && hotspots.best.remaining === rem) {
+          dot += '<span class="filter-tab-dot filter-tab-dot-best" title="strongest do-trade signal for this asset"></span>';
+        }
+        if (hotspots.worst && hotspots.worst.filterId === filter.id && hotspots.worst.remaining === rem) {
+          dot += '<span class="filter-tab-dot filter-tab-dot-worst" title="strongest avoid-trade signal for this asset"></span>';
+        }
+        return (
+          '<span class="filter-summary-score">' +
+            dot +
+            '<span class="score-rem">' + rem + 'm</span>' +
+            '<span class="score-value ' + valueCls + '">' + valueText + '</span>' +
+          '</span>'
+        );
+      }).join("");
+
+      // <details> defaults to collapsed (no "open" attr). Charts are
+      // NOT built here — they're lazy-built on first expand by the
+      // toggle listener so we don't render uPlot into a 0-size host.
       const sectionHtml =
-        '<section class="filter-section" data-filter-id="' + filter.id + '">' +
-          '<div class="alea-section-rule"><h2>' + filter.displayName + '</h2></div>' +
-          '<p class="survival-helper">' + filter.description + '</p>' +
-          '<p class="filter-summary-line">' + summaryHtml + '</p>' +
-          '<div class="filter-tabs" role="tablist">' + tabsHtml + '</div>' +
-          '<div class="alea-legend">' + legendHtml + '</div>' +
-          '<div class="chart-frame">' +
-            '<div class="chart-host filter-chart-host" data-filter-id="' + filter.id + '"></div>' +
+        '<details class="filter-section" data-filter-id="' + filter.id + '">' +
+          '<summary>' +
+            '<h2 class="filter-summary-title">' + filter.displayName + '</h2>' +
+            '<div class="filter-summary-scores">' + summaryScoresHtml + '</div>' +
+            '<span class="filter-summary-chevron">expand ▾</span>' +
+          '</summary>' +
+          '<div class="filter-section-body">' +
+            '<p class="survival-helper">' + filter.description + '</p>' +
+            '<div class="filter-tabs" role="tablist">' + tabsHtml + '</div>' +
+            '<div class="alea-legend">' + legendHtml + '</div>' +
+            '<div class="chart-frame">' +
+              '<div class="chart-host filter-chart-host" data-filter-id="' + filter.id + '"></div>' +
+            '</div>' +
+            '<div class="filter-delta-frame">' +
+              '<div class="filter-delta-host" data-filter-id="' + filter.id + '"></div>' +
+            '</div>' +
           '</div>' +
-          '<p class="filter-delta-caption">Delta vs baseline (pp). Above the line = filter beats baseline at that distance; opacity scales with sample density.</p>' +
-          '<div class="filter-delta-frame">' +
-            '<div class="filter-delta-host" data-filter-id="' + filter.id + '"></div>' +
-          '</div>' +
-        '</section>';
+        '</details>';
       if (!filterSectionsHost) return;
       filterSectionsHost.insertAdjacentHTML('beforeend', sectionHtml);
-      const host = filterSectionsHost.querySelector('.filter-chart-host[data-filter-id="' + filter.id + '"]');
-      const deltaHost = filterSectionsHost.querySelector('.filter-delta-host[data-filter-id="' + filter.id + '"]');
-      if (!host || !deltaHost) return;
-      const chart = buildFilterChart({ host: host, filter: filter, remaining: filter.defaultRemaining });
-      const deltaChart = buildDeltaChart({ host: deltaHost, filter: filter, remaining: filter.defaultRemaining });
-      if (chart) {
-        filterCharts.push({
-          chart: chart,
-          deltaChart: deltaChart,
-          host: host,
-          deltaHost: deltaHost,
-          filter: filter,
-          remaining: filter.defaultRemaining,
-        });
-      }
+      const detailsEl = filterSectionsHost.querySelector('details.filter-section[data-filter-id="' + filter.id + '"]');
+      if (!detailsEl) return;
+      // Lazy chart construction: only when first opened. Subsequent
+      // tab clicks update the existing charts; subsequent open/close
+      // doesn't rebuild anything.
+      detailsEl.addEventListener('toggle', () => {
+        if (!detailsEl.open || detailsEl.dataset.built === '1') return;
+        detailsEl.dataset.built = '1';
+        const chevron = detailsEl.querySelector('.filter-summary-chevron');
+        if (chevron) chevron.textContent = 'collapse ▴';
+        const host = detailsEl.querySelector('.filter-chart-host');
+        const deltaHost = detailsEl.querySelector('.filter-delta-host');
+        if (!host || !deltaHost) return;
+        const chart = buildFilterChart({ host: host, filter: filter, remaining: filter.defaultRemaining });
+        const deltaChart = buildDeltaChart({ host: deltaHost, filter: filter, remaining: filter.defaultRemaining });
+        if (chart) {
+          filterCharts.push({
+            chart: chart,
+            deltaChart: deltaChart,
+            host: host,
+            deltaHost: deltaHost,
+            filter: filter,
+            remaining: filter.defaultRemaining,
+          });
+        }
+      });
+      // Update chevron text when the user collapses again.
+      detailsEl.addEventListener('toggle', () => {
+        const chevron = detailsEl.querySelector('.filter-summary-chevron');
+        if (chevron) chevron.textContent = detailsEl.open ? 'collapse ▴' : 'expand ▾';
+      });
     }
 
     function setFilterRemaining({ filterId, remaining }) {

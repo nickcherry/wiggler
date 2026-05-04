@@ -36,26 +36,6 @@ export type SurvivalSide = "up" | "down";
  */
 export type SurvivalSnapshotContext = {
   /**
-   * Direction of the most recent COMPLETED 5m candle as of the snapshot
-   * — i.e. the 5m bar that ended at the start of the current 5m window.
-   * Constant across all four snapshots within a window. `null` when that
-   * preceding bar isn't present in the loaded 5m series.
-   *
-   * Standard-aligned 5m boundaries (`:00`, `:05`, …): for a window
-   * `[0:10, 0:15)`, this reads the bar covering `[0:05, 0:10)`. Never
-   * leaks the future — the bar's close time strictly precedes the
-   * snapshot.
-   */
-  readonly prev5mDirection: SurvivalSide | null;
-
-  /**
-   * Closing price of the same 5m bar `prev5mDirection` reads. Constant
-   * across the window's four snapshots; useful for line-vs-MA-style
-   * comparisons.
-   */
-  readonly prev5mClose: number | null;
-
-  /**
    * Directions of the three most recent COMPLETED 5m bars, oldest first.
    * For a window `[0:10, 0:15)`, this is the bars covering `[-0:05, 0:00)`,
    * `[0:00, 0:05)`, `[0:05, 0:10)`. Constant across the window's four
@@ -66,12 +46,42 @@ export type SurvivalSnapshotContext = {
     | null;
 
   /**
+   * Directions of the five most recent COMPLETED 5m bars, oldest first.
+   * Same semantics as `last3x5mDirections` but two more bars deep.
+   * `null` when any of the five required bars isn't present.
+   */
+  readonly last5x5mDirections:
+    | readonly [
+        SurvivalSide,
+        SurvivalSide,
+        SurvivalSide,
+        SurvivalSide,
+        SurvivalSide,
+      ]
+    | null;
+
+  /**
    * 20-period simple moving average of 5m closes, evaluated *before* the
    * current 5m window starts. `null` when fewer than 20 prior 5m closes
    * are available. Source: the separate 5m candle series passed to
    * `computeSurvivalSnapshots`, joined to each window by `windowStartMs`.
    */
   readonly ma20x5m: number | null;
+
+  /** 50-period simple moving average of 5m closes; same semantics as `ma20x5m`. */
+  readonly ma50x5m: number | null;
+
+  /**
+   * 20-period exponential moving average of 5m closes, evaluated
+   * *before* the current 5m window starts. EMA uses the conventional
+   * smoothing factor α = 2 / (period + 1), seeded with the SMA of the
+   * first `period` closes and rolled forward thereafter. `null` until
+   * the seed is available.
+   */
+  readonly ema20x5m: number | null;
+
+  /** 50-period EMA of 5m closes; same semantics as `ema20x5m`. */
+  readonly ema50x5m: number | null;
 };
 
 const SNAPSHOTS: readonly {
@@ -94,7 +104,7 @@ const MS_PER_1M = 60 * 1000;
  * any bump, so don't rev it for non-semantic refactors. Standalone export
  * so cache callers don't need to know the file's internals.
  */
-export const SNAPSHOT_PIPELINE_VERSION = 3;
+export const SNAPSHOT_PIPELINE_VERSION = 5;
 
 /**
  * Walks the 1m candle series, emitting one `SurvivalSnapshot` per usable
@@ -132,14 +142,16 @@ export function* computeSurvivalSnapshots({
     const windowStartMs = c0.timestamp.getTime();
 
     // All 5m context fields are constant across the window's four
-    // snapshots — the most recent completed 5m bar (and its 2 priors,
-    // and the MA-20) doesn't change inside the current window.
-    const prev5mClose = ma20Index?.prevCloseAt({ windowStartMs }) ?? null;
-    const prev5mDirection =
-      ma20Index?.prevDirectionAt({ windowStartMs }) ?? null;
+    // snapshots — the most recent completed 5m bars (and the SMAs/EMAs
+    // computed off them) don't change inside the current window.
     const last3x5mDirections =
       ma20Index?.lastThreeDirectionsAt({ windowStartMs }) ?? null;
-    const ma20x5m = ma20Index?.maAt({ windowStartMs }) ?? null;
+    const last5x5mDirections =
+      ma20Index?.lastFiveDirectionsAt({ windowStartMs }) ?? null;
+    const ma20x5m = ma20Index?.smaAt({ windowStartMs, period: 20 }) ?? null;
+    const ma50x5m = ma20Index?.smaAt({ windowStartMs, period: 50 }) ?? null;
+    const ema20x5m = ma20Index?.ema20At({ windowStartMs }) ?? null;
+    const ema50x5m = ma20Index?.ema50At({ windowStartMs }) ?? null;
     // `idx` is currently only consumed by the dropped 1m lookbacks,
     // but the iterator still needs it for callers that may want it
     // back; keep it referenced so the type-checker doesn't complain
@@ -172,10 +184,12 @@ export function* computeSurvivalSnapshots({
         remaining,
         survived,
         context: {
-          prev5mDirection,
-          prev5mClose,
           last3x5mDirections,
+          last5x5mDirections,
           ma20x5m,
+          ma50x5m,
+          ema20x5m,
+          ema50x5m,
         },
       };
     }
@@ -229,28 +243,45 @@ function* iterateWindows(candles: readonly Candle[]): Generator<{
 }
 
 /**
- * Precomputed 5m-context index for fast lookups by `windowStartMs`. The
- * MA-20 at a given window is the SMA of the 20 closing prices of the 5m
- * candles ending strictly before that window starts. The previous-5m
- * direction and close describe the single 5m bar that ended at exactly
- * `windowStartMs`. `lastThreeDirectionsAt` returns the three most recent
- * completed 5m bars' directions (oldest first) — same "ended at or before
- * windowStartMs" semantics as the MA, just N=3 instead of N=20.
+ * Precomputed 5m-context index for fast lookups by `windowStartMs`. All
+ * lookups use "the most recent COMPLETED 5m bar before windowStart" as
+ * their reference point, so the data they read never leaks the future.
+ *
+ *   - `smaAt({ period })` — N-period SMA of close prices (O(1) via prefix sum).
+ *   - `ema20At` / `ema50At` — N-period EMA, precomputed per-index (O(1) lookup).
+ *   - `lastThreeDirectionsAt` / `lastFiveDirectionsAt` — directions of the
+ *     N most recent completed bars (oldest first).
+ *
+ * EMA convention: smoothing factor α = 2 / (N + 1), seeded with the SMA
+ * of the first N closes and rolled forward thereafter. EMA value at
+ * index `i` represents the EMA computed THROUGH AND INCLUDING bar `i`.
  */
 type FiveMinuteIndex = {
-  readonly maAt: (input: { readonly windowStartMs: number }) => number | null;
-  readonly prevDirectionAt: (input: {
+  readonly smaAt: (input: {
     readonly windowStartMs: number;
-  }) => SurvivalSide | null;
-  readonly prevCloseAt: (input: {
+    readonly period: number;
+  }) => number | null;
+  readonly ema20At: (input: {
+    readonly windowStartMs: number;
+  }) => number | null;
+  readonly ema50At: (input: {
     readonly windowStartMs: number;
   }) => number | null;
   readonly lastThreeDirectionsAt: (input: {
     readonly windowStartMs: number;
   }) => readonly [SurvivalSide, SurvivalSide, SurvivalSide] | null;
+  readonly lastFiveDirectionsAt: (input: {
+    readonly windowStartMs: number;
+  }) =>
+    | readonly [
+        SurvivalSide,
+        SurvivalSide,
+        SurvivalSide,
+        SurvivalSide,
+        SurvivalSide,
+      ]
+    | null;
 };
-
-const MA20_PERIOD = 20;
 
 function build5mLookback({
   candles5m,
@@ -260,29 +291,28 @@ function build5mLookback({
   if (candles5m === undefined || candles5m.length === 0) {
     return null;
   }
-  const byEndMs = new Map<
-    number,
-    { readonly direction: SurvivalSide; readonly close: number }
-  >();
-  // Single O(n) pass over the 5m series (already sorted ascending by the
-  // loader): build the prev-5m direction/close lookup, the chronological
-  // start-time array for binary search, the per-index direction array
-  // for last-N lookups, and the running cumulative-close prefix sum
-  // used to answer MA-20 in O(1).
+  // Single O(n) pass over the 5m series (already sorted ascending by
+  // the loader): build the chronological start-time array for binary
+  // search, the per-index direction array for last-N lookups, the
+  // running cumulative-close prefix sum used to answer SMAs in O(1),
+  // and the per-index EMA arrays for the EMA periods we expose.
   const startTimes: number[] = [];
   const directions: SurvivalSide[] = [];
-  const closeAtStart = new Map<number, number>();
+  const closes: number[] = [];
+  const cumulativeCloses: number[] = []; // cumulativeCloses[i] = Σ closes[0..i]
   let cumulative = 0;
   for (const candle of candles5m) {
     const startMs = candle.timestamp.getTime();
-    const endMs = startMs + MS_PER_5M;
     const direction: SurvivalSide = candle.close >= candle.open ? "up" : "down";
-    byEndMs.set(endMs, { direction, close: candle.close });
     cumulative += candle.close;
     startTimes.push(startMs);
     directions.push(direction);
-    closeAtStart.set(startMs, cumulative);
+    closes.push(candle.close);
+    cumulativeCloses.push(cumulative);
   }
+
+  const ema20 = computeEmaSeries({ closes, period: 20 });
+  const ema50 = computeEmaSeries({ closes, period: 50 });
 
   const indexAtOrBefore = (target: number): number => {
     let lo = 0;
@@ -304,48 +334,122 @@ function build5mLookback({
     return ans;
   };
 
+  // Sum of closes[lastIdx-period+1 .. lastIdx], the SMA-period window
+  // ending at lastIdx, computed in O(1) from the cumulative prefix sum.
+  const sumOverWindow = (lastIdx: number, period: number): number | null => {
+    if (lastIdx < period - 1) {
+      return null;
+    }
+    const tail = cumulativeCloses[lastIdx];
+    const beforeHead =
+      lastIdx - period >= 0 ? cumulativeCloses[lastIdx - period] : 0;
+    if (tail === undefined || beforeHead === undefined) {
+      return null;
+    }
+    return tail - beforeHead;
+  };
+
+  const lastNDirections = (
+    lastIdx: number,
+    n: number,
+  ): readonly SurvivalSide[] | null => {
+    if (lastIdx < n - 1) {
+      return null;
+    }
+    const out: SurvivalSide[] = [];
+    for (let k = n - 1; k >= 0; k -= 1) {
+      const d = directions[lastIdx - k];
+      if (d === undefined) {
+        return null;
+      }
+      out.push(d);
+    }
+    return out;
+  };
+
   return {
-    maAt: ({ windowStartMs }) => {
-      // We need the 20 most recent 5m candles whose start time is strictly
-      // less than `windowStartMs`. Find the index of the latest such
-      // candle, then take the 20-sample window ending there.
+    smaAt: ({ windowStartMs, period }) => {
       const lastIdx = indexAtOrBefore(windowStartMs);
-      if (lastIdx < MA20_PERIOD - 1) {
-        return null;
-      }
-      const tail = closeAtStart.get(startTimes[lastIdx] ?? -1);
-      const beforeHead = closeAtStart.get(
-        startTimes[lastIdx - MA20_PERIOD] ?? -1,
-      );
-      if (tail === undefined) {
-        return null;
-      }
-      const sum = tail - (beforeHead ?? 0);
-      return sum / MA20_PERIOD;
+      const sum = sumOverWindow(lastIdx, period);
+      return sum === null ? null : sum / period;
     },
-    prevDirectionAt: ({ windowStartMs }) => {
-      return byEndMs.get(windowStartMs)?.direction ?? null;
+    ema20At: ({ windowStartMs }) => {
+      const lastIdx = indexAtOrBefore(windowStartMs);
+      if (lastIdx < 0) {return null;}
+      return ema20[lastIdx] ?? null;
     },
-    prevCloseAt: ({ windowStartMs }) => {
-      return byEndMs.get(windowStartMs)?.close ?? null;
+    ema50At: ({ windowStartMs }) => {
+      const lastIdx = indexAtOrBefore(windowStartMs);
+      if (lastIdx < 0) {return null;}
+      return ema50[lastIdx] ?? null;
     },
     lastThreeDirectionsAt: ({ windowStartMs }) => {
-      // Three most recent COMPLETED 5m bars at the moment the current
-      // window starts. We need bars whose start time is strictly less
-      // than `windowStartMs`. Use the same binary search as the MA path.
       const lastIdx = indexAtOrBefore(windowStartMs);
-      if (lastIdx < 2) {
-        return null;
-      }
-      const a = directions[lastIdx - 2];
-      const b = directions[lastIdx - 1];
-      const c = directions[lastIdx];
-      if (a === undefined || b === undefined || c === undefined) {
-        return null;
-      }
+      const out = lastNDirections(lastIdx, 3);
+      if (out === null) {return null;}
+      const [a, b, c] = out;
+      if (a === undefined || b === undefined || c === undefined) {return null;}
       return [a, b, c];
     },
+    lastFiveDirectionsAt: ({ windowStartMs }) => {
+      const lastIdx = indexAtOrBefore(windowStartMs);
+      const out = lastNDirections(lastIdx, 5);
+      if (out === null) {return null;}
+      const [a, b, c, d, e] = out;
+      if (
+        a === undefined ||
+        b === undefined ||
+        c === undefined ||
+        d === undefined ||
+        e === undefined
+      ) {
+        return null;
+      }
+      return [a, b, c, d, e];
+    },
   };
+}
+
+/**
+ * EMA series: `out[i]` is the N-period EMA computed through and
+ * including `closes[i]`. Seeds at index `period - 1` with the SMA of
+ * `closes[0..period-1]`, then rolls forward with the standard
+ * recurrence `EMA_t = α · close_t + (1 − α) · EMA_{t-1}` where
+ * `α = 2 / (N + 1)`. Indices before the seed are `null` (warm-up).
+ */
+function computeEmaSeries({
+  closes,
+  period,
+}: {
+  readonly closes: readonly number[];
+  readonly period: number;
+}): (number | null)[] {
+  const out: (number | null)[] = new Array<number | null>(closes.length).fill(
+    null,
+  );
+  if (closes.length < period) {
+    return out;
+  }
+  let seedSum = 0;
+  for (let i = 0; i < period; i += 1) {
+    const c = closes[i];
+    if (c === undefined) {
+      return out;
+    }
+    seedSum += c;
+  }
+  const alpha = 2 / (period + 1);
+  let prev = seedSum / period;
+  out[period - 1] = prev;
+  for (let i = period; i < closes.length; i += 1) {
+    const c = closes[i];
+    if (c === undefined) {
+      continue;
+    }
+    prev = alpha * c + (1 - alpha) * prev;
+    out[i] = prev;
+  }
+  return out;
 }
 
 function sideOf({

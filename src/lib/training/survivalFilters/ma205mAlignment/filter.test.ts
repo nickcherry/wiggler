@@ -8,10 +8,12 @@ import { describe, expect, it } from "bun:test";
 
 function emptyContext(): SurvivalSnapshotContext {
   return {
-    prev5mDirection: null,
-    prev5mClose: null,
     last3x5mDirections: null,
+    last5x5mDirections: null,
     ma20x5m: null,
+    ma50x5m: null,
+    ema20x5m: null,
+    ema50x5m: null,
   };
 }
 

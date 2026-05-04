@@ -60,36 +60,18 @@ describe("computeSurvivalSnapshots", () => {
     expect(snapshots.map((s) => s.remaining)).toEqual([4, 3, 2, 1]);
   });
 
-  it("returns null prev5m + ma20 context when 5m series isn't supplied", () => {
+  it("returns null 5m context when the 5m series isn't supplied", () => {
     const candles1m = buildContiguous1m({
       startMs: Date.UTC(2025, 0, 1, 0, 0, 0),
       closes: [101, 102, 103, 104, 105],
     });
     const [snapshot] = [...computeSurvivalSnapshots({ candles1m })];
-    expect(snapshot?.context.prev5mDirection).toBeNull();
-    expect(snapshot?.context.prev5mClose).toBeNull();
     expect(snapshot?.context.ma20x5m).toBeNull();
+    expect(snapshot?.context.ma50x5m).toBeNull();
+    expect(snapshot?.context.ema20x5m).toBeNull();
+    expect(snapshot?.context.ema50x5m).toBeNull();
     expect(snapshot?.context.last3x5mDirections).toBeNull();
-  });
-
-  it("populates prev5m direction + close from the 5m candle ending at window start", () => {
-    const windowStart = Date.UTC(2025, 0, 1, 0, 5, 0);
-    const candles1m = buildContiguous1m({
-      startMs: windowStart,
-      closes: [101, 102, 103, 104, 105],
-    });
-    // One 5m candle ending at windowStart: starts at windowStart - 5m.
-    const candles5m: Candle[] = [
-      buildCandle({
-        timestamp: new Date(windowStart - MS_PER_5M),
-        open: 110,
-        close: 100,
-        timeframe: "5m",
-      }),
-    ];
-    const [snapshot] = [...computeSurvivalSnapshots({ candles1m, candles5m })];
-    expect(snapshot?.context.prev5mDirection).toBe("down");
-    expect(snapshot?.context.prev5mClose).toBe(100);
+    expect(snapshot?.context.last5x5mDirections).toBeNull();
   });
 
   it("last3x5mDirections returns null until three prior 5m bars exist", () => {
@@ -186,5 +168,80 @@ describe("computeSurvivalSnapshots", () => {
     }
     const [snapshot] = [...computeSurvivalSnapshots({ candles1m, candles5m })];
     expect(snapshot?.context.ma20x5m).toBeCloseTo(10.5, 6);
+  });
+
+  it("ma50x5m + ema50x5m are null until 50 prior 5m closes are available", () => {
+    const windowStart = Date.UTC(2025, 0, 1, 10, 0, 0);
+    const candles1m = buildContiguous1m({
+      startMs: windowStart,
+      closes: [101, 102, 103, 104, 105],
+    });
+    // 49 prior 5m candles (one short of MA-50 + EMA-50 warm-ups).
+    const candles5m: Candle[] = [];
+    for (let i = 49; i >= 1; i -= 1) {
+      candles5m.push(
+        buildCandle({
+          timestamp: new Date(windowStart - i * MS_PER_5M),
+          open: 100,
+          close: 100,
+          timeframe: "5m",
+        }),
+      );
+    }
+    const [snapshot] = [...computeSurvivalSnapshots({ candles1m, candles5m })];
+    expect(snapshot?.context.ma50x5m).toBeNull();
+    expect(snapshot?.context.ema50x5m).toBeNull();
+  });
+
+  it("ema20x5m matches the standard EMA recurrence (α = 2/(N+1))", () => {
+    const windowStart = Date.UTC(2025, 0, 1, 10, 0, 0);
+    const candles1m = buildContiguous1m({
+      startMs: windowStart,
+      closes: [101, 102, 103, 104, 105],
+    });
+    // 20 prior 5m candles, all closes = 100. EMA seed = SMA(100, ..., 100) =
+    // 100. With every subsequent close also 100 the recurrence stays flat at
+    // 100. Easiest sanity check that the warm-up + roll-forward both work.
+    const candles5m: Candle[] = [];
+    for (let i = 20; i >= 1; i -= 1) {
+      candles5m.push(
+        buildCandle({
+          timestamp: new Date(windowStart - i * MS_PER_5M),
+          open: 100,
+          close: 100,
+          timeframe: "5m",
+        }),
+      );
+    }
+    const [snapshot] = [...computeSurvivalSnapshots({ candles1m, candles5m })];
+    expect(snapshot?.context.ema20x5m).toBeCloseTo(100, 6);
+  });
+
+  it("last5x5mDirections returns the 5 most recent completed 5m bars in chronological order", () => {
+    const windowStart = Date.UTC(2025, 0, 1, 0, 25, 0);
+    const candles1m = buildContiguous1m({
+      startMs: windowStart,
+      closes: [101, 102, 103, 104, 105],
+    });
+    // Five prior 5m bars at standard alignment: up, down, up, down, up.
+    const dirs = ["up", "down", "up", "down", "up"] as const;
+    const candles5m: Candle[] = dirs.map((d, k) => {
+      const open = 100;
+      const close = d === "up" ? 102 : 98;
+      return buildCandle({
+        timestamp: new Date(windowStart - (5 - k) * MS_PER_5M),
+        open,
+        close,
+        timeframe: "5m",
+      });
+    });
+    const [snapshot] = [...computeSurvivalSnapshots({ candles1m, candles5m })];
+    expect(snapshot?.context.last5x5mDirections).toEqual([
+      "up",
+      "down",
+      "up",
+      "down",
+      "up",
+    ]);
   });
 });

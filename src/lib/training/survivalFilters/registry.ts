@@ -1,12 +1,15 @@
+import { ema205mAlignmentFilter } from "@alea/lib/training/survivalFilters/ema205mAlignment/filter";
+import { ema505mAlignmentFilter } from "@alea/lib/training/survivalFilters/ema505mAlignment/filter";
 import { last3x5mMajorityAlignmentFilter } from "@alea/lib/training/survivalFilters/last3x5mMajorityAlignment/filter";
+import { last5x5mMajorityAlignmentFilter } from "@alea/lib/training/survivalFilters/last5x5mMajorityAlignment/filter";
 import { ma205mAlignmentFilter } from "@alea/lib/training/survivalFilters/ma205mAlignment/filter";
-import { prev5mDirectionAlignmentFilter } from "@alea/lib/training/survivalFilters/prev5mDirectionAlignment/filter";
+import { ma505mAlignmentFilter } from "@alea/lib/training/survivalFilters/ma505mAlignment/filter";
 import type { SurvivalFilter } from "@alea/lib/training/survivalFilters/types";
 
 /**
  * Ordered list of filters the dashboard renders. Order is the order they
- * appear in the UI; pick the order to flow from the cheapest/most
- * intuitive (a single prior bar) to the most context-heavy (MA-20).
+ * appear in the UI; grouped by family (recent-direction first, then
+ * SMA, then EMA) and short-window-then-long within each family.
  *
  * Each filter lives in its own subdirectory under `survivalFilters/`,
  * with the implementation in `filter.ts` and the unit tests in
@@ -19,7 +22,10 @@ import type { SurvivalFilter } from "@alea/lib/training/survivalFilters/types";
  * the cadence the actual market structure unfolds at.
  */
 export const survivalFilters: readonly SurvivalFilter[] = [
-  prev5mDirectionAlignmentFilter,
   last3x5mMajorityAlignmentFilter,
+  last5x5mMajorityAlignmentFilter,
   ma205mAlignmentFilter,
+  ma505mAlignmentFilter,
+  ema205mAlignmentFilter,
+  ema505mAlignmentFilter,
 ];
