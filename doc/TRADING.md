@@ -143,8 +143,28 @@ reports as `Total Pnl`. It lives in a single small JSON checkpoint at
 `tmp/lifetime-pnl.json` (atomic write — temp file + rename, so a
 crash mid-write leaves the previous value intact) and is read on
 boot. The file embeds the wallet address; if the running funder
-doesn't match, the runner cold-starts the counter at $0 rather than
-silently inheriting another wallet's PnL. Delete the file to reset.
+doesn't match, or the file is missing or corrupt, the runner
+**scans the wallet's full Polymarket trade history** to seed the
+counter, then persists the result. So `Total Pnl` truly means
+"every realized USDC change for this wallet on Polymarket", not
+just "since-this-process-started" — the bot picks up trades made
+before this code first ran.
+
+The scan paginates `getTradesPaginated`, fetches each unique market's
+resolution via `getMarket` (concurrency 10), and sums realized PnL
+per market via the pure `computeLifetimePnl` summer. Wallets with a
+heavy trading history can take a minute or two to scan; the
+runner emits per-step progress lines while it works.
+
+To rescan on demand (e.g. after manual trades on the wallet outside
+the bot):
+
+```
+bun alea trading:hydrate-lifetime-pnl
+```
+
+That command does the scan, prints the breakdown, and overwrites the
+checkpoint. Read-only against Polymarket — no orders.
 
 **Telegram alerts.** Two messages per window:
 
