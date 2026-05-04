@@ -64,6 +64,13 @@ export type PlacedOrder = {
 
 export type CancelResult = {
   readonly accepted: boolean;
+  /**
+   * True when the venue says the order is no longer live even if the
+   * cancel request itself was not accepted (for example, already filled
+   * or already cancelled). False for network/client failures where the
+   * order may still be resting and should remain tracked locally.
+   */
+  readonly terminal: boolean;
   readonly errorMessage: string | null;
 };
 

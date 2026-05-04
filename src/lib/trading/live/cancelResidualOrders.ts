@@ -1,13 +1,16 @@
 import type { LiveEvent, WindowRecord } from "@alea/lib/trading/live/types";
-import { labelAsset } from "@alea/lib/trading/live/utils";
+import { labelAsset, sleep } from "@alea/lib/trading/live/utils";
 import type { Vendor } from "@alea/lib/trading/vendor/types";
+
+const CANCEL_MAX_ATTEMPTS = 3;
+const CANCEL_RETRY_DELAY_MS = 250;
 
 /**
  * Wraps up any unfilled portion of resting orders before window close.
  * Fires on the per-window cancel timer (T+5m − ORDER_CANCEL_MARGIN_MS)
- * and is best-effort: a "not_canceled / already filled" response is
- * treated as success because the slot is empty either way. The
- * cancel never blocks the wrap-up timer that fires shortly after.
+ * and is best-effort. Terminal venue responses ("already filled",
+ * "already cancelled") clear the local order id; transient failures
+ * keep it so wrap-up can still see unresolved exposure.
  */
 export async function cancelResidualOrders({
   window,
@@ -23,17 +26,26 @@ export async function cancelResidualOrders({
       continue;
     }
     const orderId = record.slot.orderId;
-    const result = await vendor.cancelOrder({ orderId });
-    if (record.slot.kind === "active") {
+    let result = await vendor.cancelOrder({ orderId });
+    for (
+      let attempt = 1;
+      attempt < CANCEL_MAX_ATTEMPTS && !result.accepted && !result.terminal;
+      attempt += 1
+    ) {
+      await sleep(CANCEL_RETRY_DELAY_MS);
+      result = await vendor.cancelOrder({ orderId });
+    }
+    const cleared = result.accepted || result.terminal;
+    if (cleared && record.slot.kind === "active") {
       record.slot = {
         ...record.slot,
         orderId: null,
       };
     }
     emit({
-      kind: result.accepted ? "info" : "warn",
+      kind: cleared ? "info" : "warn",
       atMs: Date.now(),
-      message: `${labelAsset(record.asset)} cancel ${orderId.slice(0, 10)}…: ${result.accepted ? "ok" : (result.errorMessage ?? "rejected")}`,
+      message: `${labelAsset(record.asset)} cancel ${orderId.slice(0, 10)}…: ${result.accepted ? "ok" : result.terminal ? `terminal: ${result.errorMessage ?? "already closed"}` : (result.errorMessage ?? "failed")}`,
     });
   }
 }

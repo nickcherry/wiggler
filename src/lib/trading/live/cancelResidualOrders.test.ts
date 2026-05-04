@@ -45,6 +45,7 @@ function record(asset: Asset, slot: AssetSlot): AssetWindowRecord {
   return {
     asset,
     market,
+    hydrationStatus: "ready",
     line: 100,
     lineCapturedAtMs: market.windowStartMs,
     lastDecisionRemaining: null,
@@ -64,15 +65,18 @@ function windowWith(records: readonly AssetWindowRecord[]): WindowRecord {
     wrapUpTimer: null,
     rejectedCount: 0,
     placedAfterRetryCount: 0,
+    settlementRetryCount: 0,
   };
 }
 
 function vendorReturning({
   accepted,
+  terminal,
   errorMessage,
   seen,
 }: {
   readonly accepted: boolean;
+  readonly terminal?: boolean;
   readonly errorMessage: string | null;
   readonly seen: string[];
 }): Vendor {
@@ -90,7 +94,7 @@ function vendorReturning({
     },
     async cancelOrder({ orderId }) {
       seen.push(orderId);
-      return { accepted, errorMessage };
+      return { accepted, terminal: terminal ?? accepted, errorMessage };
     },
     streamUserFills(
       _input: {
@@ -132,7 +136,7 @@ describe("cancelResidualOrders", () => {
     });
   });
 
-  it("logs a warning when the venue rejects the cancel", async () => {
+  it("keeps the order id and logs a warning when cancel fails transiently", async () => {
     const active = record("btc", activeSlot("order-rejected"));
     const events: LiveEvent[] = [];
 
@@ -140,6 +144,32 @@ describe("cancelResidualOrders", () => {
       window: windowWith([active]),
       vendor: vendorReturning({
         accepted: false,
+        terminal: false,
+        errorMessage: "already matched",
+        seen: [],
+      }),
+      emit: (event) => events.push(event),
+    });
+
+    expect(active.slot).toMatchObject({
+      kind: "active",
+      orderId: "order-rejected",
+    });
+    expect(events[0]).toMatchObject({
+      kind: "warn",
+      message: "BTC   cancel order-reje…: already matched",
+    });
+  });
+
+  it("clears the order id when the venue says the order is terminal", async () => {
+    const active = record("btc", activeSlot("order-terminal"));
+    const events: LiveEvent[] = [];
+
+    await cancelResidualOrders({
+      window: windowWith([active]),
+      vendor: vendorReturning({
+        accepted: false,
+        terminal: true,
         errorMessage: "already matched",
         seen: [],
       }),
@@ -148,8 +178,8 @@ describe("cancelResidualOrders", () => {
 
     expect(active.slot).toMatchObject({ kind: "active", orderId: null });
     expect(events[0]).toMatchObject({
-      kind: "warn",
-      message: "BTC   cancel order-reje…: already matched",
+      kind: "info",
+      message: "BTC   cancel order-term…: terminal: already matched",
     });
   });
 });

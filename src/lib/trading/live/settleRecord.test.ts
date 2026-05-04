@@ -50,6 +50,7 @@ function record({
   return {
     asset: "btc",
     market,
+    hydrationStatus: "ready",
     line,
     lineCapturedAtMs: line === null ? null : 1_777_867_200_000,
     lastDecisionRemaining: null,
@@ -79,7 +80,7 @@ describe("settleRecord", () => {
     ).toEqual({ asset: "btc", kind: "none" });
   });
 
-  it("declines to attribute PnL when an active slot has no line price", () => {
+  it("recovers the line from the exact bar open when a filled slot has no line price", () => {
     const activeRecord = record({ slot: activeSlot(), line: null });
 
     expect(
@@ -89,13 +90,16 @@ describe("settleRecord", () => {
           ["btc", closedBar(101)],
         ]),
       }),
-    ).toEqual({
+    ).toMatchObject({
       asset: "btc",
-      kind: "unfilled",
+      kind: "traded",
       side: "up",
-      limitPrice: 0.4,
+      netPnlUsd: 60,
+      won: true,
     });
-    expect(activeRecord.slot.kind).toBe("active");
+    expect(activeRecord.line).toBe(100);
+    expect(activeRecord.lineCapturedAtMs).toBe(market.windowStartMs);
+    expect(activeRecord.slot.kind).toBe("settled");
   });
 
   it("settles active filled slots against the last closed bar and mutates terminal state", () => {
@@ -126,7 +130,7 @@ describe("settleRecord", () => {
     });
   });
 
-  it("falls back to the line price when no closed bar is available", () => {
+  it("marks filled slots pending when the exact closed bar is unavailable", () => {
     const activeRecord = record({ slot: activeSlot({ side: "up" }) });
 
     const outcome = settleRecord({
@@ -134,9 +138,33 @@ describe("settleRecord", () => {
       lastClosedBars: new Map<Asset, ClosedFiveMinuteBar>(),
     });
 
+    expect(outcome).toEqual({
+      asset: "btc",
+      kind: "pending",
+      side: "up",
+      limitPrice: 0.4,
+      reason: "missing-close",
+    });
+    expect(activeRecord.slot.kind).toBe("active");
+  });
+
+  it("does not settle against a closed bar from another window", () => {
+    const activeRecord = record({ slot: activeSlot({ side: "up" }) });
+    const wrongWindowBar = {
+      ...closedBar(101),
+      openTimeMs: market.windowStartMs - 5 * 60_000,
+    };
+
+    const outcome = settleRecord({
+      record: activeRecord,
+      lastClosedBars: new Map<Asset, ClosedFiveMinuteBar>([
+        ["btc", wrongWindowBar],
+      ]),
+    });
+
     expect(outcome).toMatchObject({
-      kind: "traded",
-      won: true,
+      kind: "pending",
+      reason: "missing-close",
     });
   });
 

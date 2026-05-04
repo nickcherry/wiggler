@@ -1,6 +1,7 @@
 import { EMA50_BOOTSTRAP_BARS } from "@alea/constants/trading";
 import { fetchRecentFiveMinuteBars } from "@alea/lib/livePrices/binancePerp/fetchRecentFiveMinuteBars";
 import type { FiveMinuteEmaTracker } from "@alea/lib/livePrices/fiveMinuteEmaTracker";
+import { activeSlotFromHydration } from "@alea/lib/trading/live/slotHydration";
 import type {
   AssetWindowRecord,
   ConditionIndex,
@@ -107,6 +108,7 @@ export async function hydrateAssetMarket({
       signal,
     });
   } catch (error) {
+    record.hydrationStatus = "failed";
     emit({
       kind: "error",
       atMs: Date.now(),
@@ -115,6 +117,7 @@ export async function hydrateAssetMarket({
     return;
   }
   if (market === null) {
+    record.hydrationStatus = "failed";
     emit({
       kind: "warn",
       atMs: Date.now(),
@@ -131,44 +134,24 @@ export async function hydrateAssetMarket({
 
   try {
     const hydration = await vendor.hydrateMarketState({ market });
-    if (hydration.openOrder !== null || hydration.sharesFilled > 0) {
-      const side = hydration.side;
-      if (side !== null) {
-        const order = hydration.openOrder;
-        record.slot = {
-          kind: "active",
-          market,
-          side,
-          outcomeRef:
-            hydration.outcomeRef ??
-            (side === "up" ? market.upRef : market.downRef),
-          orderId: order?.orderId ?? null,
-          // Fallback chain for limitPrice when only fills are known:
-          // average fill price (= cost / shares), then the order's
-          // own limit, then 0 as a defensive last resort.
-          limitPrice:
-            order?.limitPrice ??
-            (hydration.sharesFilled > 0
-              ? hydration.costUsd / hydration.sharesFilled
-              : 0),
-          sharesIfFilled: order?.sharesIfFilled ?? hydration.sharesFilled,
-          sharesFilled: hydration.sharesFilled,
-          costUsd: hydration.costUsd,
-          feeRateBpsAvg: hydration.feeRateBpsAvg,
-        };
-        emit({
-          kind: "info",
-          atMs: Date.now(),
-          message: `${labelAsset(asset)} hydrated leftover state: side=${side} order=${order?.orderId ?? "none"} filled=${hydration.sharesFilled}`,
-        });
-      }
+    record.hydrationStatus = "ready";
+    const slot = activeSlotFromHydration({ market, hydration });
+    if (slot !== null) {
+      record.slot = slot;
+      emit({
+        kind: "info",
+        atMs: Date.now(),
+        message: `${labelAsset(asset)} hydrated leftover state: side=${slot.side} order=${slot.orderId ?? "none"} filled=${hydration.sharesFilled}`,
+      });
     }
   } catch (error) {
+    record.hydrationStatus = "failed";
     emit({
       kind: "warn",
       atMs: Date.now(),
-      message: `${labelAsset(asset)} state hydration failed (continuing with empty slot): ${(error as Error).message}`,
+      message: `${labelAsset(asset)} state hydration failed (trading disabled for this market): ${(error as Error).message}`,
     });
+    return;
   }
 
   emit({

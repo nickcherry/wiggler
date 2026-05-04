@@ -65,11 +65,13 @@ export type WindowRecord = {
    * and decided we still wanted in). Subset of "all orders placed".
    */
   placedAfterRetryCount: number;
+  settlementRetryCount: number;
 };
 
 export type AssetWindowRecord = {
   readonly asset: Asset;
   market: TradableMarket | null;
+  hydrationStatus: "pending" | "ready" | "failed";
   line: number | null;
   lineCapturedAtMs: number | null;
   lastDecisionRemaining: RemainingMinutes | null;
@@ -94,5 +96,5 @@ export type ConditionIndex = Map<
  */
 export type LifetimePnlBox = { value: number };
 
-/** Latest book snapshot per asset, refreshed by the book poll loop. */
-export type BookCache = Map<Asset, UpDownBook>;
+/** Latest book snapshot keyed by vendor market id. */
+export type BookCache = Map<string, UpDownBook>;

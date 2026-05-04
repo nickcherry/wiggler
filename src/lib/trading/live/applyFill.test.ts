@@ -51,6 +51,7 @@ function record(slot: AssetSlot): AssetWindowRecord {
   return {
     asset: "btc",
     market,
+    hydrationStatus: "ready",
     line: 100,
     lineCapturedAtMs: 1_777_867_200_000,
     lastDecisionRemaining: null,

@@ -12,15 +12,19 @@ export function formatOrderError({
   asset,
   side,
   errorMessage,
+  retried = true,
 }: {
   readonly asset: Asset;
   readonly side: LeadingSide;
   readonly errorMessage: string;
+  readonly retried?: boolean;
 }): string {
   const arrow = side === "up" ? "↑" : "↓";
   return [
     `Error placing ${asset.toUpperCase()} ${arrow} order: ${errorMessage}`,
     "",
-    "(Retried once. Bot continues.)",
+    retried
+      ? "(Retried once. Bot continues.)"
+      : "(Reconciled venue state before giving up. Bot continues.)",
   ].join("\n");
 }

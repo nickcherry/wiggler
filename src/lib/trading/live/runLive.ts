@@ -20,6 +20,12 @@ import type {
 import { evaluateDecision } from "@alea/lib/trading/decision/evaluateDecision";
 import { applyFill } from "@alea/lib/trading/live/applyFill";
 import { cancelResidualOrders } from "@alea/lib/trading/live/cancelResidualOrders";
+import {
+  emaReadyForWindow,
+  tickCanCaptureLine,
+  tickIsFresh,
+  usableBookForMarket,
+} from "@alea/lib/trading/live/freshness";
 import { bootstrapLifetimePnl } from "@alea/lib/trading/live/lifetimePnlBootstrap";
 import {
   hydrateAssetMarket,
@@ -261,8 +267,6 @@ export async function runLive({
       window = openNewWindow({
         startMs,
         assets,
-        lastTick,
-        nowMs,
       });
       windows.set(startMs, window);
       const justOpened = window;
@@ -345,13 +349,9 @@ export async function runLive({
 function openNewWindow({
   startMs,
   assets,
-  lastTick,
-  nowMs,
 }: {
   readonly startMs: number;
   readonly assets: readonly Asset[];
-  readonly lastTick: ReadonlyMap<Asset, LivePriceTick>;
-  readonly nowMs: number;
 }): WindowRecord {
   const record: WindowRecord = {
     windowStartMs: startMs,
@@ -362,13 +362,15 @@ function openNewWindow({
     wrapUpTimer: null,
     rejectedCount: 0,
     placedAfterRetryCount: 0,
+    settlementRetryCount: 0,
   };
   for (const asset of assets) {
     record.perAsset.set(asset, {
       asset,
       market: null,
-      line: lastTick.get(asset)?.mid ?? null,
-      lineCapturedAtMs: lastTick.has(asset) ? nowMs : null,
+      hydrationStatus: "pending",
+      line: null,
+      lineCapturedAtMs: null,
       lastDecisionRemaining: null,
       slot: { kind: "empty" },
     });
@@ -392,7 +394,7 @@ function schedulePerWindowTimers({
   readonly window: WindowRecord;
   readonly nowMs: number;
   readonly vendor: Vendor;
-  readonly lastClosedBars: ReadonlyMap<Asset, ClosedFiveMinuteBar>;
+  readonly lastClosedBars: Map<Asset, ClosedFiveMinuteBar>;
   readonly telegramBotToken: string;
   readonly telegramChatId: string;
   readonly windowsAll: Map<number, WindowRecord>;
@@ -466,7 +468,10 @@ function stepAsset({
   // Capture the line on the first tick we see in this window.
   if (record.line === null) {
     const tick = lastTick.get(asset);
-    if (tick !== undefined) {
+    if (
+      tick !== undefined &&
+      tickCanCaptureLine({ tick, windowStartMs: window.windowStartMs, nowMs })
+    ) {
       record.line = tick.mid;
       record.lineCapturedAtMs = tick.receivedAtMs;
       emit({
@@ -501,18 +506,34 @@ function stepAsset({
     tick === undefined ||
     tracker === undefined ||
     market === null ||
+    record.hydrationStatus !== "ready" ||
     record.line === null
   ) {
     return;
   }
-  const book = books.get(asset);
+  if (!tickIsFresh({ tick, windowStartMs: window.windowStartMs, nowMs })) {
+    return;
+  }
+  const ema50 = emaReadyForWindow({
+    tracker,
+    windowStartMs: window.windowStartMs,
+  });
+  if (ema50 === null) {
+    return;
+  }
+  const book = usableBookForMarket({
+    book: books.get(market.vendorRef),
+    vendorRef: market.vendorRef,
+    windowStartMs: market.windowStartMs,
+    nowMs,
+  });
   const decision = evaluateDecision({
     asset,
     windowStartMs: window.windowStartMs,
     nowMs,
     line: record.line,
     currentPrice: tick.mid,
-    ema50: tracker.currentValue(),
+    ema50,
     upBestBid: book?.up.bestBid ?? null,
     downBestBid: book?.down.bestBid ?? null,
     upTokenId: market.upRef,
@@ -575,7 +596,7 @@ async function refreshBook({
   readonly emit: (event: LiveEvent) => void;
 }): Promise<void> {
   try {
-    books.set(market.asset, await vendor.fetchBook({ market, signal }));
+    books.set(market.vendorRef, await vendor.fetchBook({ market, signal }));
   } catch (error) {
     emit({
       kind: "warn",

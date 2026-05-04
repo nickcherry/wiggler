@@ -1,4 +1,5 @@
 import type { ClosedFiveMinuteBar } from "@alea/lib/livePrices/types";
+import { exactSettlementBar } from "@alea/lib/trading/live/freshness";
 import type { AssetWindowRecord } from "@alea/lib/trading/live/types";
 import { settleFilled } from "@alea/lib/trading/state/settleFilled";
 import type { AssetWindowOutcome } from "@alea/lib/trading/telegram/formatWindowSummary";
@@ -13,11 +14,10 @@ import type { Asset } from "@alea/types/assets";
  * final kind (`settled` vs `noFill` vs unchanged) is observable for
  * tests and follow-up logic.
  *
- * If a record has an `active` slot but never captured a `line` price
- * (degenerate case: no live tick during the entire window), the
- * outcome is reported as `unfilled` — without a line we can't
- * compute won/lost, so the runner declines to attribute PnL rather
- * than booking a phantom loss.
+ * Filled slots require the exact bar for this window. If the live line
+ * is missing after a restart, the exact bar open is the safest
+ * recoverable line; without the exact bar, wrap-up keeps the outcome
+ * pending instead of booking guessed PnL.
  */
 export function settleRecord({
   record,
@@ -30,20 +30,44 @@ export function settleRecord({
     return { asset: record.asset, kind: "none" };
   }
   if (record.slot.kind === "active") {
-    if (record.line === null) {
-      return {
-        asset: record.asset,
-        kind: "unfilled",
+    if (record.slot.sharesFilled <= 0) {
+      const settled = {
+        kind: "noFill" as const,
+        market: record.slot.market,
         side: record.slot.side,
         limitPrice: record.slot.limitPrice,
       };
+      record.slot = settled;
+      return {
+        asset: record.asset,
+        kind: "unfilled",
+        side: settled.side,
+        limitPrice: settled.limitPrice,
+      };
     }
-    const closedBar = lastClosedBars.get(record.asset);
-    const finalPrice = closedBar?.close ?? record.line;
+    const closedBar = exactSettlementBar({
+      bar: lastClosedBars.get(record.asset),
+      windowStartMs: record.slot.market.windowStartMs,
+    });
+    if (closedBar === null) {
+      return {
+        asset: record.asset,
+        kind: "pending",
+        side: record.slot.side,
+        limitPrice: record.slot.limitPrice,
+        reason: "missing-close",
+      };
+    }
+    const line = record.line ?? closedBar.open;
+    if (record.line === null) {
+      record.line = line;
+      record.lineCapturedAtMs = closedBar.openTimeMs;
+    }
+    const finalPrice = closedBar.close;
     const settled = settleFilled({
       active: record.slot,
       finalPrice,
-      line: record.line,
+      line,
     });
     record.slot = settled;
     if (settled.kind === "noFill") {

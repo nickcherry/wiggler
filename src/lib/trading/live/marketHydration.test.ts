@@ -29,6 +29,7 @@ function record(): AssetWindowRecord {
   return {
     asset: "btc",
     market: null,
+    hydrationStatus: "pending",
     line: null,
     lineCapturedAtMs: null,
     lastDecisionRemaining: null,
@@ -46,6 +47,7 @@ function windowRecord(): WindowRecord {
     wrapUpTimer: null,
     rejectedCount: 0,
     placedAfterRetryCount: 0,
+    settlementRetryCount: 0,
   };
 }
 
@@ -127,6 +129,7 @@ describe("hydrateAssetMarket", () => {
     });
 
     expect(assetRecord.market).toBe(market);
+    expect(assetRecord.hydrationStatus).toBe("ready");
     expect(index.get("market-1")).toEqual({
       windowStartMs: market.windowStartMs,
       asset: "btc",
@@ -176,6 +179,7 @@ describe("hydrateAssetMarket", () => {
       costUsd: 2,
       feeRateBpsAvg: 12,
     });
+    expect(assetRecord.hydrationStatus).toBe("ready");
     expect(events.map((event) => event.kind)).toEqual(["info", "info"]);
     expect(events[0]).toMatchObject({
       message: "BTC   hydrated leftover state: side=up order=none filled=4",
@@ -198,6 +202,7 @@ describe("hydrateAssetMarket", () => {
     });
 
     expect(missingRecord.market).toBeNull();
+    expect(missingRecord.hydrationStatus).toBe("failed");
     expect(missingRecord.slot).toEqual({ kind: "empty" });
     expect(missingEvents[0]).toMatchObject({
       kind: "warn",
@@ -225,7 +230,7 @@ describe("hydrateAssetMarket", () => {
     });
   });
 
-  it("keeps the discovered market when vendor state hydration fails", async () => {
+  it("keeps the discovered market but disables trading when vendor state hydration fails", async () => {
     const assetRecord = record();
     const events: LiveEvent[] = [];
 
@@ -244,15 +249,12 @@ describe("hydrateAssetMarket", () => {
     });
 
     expect(assetRecord.market).toBe(market);
+    expect(assetRecord.hydrationStatus).toBe("failed");
     expect(assetRecord.slot).toEqual({ kind: "empty" });
     expect(events[0]).toMatchObject({
       kind: "warn",
       message:
-        "BTC   state hydration failed (continuing with empty slot): auth expired",
-    });
-    expect(events[1]).toMatchObject({
-      kind: "info",
-      message: "BTC   discovered btc-market, accepting=true",
+        "BTC   state hydration failed (trading disabled for this market): auth expired",
     });
   });
 });

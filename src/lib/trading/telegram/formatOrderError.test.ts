@@ -28,4 +28,15 @@ describe("formatOrderError", () => {
       "Error placing DOGE ↓ order: signing failed",
     );
   });
+
+  it("can describe an ambiguous error that was reconciled instead of retried", () => {
+    expect(
+      formatOrderError({
+        asset: "eth",
+        side: "up",
+        errorMessage: "response body lost",
+        retried: false,
+      }),
+    ).toContain("Reconciled venue state before giving up");
+  });
 });

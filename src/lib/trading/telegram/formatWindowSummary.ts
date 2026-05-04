@@ -22,6 +22,13 @@ export type AssetWindowOutcome =
     }
   | {
       readonly asset: Asset;
+      readonly kind: "pending";
+      readonly side: LeadingSide;
+      readonly limitPrice: number;
+      readonly reason: "missing-line" | "missing-close";
+    }
+  | {
+      readonly asset: Asset;
       readonly kind: "traded";
       readonly side: LeadingSide;
       readonly fillPrice: number;
@@ -135,6 +142,8 @@ function formatOutcomeLine({
       return `${tag} no trade`;
     case "unfilled":
       return `${tag} ${arrowOf({ side: outcome.side })} @ $${outcome.limitPrice.toFixed(2)} → didn't fill`;
+    case "pending":
+      return `${tag} ${arrowOf({ side: outcome.side })} @ $${outcome.limitPrice.toFixed(2)} → settlement pending`;
     case "traded": {
       const verb = outcome.won ? "won" : "lost";
       return `${tag} ${arrowOf({ side: outcome.side })} @ $${outcome.fillPrice.toFixed(2)} → ${verb} ${formatSignedUsd({ value: outcome.netPnlUsd })}`;

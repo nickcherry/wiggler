@@ -20,7 +20,11 @@ describe("cancelPolymarketOrder", () => {
     });
 
     expect(seen).toEqual([{ orderID: "order-1" }]);
-    expect(result).toEqual({ accepted: true, errorMessage: null });
+    expect(result).toEqual({
+      accepted: true,
+      terminal: true,
+      errorMessage: null,
+    });
   });
 
   it("returns the venue not_canceled reason when present", async () => {
@@ -32,7 +36,11 @@ describe("cancelPolymarketOrder", () => {
       orderId: "order-1",
     });
 
-    expect(result).toEqual({ accepted: false, errorMessage: "already filled" });
+    expect(result).toEqual({
+      accepted: false,
+      terminal: true,
+      errorMessage: "already filled",
+    });
   });
 
   it("treats unexpected success response shapes as accepted", async () => {
@@ -41,7 +49,11 @@ describe("cancelPolymarketOrder", () => {
       orderId: "order-1",
     });
 
-    expect(result).toEqual({ accepted: true, errorMessage: null });
+    expect(result).toEqual({
+      accepted: true,
+      terminal: true,
+      errorMessage: null,
+    });
   });
 
   it("converts thrown client errors into rejected cancel results", async () => {
@@ -52,6 +64,10 @@ describe("cancelPolymarketOrder", () => {
       orderId: "order-1",
     });
 
-    expect(result).toEqual({ accepted: false, errorMessage: "network down" });
+    expect(result).toEqual({
+      accepted: false,
+      terminal: false,
+      errorMessage: "network down",
+    });
   });
 });

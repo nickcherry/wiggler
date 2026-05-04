@@ -61,26 +61,74 @@ export async function fetchRecentFiveMinuteBars({
   const nowMs = Date.now();
   const out: ClosedFiveMinuteBar[] = [];
   for (const row of parsed) {
-    const openTimeMs = row[0];
-    const closeTimeMs = openTimeMs + fiveMinuteMs;
-    if (closeTimeMs > nowMs) {
+    const bar = rowToClosedFiveMinuteBar({ asset, row });
+    if (bar.closeTimeMs > nowMs) {
       // Skip the in-progress bar.
       continue;
     }
-    out.push({
-      asset,
-      openTimeMs,
-      closeTimeMs,
-      open: Number(row[1]),
-      high: Number(row[2]),
-      low: Number(row[3]),
-      close: Number(row[4]),
-    });
+    out.push(bar);
   }
   // Defensive trim: even though we asked for `count + 1`, Binance has
   // historically returned `limit` exactly, so the trim only kicks in
   // when our skip-the-open-bar branch didn't fire.
   return out.slice(-count);
+}
+
+/**
+ * Fetches one exact 5m bar by open timestamp. Used by live settlement:
+ * if the websocket close has not landed by wrap-up, we can hydrate the
+ * precise window instead of accidentally accepting the previous close.
+ */
+export async function fetchExactFiveMinuteBar({
+  asset,
+  openTimeMs,
+  signal,
+}: {
+  readonly asset: Asset;
+  readonly openTimeMs: number;
+  readonly signal?: AbortSignal;
+}): Promise<ClosedFiveMinuteBar | null> {
+  const symbol = binancePerpSymbol({ asset });
+  const url = `${fapiBaseUrl}/fapi/v1/klines?symbol=${symbol}&interval=5m&startTime=${openTimeMs}&endTime=${openTimeMs + fiveMinuteMs - 1}&limit=1`;
+  const response = await fetch(url, {
+    headers: { "User-Agent": "alea/1.0" },
+    signal,
+  });
+  if (!response.ok) {
+    const body = await response.text();
+    throw new Error(
+      `Binance fapi /klines for ${symbol} at ${openTimeMs} failed: ${response.status} ${body}`,
+    );
+  }
+  const parsed = klineRowsSchema.parse(await response.json());
+  const row = parsed[0];
+  if (row === undefined) {
+    return null;
+  }
+  const bar = rowToClosedFiveMinuteBar({ asset, row });
+  if (bar.openTimeMs !== openTimeMs || bar.closeTimeMs > Date.now()) {
+    return null;
+  }
+  return bar;
+}
+
+function rowToClosedFiveMinuteBar({
+  asset,
+  row,
+}: {
+  readonly asset: Asset;
+  readonly row: KlineRow;
+}): ClosedFiveMinuteBar {
+  const openTimeMs = row[0];
+  return {
+    asset,
+    openTimeMs,
+    closeTimeMs: openTimeMs + fiveMinuteMs,
+    open: Number(row[1]),
+    high: Number(row[2]),
+    low: Number(row[3]),
+    close: Number(row[4]),
+  };
 }
 
 /**
@@ -101,3 +149,5 @@ const klineRowsSchema = z.array(
     ])
     .rest(z.unknown()),
 );
+
+type KlineRow = z.infer<typeof klineRowsSchema>[number];
