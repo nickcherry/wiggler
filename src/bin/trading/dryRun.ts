@@ -1,5 +1,6 @@
 import { assetValues } from "@alea/constants/assets";
 import { MIN_EDGE } from "@alea/constants/trading";
+import { CliUsageError } from "@alea/lib/cli/CliUsageError";
 import { defineCommand } from "@alea/lib/cli/defineCommand";
 import { defineValueOption } from "@alea/lib/cli/defineValueOption";
 import { formatDryRunEvent } from "@alea/lib/trading/dryRun/formatDryRunEvent";
@@ -60,10 +61,9 @@ export const tradingDryRunCommand = defineCommand({
     "Opens a Binance perp WebSocket; calls fapi.binance.com REST at boot for EMA-50 hydration; polls Polymarket gamma-api and CLOB REST endpoints every few seconds. No orders are placed; no Polymarket auth is exercised.",
   async run({ io, options }) {
     if (probabilityTable.assets.length === 0) {
-      io.writeStdout(
-        `${pc.red("error:")} probability table is empty. Run ${pc.bold("bun alea trading:gen-probability-table")} first.\n`,
+      throw new CliUsageError(
+        "probability table is empty — run `bun alea trading:gen-probability-table` first.",
       );
-      throw new Error("empty probability table");
     }
 
     const controller = new AbortController();
