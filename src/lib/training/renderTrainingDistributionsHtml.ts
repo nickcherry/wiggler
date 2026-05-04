@@ -462,12 +462,14 @@ export function renderTrainingDistributionsHtml({
       margin-left: auto;
     }
     /* Score pills shown in the collapsed header — non-interactive
-       summary of the per-config scores. Same color semantics as the
-       interactive tabs so the visual language stays consistent. */
+       summary of the per-config scores. Fixed-width so pills line up
+       across rows of different filters. Inside each pill, the rem
+       label sits in a fixed slot followed by the +/- score pair with
+       a wider gap; the +/- pair itself sits tight against each other. */
     .filter-summary-score {
       display: inline-flex;
       align-items: center;
-      gap: 6px;
+      gap: 12px;
       padding: 4px 10px;
       border-radius: 6px;
       background: rgba(0, 0, 0, 0.25);
@@ -478,14 +480,21 @@ export function renderTrainingDistributionsHtml({
       text-transform: uppercase;
       font-variant-numeric: tabular-nums;
       color: var(--alea-text-subtle);
+      min-width: 140px;
+      box-sizing: border-box;
     }
     .filter-summary-score .score-rem {
       color: var(--alea-text-muted);
+      flex-shrink: 0;
     }
     .filter-summary-score .score-value {
       letter-spacing: 0.04em;
       text-transform: none;
       font-size: 12px;
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      margin-left: auto;
     }
     .filter-summary-score .score-value-good {
       color: var(--alea-green);
@@ -496,8 +505,7 @@ export function renderTrainingDistributionsHtml({
       font-weight: 600;
     }
     .filter-summary-score .score-value-sep {
-      color: var(--alea-text-subtle);
-      margin: 0 4px;
+      display: none;
     }
     .filter-summary-score .filter-tab-dot {
       display: inline-block;
@@ -768,17 +776,17 @@ export function renderTrainingDistributionsHtml({
             stroke: chartTokens.axisStroke,
             font: chartTokens.axisFont,
             labelFont: chartTokens.axisFont,
-            label: "distance from the 5m window's open price (bp)",
+            label: "distance from price line (bp)",
             labelSize: 28,
             grid: { stroke: chartTokens.gridStroke, width: 1 },
             ticks: { stroke: chartTokens.axisTickStroke, width: 1, size: 5 },
-            values: (u, splits) => splits.map(formatBp),
+            values: (u, splits) => splits.map((v) => Math.round(v).toLocaleString()),
           },
           {
             stroke: chartTokens.axisStroke,
             font: chartTokens.axisFont,
             labelFont: chartTokens.axisFont,
-            label: "% of times the leading side held until the 5m close",
+            label: "% of times side held to 5m close",
             labelSize: 28,
             grid: { stroke: chartTokens.gridStroke, width: 1 },
             ticks: { stroke: chartTokens.axisTickStroke, width: 1, size: 5 },
@@ -961,17 +969,17 @@ export function renderTrainingDistributionsHtml({
             stroke: chartTokens.axisStroke,
             font: chartTokens.axisFont,
             labelFont: chartTokens.axisFont,
-            label: "distance from the 5m window's open price (bp)",
+            label: "distance from price line (bp)",
             labelSize: 28,
             grid: { stroke: chartTokens.gridStroke, width: 1 },
             ticks: { stroke: chartTokens.axisTickStroke, width: 1, size: 5 },
-            values: (u, splits) => splits.map(formatBp),
+            values: (u, splits) => splits.map((v) => Math.round(v).toLocaleString()),
           },
           {
             stroke: chartTokens.axisStroke,
             font: chartTokens.axisFont,
             labelFont: chartTokens.axisFont,
-            label: "% of times the leading side held until the 5m close",
+            label: "% of times side held to 5m close",
             labelSize: 28,
             grid: { stroke: chartTokens.gridStroke, width: 1 },
             ticks: { stroke: chartTokens.axisTickStroke, width: 1, size: 5 },
@@ -1158,21 +1166,21 @@ export function renderTrainingDistributionsHtml({
             stroke: chartTokens.axisStroke,
             font: chartTokens.axisFont,
             labelFont: chartTokens.axisFont,
-            label: "distance from the 5m window's open price (bp)",
+            label: "distance from price line (bp)",
             labelSize: 28,
             grid: { stroke: chartTokens.gridStroke, width: 1 },
             ticks: { stroke: chartTokens.axisTickStroke, width: 1, size: 5 },
-            values: (u, splits) => splits.map(formatBp),
+            values: (u, splits) => splits.map((v) => Math.round(v).toLocaleString()),
           },
           {
             stroke: chartTokens.axisStroke,
             font: chartTokens.axisFont,
             labelFont: chartTokens.axisFont,
-            label: "filter's hold-rate minus baseline (pp)",
+            label: "edge over baseline (pp)",
             labelSize: 28,
             grid: { stroke: chartTokens.gridStroke, width: 1 },
             ticks: { stroke: chartTokens.axisTickStroke, width: 1, size: 5 },
-            values: (u, splits) => splits.map((v) => (v > 0 ? '+' : '') + Math.round(v) + ' pp'),
+            values: (u, splits) => splits.map((v) => (v > 0 ? "+" : "") + Math.round(v)),
             size: 60,
           },
         ],
@@ -1210,7 +1218,7 @@ export function renderTrainingDistributionsHtml({
       }
     }
 
-    function renderFilterSection(filter, hotspots) {
+    function renderFilterSection(filter, hotspots, expanded) {
       const summary = filter.summary;
       const legendHtml =
         '<span class="alea-legend-item"><span class="alea-legend-swatch" style="background:' + filterColors.baseline + '"></span>baseline</span>' +
@@ -1290,15 +1298,19 @@ export function renderTrainingDistributionsHtml({
         );
       }).join("");
 
-      // <details> defaults to collapsed (no "open" attr). Charts are
-      // NOT built here — they're lazy-built on first expand by the
-      // toggle listener so we don't render uPlot into a 0-size host.
+      // <details> defaults to collapsed; the top-ranked filter for
+      // the asset is rendered with the open attribute so its chart is
+      // visible without a click. Charts are NOT built here — they're
+      // lazy-built on first expand by the toggle listener so we don't
+      // render uPlot into a 0-size host.
+      const openAttr = expanded ? ' open' : '';
+      const chevronText = expanded ? 'collapse ▴' : 'expand ▾';
       const sectionHtml =
-        '<details class="filter-section" data-filter-id="' + filter.id + '">' +
+        '<details class="filter-section" data-filter-id="' + filter.id + '"' + openAttr + '>' +
           '<summary>' +
             '<h2 class="filter-summary-title">' + filter.displayName + '</h2>' +
             '<div class="filter-summary-scores">' + summaryScoresHtml + '</div>' +
-            '<span class="filter-summary-chevron">expand ▾</span>' +
+            '<span class="filter-summary-chevron">' + chevronText + '</span>' +
           '</summary>' +
           '<div class="filter-section-body">' +
             '<p class="survival-helper">' + filter.description + '</p>' +
@@ -1318,8 +1330,11 @@ export function renderTrainingDistributionsHtml({
       if (!detailsEl) return;
       // Lazy chart construction: only when first opened. Subsequent
       // tab clicks update the existing charts; subsequent open/close
-      // doesn't rebuild anything.
-      detailsEl.addEventListener('toggle', () => {
+      // doesn't rebuild anything. We also trigger this immediately
+      // for sections rendered with the open attribute (the auto-
+      // expanded top filter), since the open attribute on details
+      // does not fire a toggle event on initial mount.
+      const buildIfNeeded = () => {
         if (!detailsEl.open || detailsEl.dataset.built === '1') return;
         detailsEl.dataset.built = '1';
         const chevron = detailsEl.querySelector('.filter-summary-chevron');
@@ -1339,7 +1354,11 @@ export function renderTrainingDistributionsHtml({
             remaining: filter.defaultRemaining,
           });
         }
-      });
+      };
+      detailsEl.addEventListener('toggle', buildIfNeeded);
+      if (expanded) {
+        buildIfNeeded();
+      }
       // Update chevron text when the user collapses again.
       detailsEl.addEventListener('toggle', () => {
         const chevron = detailsEl.querySelector('.filter-summary-chevron');
@@ -1399,6 +1418,21 @@ export function renderTrainingDistributionsHtml({
       return { best: best, worst: worst };
     }
 
+    // Strongest tradeable signal magnitude across this filter's tabs.
+    // Both signs are useful (positive = do-trade, negative = avoid-
+    // trade) so we rank by max |score|, not max positive only.
+    function filterBestScoreMagnitude(filter) {
+      let best = -Infinity;
+      const scores = filter.summary.scoresByRemaining;
+      for (const rem of survivalRemainingOrder) {
+        const s = scores[rem];
+        if (!s) continue;
+        const mag = Math.max(Math.abs(s.true.score), Math.abs(s.false.score));
+        if (mag > best) best = mag;
+      }
+      return Number.isFinite(best) ? best : -Infinity;
+    }
+
     function renderFilters(slice) {
       clearFilterSections();
       if (!filterSectionsHost) return;
@@ -1407,9 +1441,13 @@ export function renderTrainingDistributionsHtml({
         return;
       }
       const hotspots = findHotspots(slice.filters);
-      for (const filter of slice.filters) {
-        renderFilterSection(filter, hotspots);
-      }
+      // Sort by strongest |score| so the asset's most informative
+      // edge is up top regardless of sign, and auto-expand that top
+      // filter so the user sees its chart on first paint.
+      const ranked = slice.filters.slice().sort((a, b) => filterBestScoreMagnitude(b) - filterBestScoreMagnitude(a));
+      ranked.forEach((filter, idx) => {
+        renderFilterSection(filter, hotspots, idx === 0);
+      });
     }
 
     if (filterSectionsHost) {

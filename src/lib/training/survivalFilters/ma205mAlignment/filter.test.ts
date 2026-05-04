@@ -22,6 +22,8 @@ function emptyContext(): SurvivalSnapshotContext {
     donchian50High: null,
     donchian50Low: null,
     prev5mBar: null,
+    prevPrev5mBar: null,
+    bbStddev20x5m: null,
   };
 }
 

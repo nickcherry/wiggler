@@ -136,6 +136,26 @@ export type SurvivalSnapshotContext = {
     readonly low: number;
     readonly close: number;
   } | null;
+
+  /**
+   * The 5m bar BEFORE `prev5mBar` (i.e. two bars back). Used by
+   * two-bar pattern filters such as inside-bar / bullish-engulfing.
+   * `null` when fewer than two prior bars exist.
+   */
+  readonly prevPrev5mBar: {
+    readonly open: number;
+    readonly high: number;
+    readonly low: number;
+    readonly close: number;
+  } | null;
+
+  /**
+   * Population standard deviation of 5m closes over the trailing 20
+   * bars (same window as `ma20x5m`). Combined with `ma20x5m` this is
+   * the basis for a Bollinger-band band-position filter. `null` until
+   * 20 prior closes are available.
+   */
+  readonly bbStddev20x5m: number | null;
 };
 
 const SNAPSHOTS: readonly {
@@ -158,7 +178,7 @@ const MS_PER_1M = 60 * 1000;
  * any bump, so don't rev it for non-semantic refactors. Standalone export
  * so cache callers don't need to know the file's internals.
  */
-export const SNAPSHOT_PIPELINE_VERSION = 6;
+export const SNAPSHOT_PIPELINE_VERSION = 7;
 
 /**
  * Walks the 1m candle series, emitting one `SurvivalSnapshot` per usable
@@ -215,6 +235,9 @@ export function* computeSurvivalSnapshots({
     const donchian50 =
       ma20Index?.donchianAt({ windowStartMs, period: 50 }) ?? null;
     const prev5mBar = ma20Index?.prevBarAt({ windowStartMs }) ?? null;
+    const prevPrev5mBar = ma20Index?.prevPrevBarAt({ windowStartMs }) ?? null;
+    const bbStddev20x5m =
+      ma20Index?.stddevAt({ windowStartMs, period: 20 }) ?? null;
     // `idx` is currently only consumed by the dropped 1m lookbacks,
     // but the iterator still needs it for callers that may want it
     // back; keep it referenced so the type-checker doesn't complain
@@ -261,6 +284,8 @@ export function* computeSurvivalSnapshots({
           donchian50High: donchian50?.high ?? null,
           donchian50Low: donchian50?.low ?? null,
           prev5mBar,
+          prevPrev5mBar,
+          bbStddev20x5m,
         },
       };
     }
@@ -371,6 +396,18 @@ type FiveMinuteIndex = {
     readonly low: number;
     readonly close: number;
   } | null;
+  readonly prevPrevBarAt: (input: {
+    readonly windowStartMs: number;
+  }) => {
+    readonly open: number;
+    readonly high: number;
+    readonly low: number;
+    readonly close: number;
+  } | null;
+  readonly stddevAt: (input: {
+    readonly windowStartMs: number;
+    readonly period: number;
+  }) => number | null;
   readonly lastThreeDirectionsAt: (input: {
     readonly windowStartMs: number;
   }) => readonly [SurvivalSide, SurvivalSide, SurvivalSide] | null;
@@ -582,6 +619,47 @@ function build5mLookback({
         return null;
       }
       return { open: o, high: h, low: l, close: c };
+    },
+    prevPrevBarAt: ({ windowStartMs }) => {
+      const lastIdx = indexAtOrBefore(windowStartMs);
+      if (lastIdx < 1) {
+        return null;
+      }
+      const idx = lastIdx - 1;
+      const o = opens[idx];
+      const h = highs[idx];
+      const l = lows[idx];
+      const c = closes[idx];
+      if (
+        o === undefined ||
+        h === undefined ||
+        l === undefined ||
+        c === undefined
+      ) {
+        return null;
+      }
+      return { open: o, high: h, low: l, close: c };
+    },
+    stddevAt: ({ windowStartMs, period }) => {
+      const lastIdx = indexAtOrBefore(windowStartMs);
+      if (lastIdx < period - 1) {
+        return null;
+      }
+      const sum = sumOverWindow(lastIdx, period);
+      if (sum === null) {
+        return null;
+      }
+      const mean = sum / period;
+      let sqDiffSum = 0;
+      for (let k = lastIdx - period + 1; k <= lastIdx; k += 1) {
+        const c = closes[k];
+        if (c === undefined) {
+          return null;
+        }
+        const d = c - mean;
+        sqDiffSum += d * d;
+      }
+      return Math.sqrt(sqDiffSum / period);
     },
     lastThreeDirectionsAt: ({ windowStartMs }) => {
       const lastIdx = indexAtOrBefore(windowStartMs);
