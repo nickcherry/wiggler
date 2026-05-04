@@ -121,6 +121,12 @@ export async function runLive({
     string,
     { readonly windowStartMs: number; readonly asset: Asset }
   >();
+  // Lifetime PnL accumulator. Single number across every window the
+  // running process has summarized; resets on restart since the runner
+  // is DB-free by design. Held in a one-field box so wrapUpWindow can
+  // read-modify-write through a closure without TS narrowing it back
+  // to a const-look-alike at every call site.
+  const lifetimePnl: { value: number } = { value: 0 };
 
   for (const asset of assets) {
     emas.set(asset, createFiveMinuteEmaTracker());
@@ -316,6 +322,7 @@ export async function runLive({
           telegramChatId,
           windowsAll: windows,
           conditionIdIndex,
+          lifetimePnl,
           emit,
         });
       }, wrapUpDelay);
@@ -1095,6 +1102,7 @@ async function wrapUpWindow({
   telegramChatId,
   windowsAll,
   conditionIdIndex,
+  lifetimePnl,
   emit,
 }: {
   readonly window: WindowRecord;
@@ -1106,6 +1114,7 @@ async function wrapUpWindow({
     string,
     { readonly windowStartMs: number; readonly asset: Asset }
   >;
+  readonly lifetimePnl: { value: number };
   readonly emit: (event: LiveEvent) => void;
 }): Promise<void> {
   if (window.summarySent) {
@@ -1119,12 +1128,21 @@ async function wrapUpWindow({
     outcomes.push(outcome);
   }
 
+  // Roll this window's PnL into the lifetime accumulator BEFORE we
+  // format, so `Total Pnl` includes the latest window.
+  const windowPnl = outcomes.reduce(
+    (acc, o) => acc + (o.kind === "traded" ? o.netPnlUsd : 0),
+    0,
+  );
+  lifetimePnl.value += windowPnl;
+
   const body = formatWindowSummary({
     outcomes,
     stats: {
       rejectedCount: window.rejectedCount,
       placedAfterRetryCount: window.placedAfterRetryCount,
     },
+    totalPnlUsd: lifetimePnl.value,
   });
   emit({
     kind: "window-summary",

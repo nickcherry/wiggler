@@ -16,7 +16,7 @@ describe("formatOrderPlaced", () => {
       [
         "Placed order for $20 of BTC ↑ @ $80,251.35",
         "",
-        "Price line is $80,253.10",
+        "Price line is $80,253.10 (+0.002%)",
         "Market expires in 2 minutes 20 seconds.",
       ].join("\n"),
     );
@@ -34,8 +34,48 @@ describe("formatOrderPlaced", () => {
     });
     const firstLine = text.split("\n")[0] ?? "";
     expect(firstLine).toBe("Placed order for $20 of DOGE ↓ @ $0.18234");
-    expect(text).toContain("Price line is $0.18241");
+    expect(text).toContain("Price line is $0.18241 (+0.038%)");
     expect(text).toContain("Market expires in 1 minute");
+  });
+
+  it("renders a negative percent when the line is below the current price", () => {
+    const text = formatOrderPlaced({
+      asset: "btc",
+      side: "up",
+      stakeUsd: 20,
+      underlyingPrice: 80_300,
+      linePrice: 80_270, // ≈ −0.0374%
+      windowEndMs: 60_000,
+      nowMs: 0,
+    });
+    expect(text).toContain("Price line is $80,270.00 (-0.037%)");
+  });
+
+  it("renders +0.0% when current and line agree exactly", () => {
+    const text = formatOrderPlaced({
+      asset: "btc",
+      side: "up",
+      stakeUsd: 20,
+      underlyingPrice: 80_000,
+      linePrice: 80_000,
+      windowEndMs: 60_000,
+      nowMs: 0,
+    });
+    expect(text).toContain("Price line is $80,000.00 (+0.0%)");
+  });
+
+  it("strips trailing zeros down to one decimal but never further", () => {
+    // 0.02% (linePrice = current * 1.0002)
+    const text = formatOrderPlaced({
+      asset: "btc",
+      side: "up",
+      stakeUsd: 20,
+      underlyingPrice: 80_000,
+      linePrice: 80_016, // exactly +0.02%
+      windowEndMs: 60_000,
+      nowMs: 0,
+    });
+    expect(text).toContain("Price line is $80,016.00 (+0.02%)");
   });
 
   it("formats sub-minute expiries in seconds, plural-aware", () => {
