@@ -69,7 +69,10 @@ and [doc/research/2026-05-04-sweet-spot.md](./research/2026-05-04-sweet-spot.md)
 
 The live runner maintains two streaming trackers per asset, both
 seeded from a REST hydration of the most recent 60 closed 5m bars
-and rolled forward by the websocket close-stream:
+and rolled forward by the websocket close-stream. If book ticks keep
+flowing but a `kline_5m` close frame is missed, live and dry runners
+hydrate the exact prior closed 5m bar over REST before allowing a
+decision in the new window:
 
 - `fiveMinuteEmaTracker` — running EMA-50 (used for diagnostic
   logging only since the filter swap; retained because operator-
@@ -234,10 +237,10 @@ straighter route to Polymarket's AWS infrastructure.
 the United States; works over any non-US VPN and natively from EU
 hosts.
 
-| Endpoint                           | Usage                                           | Frequency             | Median latency                                                                |
-| ---------------------------------- | ----------------------------------------------- | --------------------- | ----------------------------------------------------------------------------- |
-| `GET /fapi/v1/klines?interval=5m`  | Boot-time EMA-50 hydration (60 bars/asset)      | 5 calls at boot only  | **274 ms**                                                                    |
-| `wss://fstream.binance.com/stream` | Combined `bookTicker` + `kline_5m` for 5 assets | Continuous (1 socket) | **~750 ms** to first frame after connect; thousands of ticks/sec steady-state |
+| Endpoint                           | Usage                                           | Frequency                                                        | Median latency                                                                |
+| ---------------------------------- | ----------------------------------------------- | ---------------------------------------------------------------- | ----------------------------------------------------------------------------- |
+| `GET /fapi/v1/klines?interval=5m`  | Boot-time EMA/ATR hydration; exact-bar fallback | 5 calls at boot, then only when a tracker missed the prior close | **274 ms**                                                                    |
+| `wss://fstream.binance.com/stream` | Combined `bookTicker` + `kline_5m` for 5 assets | Continuous (1 socket)                                            | **~750 ms** to first frame after connect; thousands of ticks/sec steady-state |
 
 Reconnect schedule: `[1, 2, 5, 10, 30] s` exponential. Stale-frame
 watchdog resets the socket if no message lands for 5 s.

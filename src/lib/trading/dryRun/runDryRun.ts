@@ -6,6 +6,10 @@ import {
 } from "@alea/constants/trading";
 import { binancePerpLivePriceSource } from "@alea/lib/livePrices/binancePerp/source";
 import {
+  createTrackerHydrationState,
+  ensureTrackersReadyForWindow,
+} from "@alea/lib/livePrices/ensureTrackersReadyForWindow";
+import {
   createFiveMinuteAtrTracker,
   type FiveMinuteAtrTracker,
 } from "@alea/lib/livePrices/fiveMinuteAtrTracker";
@@ -113,6 +117,7 @@ export async function runDryRun({
   const atrs = new Map<Asset, FiveMinuteAtrTracker>();
   const lastTick = new Map<Asset, LivePriceTick>();
   const lastClosedBars = new Map<Asset, ClosedFiveMinuteBar>();
+  const trackerHydrationState = createTrackerHydrationState();
   const books: BookCache = new Map();
   const windows = new Map<number, DryWindowState>();
   const tokenIndex = new Map<string, { asset: Asset; windowStartMs: number }>();
@@ -272,6 +277,18 @@ export async function runDryRun({
     }
     const nowMs = Date.now();
     const startMs = currentWindowStartMs({ nowMs });
+    ensureTrackersReadyForWindow({
+      assets,
+      windowStartMs: startMs,
+      nowMs,
+      priceSource,
+      emas,
+      atrs,
+      lastClosedBars,
+      state: trackerHydrationState,
+      signal,
+      emit,
+    });
     let state = windows.get(startMs);
     if (state === undefined) {
       state = openDryWindow({ startMs, assets });

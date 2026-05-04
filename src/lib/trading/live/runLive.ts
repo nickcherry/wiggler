@@ -5,6 +5,10 @@ import {
 } from "@alea/constants/trading";
 import { binancePerpLivePriceSource } from "@alea/lib/livePrices/binancePerp/source";
 import {
+  createTrackerHydrationState,
+  ensureTrackersReadyForWindow,
+} from "@alea/lib/livePrices/ensureTrackersReadyForWindow";
+import {
   createFiveMinuteAtrTracker,
   type FiveMinuteAtrTracker,
 } from "@alea/lib/livePrices/fiveMinuteAtrTracker";
@@ -25,9 +29,7 @@ import type {
 import { applyFill } from "@alea/lib/trading/live/applyFill";
 import { cancelResidualOrders } from "@alea/lib/trading/live/cancelResidualOrders";
 import { evaluateRecordDecision } from "@alea/lib/trading/live/evaluateRecordDecision";
-import {
-  tickCanCaptureLine,
-} from "@alea/lib/trading/live/freshness";
+import { tickCanCaptureLine } from "@alea/lib/trading/live/freshness";
 import { bootstrapLifetimePnl } from "@alea/lib/trading/live/lifetimePnlBootstrap";
 import {
   hydrateAssetMarket,
@@ -111,7 +113,7 @@ export async function runLive({
   emit({
     kind: "info",
     atMs: Date.now(),
-      message: `live trader starting: vendor=${vendor.id} priceSource=${priceSource.id} assets=${assets.join(",")} stake=$${STAKE_USD} minEdge=${minEdge.toFixed(3)} wallet=${vendor.walletAddress.slice(0, 10)}…`,
+    message: `live trader starting: vendor=${vendor.id} priceSource=${priceSource.id} assets=${assets.join(",")} stake=$${STAKE_USD} minEdge=${minEdge.toFixed(3)} wallet=${vendor.walletAddress.slice(0, 10)}…`,
   });
 
   const lifetimePnl: LifetimePnlBox = { value: 0 };
@@ -141,6 +143,7 @@ export async function runLive({
   const lastTick = new Map<Asset, LivePriceTick>();
   const books: BookCache = new Map();
   const lastClosedBars = new Map<Asset, ClosedFiveMinuteBar>();
+  const trackerHydrationState = createTrackerHydrationState();
   const windows = new Map<number, WindowRecord>();
   const conditionIdIndex: ConditionIndex = new Map();
 
@@ -278,6 +281,18 @@ export async function runLive({
     }
     const nowMs = Date.now();
     const startMs = currentWindowStartMs({ nowMs });
+    ensureTrackersReadyForWindow({
+      assets,
+      windowStartMs: startMs,
+      nowMs,
+      priceSource,
+      emas,
+      atrs,
+      lastClosedBars,
+      state: trackerHydrationState,
+      signal,
+      emit,
+    });
     let window = windows.get(startMs);
     if (window === undefined) {
       window = openNewWindow({
