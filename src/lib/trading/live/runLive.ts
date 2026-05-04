@@ -42,6 +42,7 @@ import {
   loadLifetimePnl,
   persistLifetimePnl,
 } from "@alea/lib/trading/state/lifetimePnlStore";
+import { scanLifetimePnlFromPolymarket } from "@alea/lib/trading/state/scanLifetimePnl";
 import { settleFilled } from "@alea/lib/trading/state/settleFilled";
 import type { AssetSlot } from "@alea/lib/trading/state/types";
 import { formatOrderError } from "@alea/lib/trading/telegram/formatOrderError";
@@ -125,18 +126,22 @@ export async function runLive({
     string,
     { readonly windowStartMs: number; readonly asset: Asset }
   >();
-  // Lifetime PnL accumulator. Persists across restarts via a tiny
-  // checkpoint file (`tmp/lifetime-pnl.json` by default) so `Total
-  // Pnl` in the Telegram summary is *truly* total, not just
-  // since-process-start. Held in a one-field box so wrapUpWindow can
-  // read-modify-write through a closure without TS narrowing it back
-  // to a const-look-alike at every call site.
+  // Lifetime PnL accumulator. Held in a one-field box so wrapUpWindow
+  // can read-modify-write through a closure without TS narrowing it
+  // back to a const-look-alike at every call site.
+  //
+  // On cold start (missing/corrupt checkpoint or wallet rotation) we
+  // scan Polymarket trade history once: lifetime then truly means
+  // "every realized USDC change for this wallet on Polymarket",
+  // including trades placed before this code first ran. After the
+  // scan we persist the result so subsequent boots load the cached
+  // value and only incrementally apply per-window settles.
   const lifetimePnl: { value: number } = { value: 0 };
   const loadedLifetime = await loadLifetimePnl({
     walletAddress: auth.walletAddress,
   });
-  lifetimePnl.value = loadedLifetime.lifetimePnlUsd;
   if (loadedLifetime.source === "loaded") {
+    lifetimePnl.value = loadedLifetime.lifetimePnlUsd;
     emit({
       kind: "info",
       atMs: Date.now(),
@@ -146,8 +151,52 @@ export async function runLive({
     emit({
       kind: "info",
       atMs: Date.now(),
-      message: `lifetime pnl cold-start (${loadedLifetime.reason}); accumulating from $0.00`,
+      message: `lifetime pnl checkpoint ${loadedLifetime.reason}; scanning Polymarket trade history…`,
     });
+    try {
+      const scan = await scanLifetimePnlFromPolymarket({
+        client,
+        onProgress: (event) => {
+          if (event.kind === "trades-page") {
+            emit({
+              kind: "info",
+              atMs: Date.now(),
+              message: `lifetime pnl scan: ${event.tradesSoFar} trades fetched`,
+            });
+          } else {
+            emit({
+              kind: "info",
+              atMs: Date.now(),
+              message: `lifetime pnl scan: ${event.resolved}/${event.total} markets resolved`,
+            });
+          }
+        },
+      });
+      lifetimePnl.value = scan.lifetimePnlUsd;
+      emit({
+        kind: "info",
+        atMs: Date.now(),
+        message: `lifetime pnl scanned: $${scan.lifetimePnlUsd.toFixed(2)} across ${scan.resolvedMarketsCounted} resolved markets (${scan.unresolvedMarketsSkipped} skipped, ${scan.tradesCounted} trades counted)`,
+      });
+      try {
+        await persistLifetimePnl({
+          walletAddress: auth.walletAddress,
+          lifetimePnlUsd: lifetimePnl.value,
+        });
+      } catch (error) {
+        emit({
+          kind: "warn",
+          atMs: Date.now(),
+          message: `lifetime pnl persist after scan failed: ${(error as Error).message}`,
+        });
+      }
+    } catch (error) {
+      emit({
+        kind: "error",
+        atMs: Date.now(),
+        message: `lifetime pnl scan failed: ${(error as Error).message}; starting from $0.00`,
+      });
+    }
   }
 
   for (const asset of assets) {
