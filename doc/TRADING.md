@@ -4,26 +4,39 @@ The trading domain is the live, money-touching counterpart to the
 [training domain](./TRAINING_DOMAIN.md). Training is the offline
 playground where we explore filters, score candidates, and produce
 dashboards; trading is the curated, version-controlled subset of that
-work that the bot actually runs against real Polymarket markets.
+work that the bot actually runs against real prediction markets.
 
-This doc describes the full live-trading system: the probability
-table, the live decision pipeline, maker-only order placement, fill
-tracking, in-memory position state, and the per-window Telegram
-summary. The `trading:dry-run` command exercises the decision side
-without orders; `trading:live --commit` is the production trader.
+This doc is the operator-facing surface for live trading: the model,
+the architecture, the API touchpoints we depend on, and the failure
+modes you'll see in the wild.
+
+## Contents
+
+- [Model](#model)
+- [Architecture](#architecture)
+- [Vendor abstraction](#vendor-abstraction)
+- [Lifecycle of a 5-minute window](#lifecycle-of-a-5-minute-window)
+- [API touchpoints](#api-touchpoints)
+- [Failure modes and recovery](#failure-modes-and-recovery)
+- [Telegram messages](#telegram-messages)
+- [Commands](#commands)
+- [Files](#files)
 
 ## Model
 
-The bot trades Polymarket's 5-minute crypto up/down markets — one per
+The bot trades the venue's 5-minute crypto up/down markets — one per
 5m UTC boundary, per asset (`btc`, `eth`, `sol`, `xrp`, `doge`).
-Settlement: did the underlying close above or below its open price at
-the 5m boundary, per the Chainlink BTC/USD (etc.) oracle.
+Settlement: did the underlying close above or below its open price
+at the 5m boundary, per the venue's resolution oracle (Polymarket
+uses Chainlink BTC/USD and friends).
 
-We **measure** against Binance USDT-margined perpetual futures, not
-Chainlink: Binance is faster (tens of milliseconds vs Chainlink's
-hundreds), the relative move tracks the oracle closely, and the
-trade-off (an occasional Binance↔Chainlink directional disagreement)
-is dwarfed by the latency win for execution.
+**Measurement vs. settlement.** The model conditions on Binance USDT-
+margined perpetual futures, not the resolution oracle: Binance is
+faster (tens of milliseconds vs. Chainlink's hundreds), the relative
+move tracks the oracle closely, and the trade-off (an occasional
+Binance↔Chainlink directional disagreement) is dwarfed by the
+latency win on entry. The wallet's USDC balance — not our internal
+PnL accounting — remains the on-chain source of truth.
 
 Each in-window snapshot is classified by:
 
@@ -33,210 +46,370 @@ Each in-window snapshot is classified by:
   `{1, 2, 3, 4}` per the training pipeline's snapshot convention
   (snapshots happen at +1m, +2m, +3m, +4m with `remaining = 5 − N`).
 - `aligned` — does `currentSide` agree with the EMA-50 regime,
-  evaluated _before_ the current window opened (i.e. through the most
-  recently closed 5m bar). EMA-50 of 5m closes is the only context
-  filter; the training framework's other filters live in
-  `src/lib/training/survivalFilters/` for experimentation but are not
-  consulted by the live trader.
+  evaluated _before_ the current window opened (i.e. through the
+  most recently closed 5m bar). EMA-50 of 5m closes is the only
+  context filter we trade with; the training framework's other
+  filters live in `src/lib/training/survivalFilters/` for
+  experimentation but are not consulted by the live trader.
 
 The probability table maps `(asset, aligned, remaining, distanceBp)`
 to `P(currentSide settles winning)`, derived empirically from the
 training data. Buckets thinner than `MIN_BUCKET_SAMPLES` (200) are
 dropped at generation; the runtime never sees them.
 
-## Files
+## Architecture
 
-- Types: [src/lib/trading/types.ts](../src/lib/trading/types.ts)
-- Trading constants: [src/constants/trading.ts](../src/constants/trading.ts)
-- Compute helper: [src/lib/trading/computeAssetProbabilities.ts](../src/lib/trading/computeAssetProbabilities.ts)
-- Runtime lookup: [src/lib/trading/lookupProbability.ts](../src/lib/trading/lookupProbability.ts)
-- Committed artifact: [src/lib/trading/probabilityTable/probabilityTable.generated.ts](../src/lib/trading/probabilityTable/probabilityTable.generated.ts)
-- Decision evaluator: [src/lib/trading/decision/evaluateDecision.ts](../src/lib/trading/decision/evaluateDecision.ts)
-- Live price feed: [src/lib/livePrices/](../src/lib/livePrices/)
-- Polymarket discovery: [src/lib/polymarket/markets/](../src/lib/polymarket/markets/)
-- Dry-run runner: [src/lib/trading/dryRun/runDryRun.ts](../src/lib/trading/dryRun/runDryRun.ts)
-- Gen CLI: [src/bin/trading/genProbabilityTable.ts](../src/bin/trading/genProbabilityTable.ts)
-- Dry-run CLI: [src/bin/trading/dryRun.ts](../src/bin/trading/dryRun.ts)
+The runner is vendor-agnostic. Anything Polymarket-specific is
+isolated behind the `Vendor` interface; the orchestrator never
+imports Polymarket directly. Adding Kalshi or Hyperliquid is a new
+directory under `src/lib/trading/vendor/<id>/` plus a one-line
+factory swap at the CLI layer.
+
+```
+                  ┌──────────────────────┐
+                  │  Binance perp WS     │  bookTicker + kline_5m
+                  │  (vendor-neutral)    │
+                  └─────────┬────────────┘
+                            │ ticks + closes
+              ┌─────────────▼─────────────┐
+              │   src/lib/trading/live/   │
+              │   ─────────────────────   │
+              │   runLive (orchestrator)  │
+              │   placement.ts            │
+              │   marketHydration.ts      │
+              │   wrapUpWindow.ts         │
+              │   settleRecord.ts         │
+              │   applyFill.ts            │
+              │   cancelResidualOrders.ts │
+              │   lifetimePnlBootstrap.ts │
+              └─────┬──────────────┬──────┘
+                    │              │
+   discoverMarket   │              │  fetchBook / placeMakerLimitBuy
+   hydrateMarket    │              │  cancelOrder / streamUserFills
+   scanLifetimePnl  │              │  …
+                    ▼              ▼
+        ┌──────────────────────────────────┐
+        │  Vendor (interface)              │
+        │  src/lib/trading/vendor/types.ts │
+        └─────────┬────────────────────────┘
+                  │
+         ┌────────┴────────┬────────────┬─────────────┐
+         ▼                 ▼            ▼             ▼
+  Polymarket impl     (Kalshi)     (Hyperliquid)   (paper-trade?)
+  src/lib/trading/    future       future          future
+  vendor/polymarket/
+```
+
+The orchestrator (`runLive.ts`) only does three things:
+
+1. **Boot.** Hydrate lifetime PnL (load checkpoint, or scan vendor
+   trade history on cold start). Hydrate EMA-50. Open the Binance
+   WS feed. Open the vendor's user fill stream.
+2. **Tick.** Every 250 ms, detect window rollover, capture lines,
+   evaluate decisions, fire `placeWithRetry` for empty slots that
+   pass the edge filter.
+3. **Shutdown.** Cancel pending timers, close streams.
+
+Everything else lives in single-responsibility modules under `live/`.
+
+## Vendor abstraction
+
+The complete vendor contract lives in
+[src/lib/trading/vendor/types.ts](../src/lib/trading/vendor/types.ts).
+Seven methods, all named for what the runner needs rather than how
+Polymarket happens to expose it today:
+
+| Method               | Purpose                                                  | Network shape                                     |
+| -------------------- | -------------------------------------------------------- | ------------------------------------------------- |
+| `discoverMarket`     | Locate the venue's market for an `(asset, windowStart)`  | One REST GET                                      |
+| `fetchBook`          | Top-of-book for both up/down YES tokens                  | Two parallel REST GETs                            |
+| `placeMakerLimitBuy` | Sign + post a `postOnly: true` GTC limit BUY             | One REST POST (signed)                            |
+| `cancelOrder`        | Cancel a resting order by id                             | One REST POST (signed)                            |
+| `streamUserFills`    | Long-lived WS for our wallet's fill events               | One auth WS, auto-reconnecting                    |
+| `hydrateMarketState` | Open orders + cumulative fills for one market            | Two parallel REST GETs (signed)                   |
+| `scanLifetimePnl`    | Walk all wallet trades and compute realized lifetime PnL | Paginated REST + per-market REST (concurrency 10) |
+
+`PostOnlyRejectionError` is a typed throw from `placeMakerLimitBuy`;
+the runner's retry loop distinguishes it from generic errors.
+
+## Lifecycle of a 5-minute window
+
+Times are relative to the UTC 5m boundary at `T`.
+
+```
+T-30s    runner is mid-tick handler. "Pre-discovery" of the upcoming
+         window's market has not yet happened. (Discovery happens at
+         T+0 below — there is currently no eager pre-fetch.)
+
+T+0      tick handler observes a new currentWindowStartMs.
+         · Creates a fresh WindowRecord.
+         · Per asset, fires discoverMarket + hydrateMarketState
+           (async, in flight in parallel across all 5 assets).
+         · Schedules cancelTimer for T+5m − ORDER_CANCEL_MARGIN_MS.
+         · Schedules wrapUpTimer for T+5m + WINDOW_SUMMARY_DELAY_MS.
+
+T+0…+1m  vendor.discoverMarket completes per asset. Line is captured
+         from the first Binance tick after T. Book polling starts
+         hitting the venue at BOOK_POLL_INTERVAL_MS (1.5 s).
+         Decisions are evaluated continuously while slots remain
+         empty, but flooredRemainingMinutes is null in this interval
+         (the model has no snapshot for "no time elapsed yet"), so no
+         trades fire.
+
+T+1m     remaining = 4. evaluateDecision returns its first non-null
+         decision. If TAKE + slot still empty + market acceptingOrders:
+         placeWithRetry fires. On postOnly rejection it refreshes the
+         book and re-evaluates against the moved spread; gives up
+         when the edge drops below MIN_EDGE or the cancel margin is
+         reached.
+
+T+2m,3m,4m  remaining flips to 3, 2, 1. The placement loop only fires
+         at most once per window (slot stops being empty after the
+         first successful place); subsequent boundaries log a fresh
+         decision but don't place.
+
+T+4:50   cancelTimer fires. cancelResidualOrders cancels every active
+         slot's resting order so an unfilled order can't accidentally
+         carry into the next window.
+
+T+5:00   the venue marks the market closed. The kline_5m bar with
+         openTime T closes; its `close` price is what the model uses
+         to settle (note: not the same price the venue settles on,
+         which is Chainlink — see "Model" above).
+
+T+5:08   wrapUpTimer fires. wrapUpWindow:
+         · settleRecord per asset → AssetWindowOutcome[].
+         · Roll window net PnL into the lifetime accumulator.
+         · Atomically rewrite tmp/lifetime-pnl.json.
+         · formatWindowSummary + sendTelegramMessage.
+         · Drop the WindowRecord from the runner's bookkeeping.
+```
+
+## API touchpoints
+
+Every external dependency the live trader has, what it's used for,
+how often it fires, and how long it takes — all measured against
+real endpoints, not estimated. Numbers are a 5-sample median from a
+non-US VPN (Canada) at 12:25 UTC; production latencies in Spain
+should be in the same ballpark or slightly tighter due to the
+straighter route to Polymarket's AWS infrastructure.
+
+### Binance perp (price feed — vendor-agnostic)
+
+`fapi.binance.com` is the live REST + WS endpoint. Geo-blocked from
+the United States; works over any non-US VPN and natively from EU
+hosts.
+
+| Endpoint                           | Usage                                           | Frequency             | Median latency                                                                |
+| ---------------------------------- | ----------------------------------------------- | --------------------- | ----------------------------------------------------------------------------- |
+| `GET /fapi/v1/klines?interval=5m`  | Boot-time EMA-50 hydration (60 bars/asset)      | 5 calls at boot only  | **274 ms**                                                                    |
+| `wss://fstream.binance.com/stream` | Combined `bookTicker` + `kline_5m` for 5 assets | Continuous (1 socket) | **~750 ms** to first frame after connect; thousands of ticks/sec steady-state |
+
+Reconnect schedule: `[1, 2, 5, 10, 30] s` exponential. Stale-frame
+watchdog resets the socket if no message lands for 5 s.
+
+### Polymarket gamma-api (market discovery)
+
+Public unauthenticated REST. Slug pattern is fixed: `<asset>-updown-5m-<unixSeconds>`.
+
+| Endpoint                               | Usage                              | Frequency               | Median latency       |
+| -------------------------------------- | ---------------------------------- | ----------------------- | -------------------- |
+| `GET /events?slug=<slug>`              | One per asset per window discovery | 5 calls every 5 minutes | **84 ms**            |
+| `GET /events?slug=...` × 5 in parallel | Per-window fan-out                 | 1 batch every 5 minutes | **82 ms** (parallel) |
+
+### Polymarket CLOB REST (book reads + auth ops)
+
+| Endpoint                                      | Usage                                         | Frequency                                       | Median latency  |
+| --------------------------------------------- | --------------------------------------------- | ----------------------------------------------- | --------------- |
+| `GET /book?token_id=...` × 2 in parallel      | Top-of-book for both YES tokens of one market | 5 markets every `BOOK_POLL_INTERVAL_MS` (1.5 s) | **209 ms**      |
+| `GET /open-orders?market=...`                 | Boot-time hydration per market                | 5 markets per window                            | ~150 ms         |
+| `GET /trades?market=...`                      | Boot-time hydration per market                | 5 markets per window                            | ~150 ms         |
+| `POST /order` (auth)                          | Place one maker limit BUY                     | 0–1 per asset per window                        | ~250–500 ms     |
+| `POST /order/cancel` (auth)                   | Cancel a residual order                       | ≤5 per window (one per active slot)             | ~200–400 ms     |
+| `GET /trades` (paginated, auth)               | Lifetime PnL scan (cold start only)           | One pagination walk per cold start              | ~150 ms × pages |
+| `GET /markets/<conditionId>` (concurrency 10) | Lifetime PnL scan resolution lookup           | ≤N unique markets per cold start                | ~200 ms each    |
+
+A full lifetime scan over a fresh wallet is under a second; over a
+several-thousand-trade wallet it can take 30 s – 2 min depending on
+how many unique markets we have to resolve. The CLI prints
+incremental progress so the operator can see it advancing.
+
+### Polymarket CLOB WS (user fill stream)
+
+`wss://ws-subscriptions-clob.polymarket.com/ws/user`. Authenticated
+on every connect with the L2 HMAC bundle.
+
+| Stream     | Usage                                       | Frequency                                                                                                 |
+| ---------- | ------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
+| `/ws/user` | Real-time fill notifications for our wallet | Continuous, narrowed to the active conditionIds; resubscribed on every market discovery (~once per 5 min) |
+
+Reconnect schedule mirrors the Binance feed: `[1, 2, 5, 10, 30] s`.
+Connect + auth-subscribe round trip is comparable to Binance's first-
+frame measurement (~700 ms – 1 s).
+
+### Telegram Bot API
+
+| Endpoint            | Usage                                   | Frequency                                                                                            |
+| ------------------- | --------------------------------------- | ---------------------------------------------------------------------------------------------------- |
+| `POST /sendMessage` | Order placement + window summary alerts | Up to 5 per window (one per asset placement) + 1 per window (summary). Order-error alerts are rarer. |
+
+Telegram sends are fire-and-forget — they never block the trading
+loop. A failed send logs a `warn` and keeps moving.
+
+### Filesystem
+
+| Path                                   | Usage                   | Frequency                                   |
+| -------------------------------------- | ----------------------- | ------------------------------------------- |
+| `tmp/lifetime-pnl.json` (atomic write) | Lifetime PnL checkpoint | Read at boot; rewritten once per window-end |
+
+## Failure modes and recovery
+
+The runner is built to keep going through every transient failure
+that doesn't put real money at risk. Cataloged so an operator
+reading a long log stretch knows what's normal:
+
+| Symptom                                      | What's happening                                | Runner behaviour                                                                                                                   |
+| -------------------------------------------- | ----------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
+| `binance-perp ws disconnected`               | Socket dropped (network blip, Binance hiccup)   | Exponential reconnect; price decisions are stale until it returns                                                                  |
+| `polymarket user ws disconnected`            | Same, on the user channel                       | Same exponential reconnect; fills missed during the gap surface on next hydration                                                  |
+| `${asset} no polymarket market for window …` | Slug not yet in gamma-api                       | Skip this asset for the window; retry on next 5m boundary                                                                          |
+| `${asset} postOnly rejection (#N)`           | Price moved between book read and post          | Re-fetch book → re-evaluate → retry; counted in window summary as `Cross-book rejections`                                          |
+| `${asset} place failed (after retry)`        | Generic post error, even after one silent retry | Skip this asset for the window; fire-and-forget Telegram alert                                                                     |
+| `lifetime pnl persist failed`                | Disk error on the checkpoint write              | Continue; the in-memory accumulator is still correct, next window will retry the persist                                           |
+| `window summary telegram send failed`        | Telegram API hiccup                             | Continue; the next window's summary will reflect the same lifetime total                                                           |
+| `${asset} state hydration failed`            | `getOpenOrders` or `getTrades` failed at boot   | Slot starts empty; if there was a leftover open order on the venue we'll observe its fill via the user WS, or cancel it at wrap-up |
+
+What the runner explicitly **doesn't** do, by design:
+
+- Place a market order. Maker-only is enforced via `postOnly: true`;
+  cross-the-book rejections are normal and silent.
+- Hold more than one order or position per asset at a time. The slot
+  state machine refuses to start a new placement unless the slot is
+  empty.
+- Carry orders or positions across windows. Residual orders are
+  cancelled at T+5m − 10 s; positions settle on the venue at T+5m
+  and become USDC.
+- Persist anything except the lifetime-PnL counter. Every other
+  piece of state is reconstructed from the venue on the next boot.
+
+## Telegram messages
+
+### Order placement
+
+```
+Placed order for $20 of BTC ↑ @ $80,251.35
+
+Price line is $80,253.10 (+0.002%)
+Market expires in 2 minutes 20 seconds.
+```
+
+The `(+0.002%)` is `(line − current) / current × 100`. Positive =
+line is above current price (so the current side is DOWN). Three
+decimal digits max, sign always shown.
+
+### Window summary (~8 s after window close)
+
+Layout is: per-asset list → blank line → window-scoped block
+(`Latest Window Pnl` + optional `Cross-book rejections`) → blank
+line → lifetime `Total Pnl`.
+
+Mixed window with rejections that retried into fills:
+
+```
+BTC: ↑ @ $0.31 → won +$44.51
+ETH: ↑ @ $0.42 → won +$27.62
+SOL: no trade
+XRP: ↓ @ $0.18 → didn't fill
+DOGE: no trade
+
+Latest Window Pnl: +$72.13
+Cross-book rejections: 5 (2 placed after retry)
+
+Total Pnl: +$1,234.56
+```
+
+Clean window where no asset traded:
+
+```
+No trades entered this market.
+
+Latest Window Pnl: $0.00
+
+Total Pnl: -$143.21
+```
+
+### Order error (terminal — only after one silent retry also failed)
+
+```
+Error placing SOL ↑ order: polymarket clob 502 (gateway timeout)
+
+(Retried once. Bot continues.)
+```
 
 ## Commands
 
 ### `trading:gen-probability-table`
 
-`bun alea trading:gen-probability-table` reads the local Postgres for
-the configured training candle series (binance-perp, 5m + 1m), walks
-the snapshot pipeline once, applies only the EMA-50 alignment filter,
-and overwrites
-`src/lib/trading/probabilityTable/probabilityTable.generated.ts` plus
-a JSON sidecar in `tmp/`.
-
-**Run this whenever the underlying training data has been refreshed
-and you want the live trader to use the new model.** The generated
-file is committed to version control on purpose: every model change
-shows up as a reviewable diff.
+`bun alea trading:gen-probability-table` reads the local Postgres
+for the configured training candle series (binance-perp, 5m + 1m),
+walks the snapshot pipeline once, applies only the EMA-50 alignment
+filter, and overwrites
+`src/lib/trading/probabilityTable/probabilityTable.generated.ts`
+plus a JSON sidecar in `tmp/`. Run this whenever the underlying
+training data has been refreshed and you want the live trader to use
+the new model. The generated file is committed on purpose: every
+model change shows up as a reviewable diff.
 
 ### `trading:dry-run`
 
 `bun alea trading:dry-run` runs the full decision pipeline against
-real feeds without placing any order:
+real feeds without placing any order — only the read-side of the
+`Vendor` interface is exercised, so it can run without
+`POLYMARKET_PRIVATE_KEY` set. Right tool for inspecting signals or
+debugging the model without risking a dollar.
 
-- hydrates EMA-50 from the Binance fapi REST endpoint;
-- opens one combined-stream WebSocket for `bookTicker` +
-  `kline_5m` on every requested asset, with auto-reconnect and a
-  stale-frame watchdog;
-- discovers the current Polymarket up/down market per asset via
-  gamma-api slug lookup
-  (`<asset>-updown-5m-<windowStartUnixSeconds>`);
-- polls the Polymarket CLOB book for both YES tokens every 2s;
-- emits a one-line decision log on every `(remaining = 1, 2, 3, 4)`
-  bucket transition and a per-window summary on close.
+### `trading:live --commit`
 
-`fapi.binance.com` is unreachable from the United States; the bot is
-deployed in Spain and runs locally over a non-US VPN.
+`bun alea trading:live --commit` is the production trader.
+Constructs the Polymarket vendor with `eagerAuth: true` (fails fast
+on missing wallet env), opens all the streams, places maker-only
+GTC limit BUYs ($20 stake), watches fills via the user WS, settles
+each window with real PnL net of fees, and ships the per-window
+Telegram summary. Refuses to start without `--commit`.
 
-## Edge calculation
+### `trading:hydrate-lifetime-pnl`
 
-For a snapshot, the table gives `ourP(currentSide wins)`. Polymarket
-quotes both YES tokens; the maker entry price for either side is the
-current best bid (we are exclusively maker, never taker — taker fees
-on these markets can run up to 7% and would erase any edge).
+`bun alea trading:hydrate-lifetime-pnl` rescans the wallet's full
+Polymarket trade history and overwrites the lifetime-PnL
+checkpoint. Useful after manual trades on the wallet outside the
+bot, or whenever the checkpoint feels stale. Read-only against
+Polymarket — never places or cancels orders.
 
-Per side:
+## Files
 
-```
-edge_up   = ourP_up   − bid_up
-edge_down = ourP_down − bid_down
-```
+Vendor-agnostic core:
 
-We pick the side with the higher edge. If the higher edge is below
-`MIN_EDGE` (chunk-1 default `0.05`, hard-coded in
-`src/constants/trading.ts`) the snapshot is logged as a `thin-edge`
-skip; otherwise the dry-run logs `→ TAKE <SIDE>`.
-
-### `trading:live`
-
-`bun alea trading:live --commit` is the production trader. Same
-decision pipeline as the dry-run, but it actually posts maker-only
-GTC limit BUY orders ($20 fixed stake), watches fills via Polymarket's
-user WS channel, settles each window with real PnL net of fees, and
-ships a per-window Telegram summary.
-
-**Maker-only enforcement.** Every order is posted with the venue's
-`postOnly: true` flag. Polymarket rejects the order if it would cross
-the spread (= become a taker), so taker fills are structurally
-impossible. We exclusively quote against the current best bid; this
-keeps fees in the maker tier (effectively 0% on these markets) and
-sidesteps the up-to-7% taker fee that would erase any edge.
-
-**One-slot-per-asset rule.** Per the chunk-2 spec, the bot holds at
-most one open order _or_ one filled position per asset at a time —
-never both, never more. The slot state machine lives in
-`src/lib/trading/state/types.ts` and the runner's tick loop refuses
-to place a new order unless the slot is `empty`.
-
-**No database.** Trading state is in-memory and per-window. Polymarket
-is the source of truth: on every market discovery the runner calls
-`getOpenOrders` + `getTrades` and re-hydrates the slot. A process
-crash and restart loses no trading state.
-
-The one exception is the lifetime PnL counter the Telegram summary
-reports as `Total Pnl`. It lives in a single small JSON checkpoint at
-`tmp/lifetime-pnl.json` (atomic write — temp file + rename, so a
-crash mid-write leaves the previous value intact) and is read on
-boot. The file embeds the wallet address; if the running funder
-doesn't match, or the file is missing or corrupt, the runner
-**scans the wallet's full Polymarket trade history** to seed the
-counter, then persists the result. So `Total Pnl` truly means
-"every realized USDC change for this wallet on Polymarket", not
-just "since-this-process-started" — the bot picks up trades made
-before this code first ran.
-
-The scan paginates `getTradesPaginated`, fetches each unique market's
-resolution via `getMarket` (concurrency 10), and sums realized PnL
-per market via the pure `computeLifetimePnl` summer. Wallets with a
-heavy trading history can take a minute or two to scan; the
-runner emits per-step progress lines while it works.
-
-To rescan on demand (e.g. after manual trades on the wallet outside
-the bot):
-
-```
-bun alea trading:hydrate-lifetime-pnl
-```
-
-That command does the scan, prints the breakdown, and overwrites the
-checkpoint. Read-only against Polymarket — no orders.
-
-**Telegram alerts.** Two messages per window:
-
-1. On order placement, immediately:
-
-   ```
-   Placed order for $20 of BTC ↑ @ $80,251.35
-
-   Price line is $80,253.10 (+0.002%)
-   Market expires in 2 minutes 20 seconds.
-   ```
-
-   The `(+0.002%)` is `(line − current) / current × 100`. Positive =
-   line is above current price (current side is DOWN). Three-decimal
-   max, sign always shown.
-
-2. ~8s after window close, a per-window summary:
-
-   ```
-   BTC: ↑ @ $0.30 → won +$46.67
-   ETH: ↓ @ $0.20 → didn't fill
-   SOL: no trade
-   XRP: no trade
-   DOGE: ↓ @ $0.40 → lost -$20.00
-
-   Latest Window Pnl: +$26.67
-   Cross-book rejections: 5 (2 placed after retry)
-
-   Total Pnl: +$1,234.56
-   ```
-
-   The blank line between the per-asset list and the window stats
-   separates "what happened this window" from the aggregate numbers;
-   another blank line separates the window-scoped block from the
-   lifetime `Total Pnl`. The cross-book rejections line is appended
-   only when at least one is non-zero. If no asset traded, the body
-   reads `No trades entered this market.` and the rest of the layout
-   stays the same.
-
-**PnL formula.** When a position settles:
-
-```
-gross = won ? sharesFilled × $1 − costUsd : −costUsd
-fees  = (feeRateBps / 10_000) × costUsd
-net   = gross − fees
-```
-
-We settle off the Binance perp 5m close, not the Chainlink oracle
-Polymarket actually uses. The two virtually never disagree
-directionally; the wallet's USDC balance remains the on-chain source
-of truth, and the Telegram summary's net PnL will line up with it
-under normal conditions.
-
-**Lifecycle.** Per asset, per window:
-
-```
-T+0:00 ─── window opens, line = first WS tick mid after T
-T+1:00 ─── first decision boundary (rem=4); place if TAKE + slot empty
-T+2:00..+4:00 ─── same logic, only fires while slot still empty
-T+4:50 ─── cancel any still-resting order (10s margin)
-T+5:00 ─── window closes; kline_5m close defines the final price
-T+5:08 ─── wrap-up: settle filled positions, build outcomes, send Telegram
-```
-
-## Files (live)
-
-- Order placement: [src/lib/trading/orders/placeMakerLimitBuy.ts](../src/lib/trading/orders/placeMakerLimitBuy.ts)
-- Cancel: [src/lib/trading/orders/cancelOpenOrder.ts](../src/lib/trading/orders/cancelOpenOrder.ts)
-- Hydration: [src/lib/trading/orders/hydrateMarketState.ts](../src/lib/trading/orders/hydrateMarketState.ts)
+- Types: [src/lib/trading/types.ts](../src/lib/trading/types.ts)
+- Trading constants: [src/constants/trading.ts](../src/constants/trading.ts)
+- Decision evaluator: [src/lib/trading/decision/evaluateDecision.ts](../src/lib/trading/decision/evaluateDecision.ts)
 - Slot state machine: [src/lib/trading/state/types.ts](../src/lib/trading/state/types.ts)
-- Settlement: [src/lib/trading/state/settleFilled.ts](../src/lib/trading/state/settleFilled.ts)
-- User WS channel: [src/lib/polymarket/userChannel/streamUserChannel.ts](../src/lib/polymarket/userChannel/streamUserChannel.ts)
+- Settlement math: [src/lib/trading/state/settleFilled.ts](../src/lib/trading/state/settleFilled.ts)
+- Lifetime PnL store: [src/lib/trading/state/lifetimePnlStore.ts](../src/lib/trading/state/lifetimePnlStore.ts)
+- Lifetime PnL math (pure): [src/lib/trading/state/computeLifetimePnl.ts](../src/lib/trading/state/computeLifetimePnl.ts)
 - Telegram composers: [src/lib/trading/telegram/](../src/lib/trading/telegram/)
-- Live runner: [src/lib/trading/live/runLive.ts](../src/lib/trading/live/runLive.ts)
-- Live CLI: [src/bin/trading/live.ts](../src/bin/trading/live.ts)
+- Live runner (orchestrator + per-concern modules): [src/lib/trading/live/](../src/lib/trading/live/)
+- Dry-run runner: [src/lib/trading/dryRun/runDryRun.ts](../src/lib/trading/dryRun/runDryRun.ts)
+- Probability table types + generator: [src/lib/trading/](../src/lib/trading/)
+- Live price feed: [src/lib/livePrices/](../src/lib/livePrices/)
+
+Vendor interface + Polymarket implementation:
+
+- Interface: [src/lib/trading/vendor/types.ts](../src/lib/trading/vendor/types.ts)
+- Polymarket adapter: [src/lib/trading/vendor/polymarket/](../src/lib/trading/vendor/polymarket/)
+
+CLIs:
+
+- [src/bin/trading/genProbabilityTable.ts](../src/bin/trading/genProbabilityTable.ts)
+- [src/bin/trading/dryRun.ts](../src/bin/trading/dryRun.ts)
+- [src/bin/trading/live.ts](../src/bin/trading/live.ts)
+- [src/bin/trading/hydrateLifetimePnl.ts](../src/bin/trading/hydrateLifetimePnl.ts)
