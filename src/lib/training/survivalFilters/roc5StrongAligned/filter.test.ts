@@ -3,7 +3,7 @@ import type {
   SurvivalSnapshot,
   SurvivalSnapshotContext,
 } from "@alea/lib/training/computeSurvivalSnapshots";
-import { roc20StrongAlignmentFilter } from "@alea/lib/training/survivalFilters/roc20StrongAlignment/filter";
+import { roc5StrongAlignedFilter } from "@alea/lib/training/survivalFilters/roc5StrongAligned/filter";
 import { describe, expect, it } from "bun:test";
 
 function emptyContext(): SurvivalSnapshotContext {
@@ -46,29 +46,24 @@ function buildSnapshot(currentSide: SurvivalSide, ctx: SurvivalSnapshotContext):
   };
 }
 
-describe("roc20StrongAlignmentFilter", () => {
+describe("roc5StrongAlignedFilter", () => {
   it("strong positive ROC + UP side = aligned", () => {
-    const snap = buildSnapshot("up", { ...emptyContext(), roc20Pct: 1.2 });
-    expect(roc20StrongAlignmentFilter.classify(snap, snap.context)).toBe(true);
+    const snap = buildSnapshot("up", { ...emptyContext(), roc5Pct: 0.5 });
+    expect(roc5StrongAlignedFilter.classify(snap, snap.context)).toBe(true);
   });
 
-  it("strong positive ROC + DOWN side = against", () => {
-    const snap = buildSnapshot("down", { ...emptyContext(), roc20Pct: 1.2 });
-    expect(roc20StrongAlignmentFilter.classify(snap, snap.context)).toBe(false);
+  it("strong negative ROC + UP side = against", () => {
+    const snap = buildSnapshot("up", { ...emptyContext(), roc5Pct: -0.5 });
+    expect(roc5StrongAlignedFilter.classify(snap, snap.context)).toBe(false);
   });
 
-  it("strong negative ROC + DOWN side = aligned", () => {
-    const snap = buildSnapshot("down", { ...emptyContext(), roc20Pct: -0.8 });
-    expect(roc20StrongAlignmentFilter.classify(snap, snap.context)).toBe(true);
-  });
-
-  it("skips when |ROC| below threshold", () => {
-    const snap = buildSnapshot("up", { ...emptyContext(), roc20Pct: 0.2 });
-    expect(roc20StrongAlignmentFilter.classify(snap, snap.context)).toBe("skip");
+  it("skips when |ROC| < threshold", () => {
+    const snap = buildSnapshot("up", { ...emptyContext(), roc5Pct: 0.1 });
+    expect(roc5StrongAlignedFilter.classify(snap, snap.context)).toBe("skip");
   });
 
   it("skips when ROC unavailable", () => {
     const snap = buildSnapshot("up", emptyContext());
-    expect(roc20StrongAlignmentFilter.classify(snap, snap.context)).toBe("skip");
+    expect(roc5StrongAlignedFilter.classify(snap, snap.context)).toBe("skip");
   });
 });
