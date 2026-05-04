@@ -6,6 +6,7 @@ import { defineValueOption } from "@alea/lib/cli/defineValueOption";
 import { formatDryRunEvent } from "@alea/lib/trading/dryRun/formatDryRunEvent";
 import { runDryRun } from "@alea/lib/trading/dryRun/runDryRun";
 import { probabilityTable } from "@alea/lib/trading/probabilityTable/probabilityTable.generated";
+import { createPolymarketVendor } from "@alea/lib/trading/vendor/polymarket/createPolymarketVendor";
 import { assetSchema } from "@alea/types/assets";
 import pc from "picocolors";
 import { z } from "zod";
@@ -76,7 +77,9 @@ export const tradingDryRunCommand = defineCommand({
     process.once("SIGTERM", onSigint);
 
     try {
+      const vendor = await createPolymarketVendor();
       await runDryRun({
+        vendor,
         assets: options.assets,
         table: probabilityTable,
         minEdge: options.minEdge,

@@ -1,65 +1,36 @@
 import {
   computeLifetimePnl,
-  type LifetimePnlBreakdown,
   type ScanMarketResolution,
   type ScanTrade,
 } from "@alea/lib/trading/state/computeLifetimePnl";
+import type {
+  LifetimePnlScanProgress,
+  LifetimePnlScanResult,
+} from "@alea/lib/trading/vendor/types";
 import type { ClobClient } from "@polymarket/clob-client";
 import { z } from "zod";
 
-/** Narrow projection of a fill — only the fields the PnL math reads. */
-type RawTrade = {
-  readonly market: string;
-  readonly asset_id: string;
-  readonly side: string;
-  readonly size: string;
-  readonly price: string;
-  readonly fee_rate_bps: string;
-};
-
-const TRADE_PAGE_LIMIT = 500;
 const MARKET_LOOKUP_CONCURRENCY = 10;
 
-export type ScanProgress =
-  | {
-      readonly kind: "trades-page";
-      readonly tradesSoFar: number;
-    }
-  | {
-      readonly kind: "markets-progress";
-      readonly resolved: number;
-      readonly total: number;
-    };
-
 /**
- * Computes the wallet's lifetime PnL by scanning every trade Polymarket
- * has on file for it. This is the boot-time hydration the live trader
- * runs whenever the on-disk checkpoint is missing or doesn't match
- * the running wallet. Steady-state operation maintains the value
- * incrementally per-window-settle, so the scan only fires once per
- * fresh wallet.
+ * Polymarket implementation of `Vendor.scanLifetimePnl`. Scans the
+ * wallet's full trade history paginated through `getTradesPaginated`,
+ * resolves each unique market via `getMarket`, and hands both lists
+ * to the pure `computeLifetimePnl` summer.
  *
- * Steps:
- *   1. Paginate `getTradesPaginated` until the cursor terminates.
- *      Polymarket signals "no more pages" by returning either an
- *      empty `next_cursor` or the sentinel `"LTE="` — handle both.
- *   2. For every unique conditionId we touched, fetch the market via
- *      the CLOB `getMarket` endpoint with bounded concurrency. The
- *      per-token `winner` flag (and `price` field of `0` or `1`)
- *      gives us the resolution.
- *   3. Hand both lists to the pure `computeLifetimePnl` summer.
- *
- * Unresolved markets (open, settling, or just dropped from `getMarket`)
- * are skipped and reported as a count — their cash flow can't be
- * realized yet.
+ * Latency dominates this call (paginated reads + per-market lookups);
+ * the runner only invokes it on cold start and the standalone
+ * `trading:hydrate-lifetime-pnl` CLI re-runs it on demand. The
+ * `onProgress` callback emits `trades-page` after each page lands and
+ * `markets-progress` as resolution batches land.
  */
-export async function scanLifetimePnlFromPolymarket({
+export async function scanPolymarketLifetimePnl({
   client,
   onProgress,
 }: {
   readonly client: ClobClient;
-  readonly onProgress?: (event: ScanProgress) => void;
-}): Promise<LifetimePnlBreakdown> {
+  readonly onProgress?: (event: LifetimePnlScanProgress) => void;
+}): Promise<LifetimePnlScanResult> {
   const trades = await fetchAllTrades({ client, onProgress });
   const conditionIds = uniqueConditionIds({ trades });
   const resolutions = await fetchAllResolutions({
@@ -73,12 +44,21 @@ export async function scanLifetimePnlFromPolymarket({
   });
 }
 
+type RawTrade = {
+  readonly market: string;
+  readonly asset_id: string;
+  readonly side: string;
+  readonly size: string;
+  readonly price: string;
+  readonly fee_rate_bps: string;
+};
+
 async function fetchAllTrades({
   client,
   onProgress,
 }: {
   readonly client: ClobClient;
-  readonly onProgress?: (event: ScanProgress) => void;
+  readonly onProgress?: (event: LifetimePnlScanProgress) => void;
 }): Promise<RawTrade[]> {
   const accumulator: RawTrade[] = [];
   let cursor: string | undefined;
@@ -112,12 +92,11 @@ async function fetchAllResolutions({
 }: {
   readonly client: ClobClient;
   readonly conditionIds: readonly string[];
-  readonly onProgress?: (event: ScanProgress) => void;
+  readonly onProgress?: (event: LifetimePnlScanProgress) => void;
 }): Promise<ScanMarketResolution[]> {
   const total = conditionIds.length;
   const results: ScanMarketResolution[] = [];
   let resolvedSoFar = 0;
-  // Bounded concurrency: chunk into windows of MARKET_LOOKUP_CONCURRENCY.
   for (let i = 0; i < conditionIds.length; i += MARKET_LOOKUP_CONCURRENCY) {
     const slice = conditionIds.slice(i, i + MARKET_LOOKUP_CONCURRENCY);
     const settled = await Promise.allSettled(
@@ -129,9 +108,7 @@ async function fetchAllResolutions({
       if (item.status === "fulfilled") {
         results.push(item.value);
       } else {
-        // Treat lookup failures as "unresolved" so we don't blow up
-        // a long scan over a single venue hiccup. The summer will
-        // skip these and surface them in `unresolvedMarketsSkipped`.
+        // Single hiccup → treat as unresolved, the summer skips it.
         results.push({
           conditionId: "",
           resolved: false,
@@ -165,9 +142,6 @@ async function fetchMarketResolution({
       outcomePriceByTokenId: new Map(),
     };
   }
-  // A market is "resolved" when at least one token reports
-  // `winner: true` AND `price === 1`. Polymarket only sets these
-  // post-settlement; until then both tokens look "active".
   const map = new Map<string, number>();
   let resolved = false;
   for (const token of parsed.data.tokens) {
@@ -267,5 +241,3 @@ const marketResolutionSchema = z
       ),
   })
   .passthrough();
-
-void TRADE_PAGE_LIMIT;

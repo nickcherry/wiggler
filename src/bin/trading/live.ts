@@ -8,6 +8,7 @@ import { defineValueOption } from "@alea/lib/cli/defineValueOption";
 import { runLive } from "@alea/lib/trading/live/runLive";
 import type { LiveEvent } from "@alea/lib/trading/live/types";
 import { probabilityTable } from "@alea/lib/trading/probabilityTable/probabilityTable.generated";
+import { createPolymarketVendor } from "@alea/lib/trading/vendor/polymarket/createPolymarketVendor";
 import { assetSchema } from "@alea/types/assets";
 import pc from "picocolors";
 import { z } from "zod";
@@ -118,7 +119,9 @@ export const tradingLiveCommand = defineCommand({
     );
 
     try {
+      const vendor = await createPolymarketVendor({ eagerAuth: true });
       await runLive({
+        vendor,
         assets: options.assets,
         table: probabilityTable,
         minEdge: options.minEdge,
