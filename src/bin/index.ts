@@ -8,6 +8,7 @@ import { polymarketAuthCheckCommand } from "@alea/bin/polymarket/authCheck";
 import { telegramTestCommand } from "@alea/bin/telegram/test";
 import { tradingDryRunCommand } from "@alea/bin/trading/dryRun";
 import { tradingGenProbabilityTableCommand } from "@alea/bin/trading/genProbabilityTable";
+import { tradingLiveCommand } from "@alea/bin/trading/live";
 import { trainingDistributionsCommand } from "@alea/bin/training/distributions";
 import { createCli } from "@alea/lib/cli/createCli";
 
@@ -25,6 +26,7 @@ const cli = createCli({
     polymarketAuthCheckCommand,
     tradingGenProbabilityTableCommand,
     tradingDryRunCommand,
+    tradingLiveCommand,
   ],
 });
 

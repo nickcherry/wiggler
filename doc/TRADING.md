@@ -6,11 +6,11 @@ playground where we explore filters, score candidates, and produce
 dashboards; trading is the curated, version-controlled subset of that
 work that the bot actually runs against real Polymarket markets.
 
-This doc describes **chunk 1** of the live-trading rollout: the
-probability table, live price plumbing, market discovery, and the
-dry-run CLI that exercises the full decision pipeline without ever
-placing an order. Order placement, position lifecycle, telegram
-alerts, and post-window summaries land in chunk 2.
+This doc describes the full live-trading system: the probability
+table, the live decision pipeline, maker-only order placement, fill
+tracking, in-memory position state, and the per-window Telegram
+summary. The `trading:dry-run` command exercises the decision side
+without orders; `trading:live --commit` is the production trader.
 
 ## Model
 
@@ -112,12 +112,81 @@ We pick the side with the higher edge. If the higher edge is below
 `src/constants/trading.ts`) the snapshot is logged as a `thin-edge`
 skip; otherwise the dry-run logs `→ TAKE <SIDE>`.
 
-## What chunk 1 does NOT do
+### `trading:live`
 
-- No order placement, no Polymarket auth use, no telegram alerts.
-- No DB writes; the live runtime is DB-free by design.
-- No L2 book; we use top-of-book bids only via REST polling.
+`bun alea trading:live --commit` is the production trader. Same
+decision pipeline as the dry-run, but it actually posts maker-only
+GTC limit BUY orders ($20 fixed stake), watches fills via Polymarket's
+user WS channel, settles each window with real PnL net of fees, and
+ships a per-window Telegram summary.
 
-These all land in chunk 2 alongside fixed-stake sizing, in-memory
-position tracking hydrated from Polymarket on boot, and per-window
-summary messages.
+**Maker-only enforcement.** Every order is posted with the venue's
+`postOnly: true` flag. Polymarket rejects the order if it would cross
+the spread (= become a taker), so taker fills are structurally
+impossible. We exclusively quote against the current best bid; this
+keeps fees in the maker tier (effectively 0% on these markets) and
+sidesteps the up-to-7% taker fee that would erase any edge.
+
+**One-slot-per-asset rule.** Per the chunk-2 spec, the bot holds at
+most one open order _or_ one filled position per asset at a time —
+never both, never more. The slot state machine lives in
+`src/lib/trading/state/types.ts` and the runner's tick loop refuses
+to place a new order unless the slot is `empty`.
+
+**No database.** All state is in-memory and per-window. Polymarket is
+the source of truth: on every market discovery the runner calls
+`getOpenOrders` + `getTrades` and re-hydrates the slot. A process
+crash and restart loses no state.
+
+**Telegram alerts.** Two messages per window:
+
+1. On order placement, immediately:
+
+   ```
+   Placed order for $20 of BTC ↑ @ $80,251.35
+
+   Price line is $80,253.10
+   Market expires in 2 minutes 20 seconds.
+   ```
+
+2. ~8s after window close, a summary listing every asset's outcome
+   and a `Total Pnl:` line that includes the maker fee. If no asset
+   traded, the body reads `No trades entered this market.` followed
+   by `Total Pnl: $0.00`.
+
+**PnL formula.** When a position settles:
+
+```
+gross = won ? sharesFilled × $1 − costUsd : −costUsd
+fees  = (feeRateBps / 10_000) × costUsd
+net   = gross − fees
+```
+
+We settle off the Binance perp 5m close, not the Chainlink oracle
+Polymarket actually uses. The two virtually never disagree
+directionally; the wallet's USDC balance remains the on-chain source
+of truth, and the Telegram summary's net PnL will line up with it
+under normal conditions.
+
+**Lifecycle.** Per asset, per window:
+
+```
+T+0:00 ─── window opens, line = first WS tick mid after T
+T+1:00 ─── first decision boundary (rem=4); place if TAKE + slot empty
+T+2:00..+4:00 ─── same logic, only fires while slot still empty
+T+4:50 ─── cancel any still-resting order (10s margin)
+T+5:00 ─── window closes; kline_5m close defines the final price
+T+5:08 ─── wrap-up: settle filled positions, build outcomes, send Telegram
+```
+
+## Files (live)
+
+- Order placement: [src/lib/trading/orders/placeMakerLimitBuy.ts](../src/lib/trading/orders/placeMakerLimitBuy.ts)
+- Cancel: [src/lib/trading/orders/cancelOpenOrder.ts](../src/lib/trading/orders/cancelOpenOrder.ts)
+- Hydration: [src/lib/trading/orders/hydrateMarketState.ts](../src/lib/trading/orders/hydrateMarketState.ts)
+- Slot state machine: [src/lib/trading/state/types.ts](../src/lib/trading/state/types.ts)
+- Settlement: [src/lib/trading/state/settleFilled.ts](../src/lib/trading/state/settleFilled.ts)
+- User WS channel: [src/lib/polymarket/userChannel/streamUserChannel.ts](../src/lib/polymarket/userChannel/streamUserChannel.ts)
+- Telegram composers: [src/lib/trading/telegram/](../src/lib/trading/telegram/)
+- Live runner: [src/lib/trading/live/runLive.ts](../src/lib/trading/live/runLive.ts)
+- Live CLI: [src/bin/trading/live.ts](../src/bin/trading/live.ts)

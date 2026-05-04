@@ -38,6 +38,7 @@ Everything that matters is reachable through one non-interactive entrypoint:
 - `trading:*`
   `trading:gen-probability-table`
   `trading:dry-run`
+  `trading:live`
 - `help`
   Built-in. `alea help <command>` prints detailed help; `alea help` is equivalent to `alea` with no arguments.
 
