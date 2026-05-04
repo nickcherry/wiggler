@@ -370,5 +370,94 @@ describe("applySurvivalFilters", () => {
     expect(trueScore?.coverageBp).toBe(0);
     expect(trueScore?.score).toBe(0);
     expect(trueScore?.meanDeltaPp).toBeNull();
+    expect(trueScore?.sharpe).toBeNull();
+    expect(trueScore?.logLossImprovementNats).toBeNull();
+  });
+
+  it("populates sharpe and log-loss improvement with correct signs and edge cases", () => {
+    // Same scenario as the signed-area test: three buckets where true
+    // overperforms by ~+20pp consistently. Per-bucket deltas are tight
+    // (+20, +20, +17.5) so sharpe should be high; log-loss should
+    // improve (positive nats saved) for the better half and the worse
+    // half should show a loss (negative).
+    const snapshots: SurvivalSnapshot[] = [];
+    const push = (
+      distanceBp: number,
+      side: "true" | "false",
+      survivedCount: number,
+      total: number,
+    ) => {
+      for (let i = 0; i < total; i += 1) {
+        snapshots.push(
+          buildSnapshot({
+            windowStartMs:
+              distanceBp * 1_000_000 + (side === "true" ? 1 : 2) * 100_000 + i,
+            remaining: 1,
+            distanceBp,
+            survived: i < survivedCount,
+            context: {
+              ...emptyContext(),
+              ma20x5m: side === "true" ? 1 : -1,
+            },
+          }),
+        );
+      }
+    };
+    push(2, "true", Math.round(0.6 * SAMPLE_FLOOR), SAMPLE_FLOOR);
+    push(2, "false", Math.round(0.2 * SAMPLE_FLOOR), SAMPLE_FLOOR);
+    push(5, "true", Math.round(0.8 * SAMPLE_FLOOR), SAMPLE_FLOOR);
+    push(5, "false", Math.round(0.4 * SAMPLE_FLOOR), SAMPLE_FLOOR);
+    push(8, "true", Math.round(0.95 * SAMPLE_FLOOR), SAMPLE_FLOOR);
+    push(8, "false", Math.round(0.6 * SAMPLE_FLOOR), SAMPLE_FLOOR);
+
+    const { perFilter } = applySurvivalFilters({
+      snapshots,
+      filters: [probeFilter],
+    });
+    const trueScore = perFilter[0]?.summary.scoresByRemaining[1].true;
+    const falseScore = perFilter[0]?.summary.scoresByRemaining[1].false;
+    if (trueScore === undefined || falseScore === undefined) {
+      throw new Error("expected scores");
+    }
+    // Both halves at a given (remaining) are sign-opposed under the
+    // conditioned-baseline scoring.
+    expect(trueScore.score).toBeGreaterThan(0);
+    expect(falseScore.score).toBeLessThan(0);
+    // Sharpe matches mean's sign; magnitude should be high since the
+    // three per-bucket deltas (+20, +20, +17.5) are tightly clustered.
+    expect(trueScore.sharpe).not.toBeNull();
+    expect(trueScore.sharpe! > 5).toBe(true);
+    expect(falseScore.sharpe).not.toBeNull();
+    expect(falseScore.sharpe! < -5).toBe(true);
+    // Better-performing half saves nats; worse half pays nats.
+    expect(trueScore.logLossImprovementNats).not.toBeNull();
+    expect(trueScore.logLossImprovementNats! > 0).toBe(true);
+    expect(falseScore.logLossImprovementNats).not.toBeNull();
+    expect(falseScore.logLossImprovementNats! > 0).toBe(true);
+    // Both halves' log-loss-improvement is positive: each half's own
+    // win-rate is a better predictor of its own outcomes than the
+    // conditioned baseline (the average of the two). That's the
+    // information-gain interpretation — it's about predicting the
+    // half's outcomes, not winning vs. the other side.
+  });
+
+  it("returns null sharpe when only one bucket is comparable", () => {
+    const snapshots = buildBalancedSnapshots({
+      remaining: 1,
+      distanceBp: 5,
+      trueClassifier: () => true,
+      totalEach: SAMPLE_FLOOR,
+      trueWinRate: 0.7,
+      falseWinRate: 0.4,
+    });
+    const { perFilter } = applySurvivalFilters({
+      snapshots,
+      filters: [probeFilter],
+    });
+    const trueScore = perFilter[0]?.summary.scoresByRemaining[1].true;
+    expect(trueScore?.coverageBp).toBe(1);
+    expect(trueScore?.sharpe).toBeNull();
+    // Log-loss improvement still defined even with one bucket.
+    expect(trueScore?.logLossImprovementNats).not.toBeNull();
   });
 });

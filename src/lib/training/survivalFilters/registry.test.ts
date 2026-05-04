@@ -2,8 +2,9 @@ import { survivalFilters } from "@alea/lib/training/survivalFilters/registry";
 import { describe, expect, it } from "bun:test";
 
 describe("survivalFilters", () => {
-  it("keeps the active dashboard filter set ordered and explicit", () => {
+  it("registers the broadened evaluation set: active 10 + 5 unregistered + 13 restored", () => {
     expect(survivalFilters.map((filter) => filter.id)).toEqual([
+      // Active dashboard filters
       "ema_50_5m_alignment",
       "distance_from_line_atr",
       "roc_5_strong_aligned",
@@ -14,6 +15,26 @@ describe("survivalFilters", () => {
       "recent_breakout_aligned",
       "weekend_session",
       "utc_hour_us_session",
+      // Unregistered 5m-trend cousins
+      "ema_20_5m_alignment",
+      "ma_20_5m_alignment",
+      "ma_50_5m_alignment",
+      "last_3_5m_majority_alignment",
+      "last_5_5m_majority_alignment",
+      // Restored from prune commits
+      "bullish_body_alignment",
+      "donchian_50_top_alignment",
+      "ema_20_above_ema_50_alignment",
+      "ema_50_slope_alignment",
+      "european_session",
+      "prev_5m_direction_alignment",
+      "range_expansion",
+      "range_within_atr",
+      "roc_20_5m_alignment",
+      "roc_20_strong_alignment",
+      "rsi_14_5m_alignment",
+      "stochastic_extreme_against",
+      "stretched_from_ema_50_alignment",
     ]);
   });
 

@@ -279,34 +279,151 @@ function computeSummary({
   readonly whenFalse: SurvivalSurface;
 }): SurvivalFilterSummary {
   const classified = counts.trueCount + counts.falseCount;
+  const snapshotsTotal = classified + counts.skipCount;
   const occurrenceTrue = classified === 0 ? 0 : counts.trueCount / classified;
   const occurrenceFalse = classified === 0 ? 0 : counts.falseCount / classified;
   const scoresByRemaining = {} as Record<
     SurvivalRemainingMinutes,
     { true: SurvivalScore; false: SurvivalScore }
   >;
+  // Calibration score numerator: total nats saved across every counted
+  // (remaining, half, distance) cell, vs the *global* unconditional
+  // baseline at the same bucket. Denominator is `snapshotsTotal`
+  // (including skipped) — skipped snapshots contribute zero, so a
+  // high-skip filter pays a coverage cost in the headline score even
+  // when its calibration-on-kept is excellent. Per-rem contributions
+  // are tracked separately so the dashboard can show each rem's share
+  // of the headline score.
+  let totalNatsSavedVsGlobal = 0;
+  const natsSavedByRemaining = {} as Record<SurvivalRemainingMinutes, number>;
   for (const remaining of REMAINING_VALUES) {
-    const baselineBuckets = baseline.byRemaining[remaining];
+    // Filter-conditioned baseline: for this filter only, the reference
+    // is the union of its kept halves at each bucket. Snapshots the
+    // filter `skip`ped never enter this reference, so the per-cell
+    // score answers "which side of the split is more informative?"
+    // rather than "is this filter better than not filtering?" — the
+    // latter was biased by skip-selection (a high-skip filter could be
+    // punished simply for selecting a hard subset of snapshots, even
+    // when its split was genuinely informative within that subset).
+    const conditionedBaseline = sumSurvivalBuckets({
+      a: whenTrue.byRemaining[remaining],
+      b: whenFalse.byRemaining[remaining],
+    });
     scoresByRemaining[remaining] = {
       true: scoreHalfVsBaseline({
         halfBuckets: whenTrue.byRemaining[remaining],
-        baselineBuckets,
+        otherHalfBuckets: whenFalse.byRemaining[remaining],
+        baselineBuckets: conditionedBaseline,
       }),
       false: scoreHalfVsBaseline({
         halfBuckets: whenFalse.byRemaining[remaining],
-        baselineBuckets,
+        otherHalfBuckets: whenTrue.byRemaining[remaining],
+        baselineBuckets: conditionedBaseline,
       }),
     };
+    // Per-half nats saved vs the global baseline at the same bucket.
+    // We sum here rather than reuse `scoreHalfVsBaseline` because
+    // there we score against the conditioned baseline (different
+    // semantics); the calibration headline needs the unconditional
+    // reference.
+    const remTrueNats = natsSavedVsGlobal({
+      halfBuckets: whenTrue.byRemaining[remaining],
+      globalBuckets: baseline.byRemaining[remaining],
+    });
+    const remFalseNats = natsSavedVsGlobal({
+      halfBuckets: whenFalse.byRemaining[remaining],
+      globalBuckets: baseline.byRemaining[remaining],
+    });
+    natsSavedByRemaining[remaining] = remTrueNats + remFalseNats;
+    totalNatsSavedVsGlobal += natsSavedByRemaining[remaining];
+  }
+  const calibrationScore =
+    snapshotsTotal === 0 ? 0 : totalNatsSavedVsGlobal / snapshotsTotal;
+  const calibrationScoreByRemaining = {} as Record<
+    SurvivalRemainingMinutes,
+    number
+  >;
+  for (const remaining of REMAINING_VALUES) {
+    calibrationScoreByRemaining[remaining] =
+      snapshotsTotal === 0 ? 0 : natsSavedByRemaining[remaining] / snapshotsTotal;
   }
   return {
-    snapshotsTotal: classified + counts.skipCount,
+    snapshotsTotal,
     snapshotsTrue: counts.trueCount,
     snapshotsFalse: counts.falseCount,
     snapshotsSkipped: counts.skipCount,
     occurrenceTrue,
     occurrenceFalse,
+    calibrationScore,
+    calibrationScoreByRemaining,
     scoresByRemaining,
   };
+}
+
+/**
+ * Sums per-bucket information gain (nats saved) for one half against
+ * the global baseline at the same bucket. Skips below-floor buckets
+ * — we don't trust those rates enough to count their predictions.
+ */
+function natsSavedVsGlobal({
+  halfBuckets,
+  globalBuckets,
+}: {
+  readonly halfBuckets: readonly SurvivalBucket[];
+  readonly globalBuckets: readonly SurvivalBucket[];
+}): number {
+  const globalByDistance = new Map<number, SurvivalBucket>();
+  for (const b of globalBuckets) globalByDistance.set(b.distanceBp, b);
+  let total = 0;
+  for (const half of halfBuckets) {
+    if (half.total < SUMMARY_MIN_SAMPLES) continue;
+    const global = globalByDistance.get(half.distanceBp);
+    if (global === undefined || global.total < SUMMARY_MIN_SAMPLES) continue;
+    const halfP = clampProb(half.survived / half.total);
+    const globalP = clampProb(global.survived / global.total);
+    const survived = half.survived;
+    const failed = half.total - half.survived;
+    const halfLogLoss = -survived * Math.log(halfP) - failed * Math.log(1 - halfP);
+    const globalLogLoss =
+      -survived * Math.log(globalP) - failed * Math.log(1 - globalP);
+    total += globalLogLoss - halfLogLoss;
+  }
+  return total;
+}
+
+function sumSurvivalBuckets({
+  a,
+  b,
+}: {
+  readonly a: readonly SurvivalBucket[];
+  readonly b: readonly SurvivalBucket[];
+}): readonly SurvivalBucket[] {
+  const merged = new Map<number, { total: number; survived: number }>();
+  for (const bucket of a) {
+    merged.set(bucket.distanceBp, {
+      total: bucket.total,
+      survived: bucket.survived,
+    });
+  }
+  for (const bucket of b) {
+    const existing = merged.get(bucket.distanceBp);
+    if (existing === undefined) {
+      merged.set(bucket.distanceBp, {
+        total: bucket.total,
+        survived: bucket.survived,
+      });
+    } else {
+      existing.total += bucket.total;
+      existing.survived += bucket.survived;
+    }
+  }
+  return [...merged.entries()]
+    .sort(([x], [y]) => x - y)
+    .map(([distanceBp, { total, survived }]) => ({
+      distanceBp,
+      total,
+      survived,
+    }));
 }
 
 /**
@@ -316,12 +433,10 @@ function computeSummary({
  * as a densely-sampled near-line bucket — visually obvious wrong from
  * the delta-chart density-fill, where the long tail goes faint.
  *
- * Per-bucket weight = `min(halfCount, baselineCount)`. Baseline always
- * has at least as many samples as either half (baseline = trueHalf +
- * falseHalf), so this collapses to `halfCount` in practice; written as
- * the min so a future filter that doesn't preserve that invariant
- * (skip-heavy filters where baseline can be smaller in some bucket)
- * still computes correctly.
+ * Per-bucket weight = `halfCount` (the half being scored). Now that the
+ * baseline is the filter-conditioned reference (trueHalf + falseHalf
+ * summed), it always has more samples than either half by construction,
+ * so the weight is gated by the half itself.
  *
  * The score stays in roughly the same scale as the unweighted version
  * by normalizing through the mean: `score = weightedMeanDelta *
@@ -330,55 +445,137 @@ function computeSummary({
  * shrinks. Decorative max/min stay unweighted — they describe
  * single-bucket extremes, not aggregate signal.
  *
- * Buckets where either side is below `SUMMARY_MIN_SAMPLES` are skipped
- * entirely (zero weight, no coverage credit) — the floor still applies
- * before weighting.
+ * Floor rule: a bucket counts only when BOTH halves clear
+ * `SUMMARY_MIN_SAMPLES`. The conditioned baseline at this bucket is the
+ * sum of the two halves, so a noisy other-half would feed a noisy
+ * reference back into the comparison — we'd rather drop the bucket than
+ * score against a soft baseline. (The half being scored also has to
+ * clear the floor on its own, naturally.)
  */
+// Clamp probabilities away from {0, 1} so log-loss stays finite when a
+// bucket happens to be unanimous. 1e-9 is well below any realistic
+// granularity our win-rates can resolve at.
+const PROB_EPSILON = 1e-9;
+
 function scoreHalfVsBaseline({
   halfBuckets,
+  otherHalfBuckets,
   baselineBuckets,
 }: {
   readonly halfBuckets: readonly SurvivalBucket[];
+  readonly otherHalfBuckets: readonly SurvivalBucket[];
   readonly baselineBuckets: readonly SurvivalBucket[];
 }): SurvivalScore {
   const baselineByDistance = new Map<number, SurvivalBucket>();
   for (const b of baselineBuckets) {
     baselineByDistance.set(b.distanceBp, b);
   }
-  let weightedDeltaSum = 0;
-  let weightSum = 0;
-  let coverageBp = 0;
+  const otherHalfByDistance = new Map<number, SurvivalBucket>();
+  for (const b of otherHalfBuckets) {
+    otherHalfByDistance.set(b.distanceBp, b);
+  }
+  // First pass: collect (deltaPp, weight, half-bucket logloss diff) per
+  // counted bucket. We need two passes because Sharpe wants the
+  // weighted variance, which is cheapest to compute given the mean.
+  type Counted = {
+    readonly deltaPp: number;
+    readonly weight: number;
+    readonly logLossSavedNats: number;
+  };
+  const counted: Counted[] = [];
   let maxDeltaPp: number | null = null;
   let minDeltaPp: number | null = null;
   for (const half of halfBuckets) {
     if (half.total < SUMMARY_MIN_SAMPLES) {
       continue;
     }
-    const base = baselineByDistance.get(half.distanceBp);
-    if (base === undefined || base.total < SUMMARY_MIN_SAMPLES) {
+    const otherHalf = otherHalfByDistance.get(half.distanceBp);
+    if (otherHalf === undefined || otherHalf.total < SUMMARY_MIN_SAMPLES) {
       continue;
     }
-    const halfWinRate = (half.survived / half.total) * 100;
-    const baseWinRate = (base.survived / base.total) * 100;
-    const deltaPp = halfWinRate - baseWinRate;
-    const weight = Math.min(half.total, base.total);
-    weightedDeltaSum += deltaPp * weight;
-    weightSum += weight;
-    coverageBp += 1;
+    const base = baselineByDistance.get(half.distanceBp);
+    if (base === undefined) {
+      continue;
+    }
+    const halfRate = half.survived / half.total;
+    const baseRate = base.survived / base.total;
+    const deltaPp = (halfRate - baseRate) * 100;
     if (maxDeltaPp === null || deltaPp > maxDeltaPp) {
       maxDeltaPp = deltaPp;
     }
     if (minDeltaPp === null || deltaPp < minDeltaPp) {
       minDeltaPp = deltaPp;
     }
+    // Per-snapshot log-loss for the half's predictions on the half's
+    // own outcomes, vs. the baseline's prediction on those same
+    // outcomes. Difference = nats per snapshot saved by conditioning.
+    const halfP = clampProb(halfRate);
+    const baseP = clampProb(baseRate);
+    const halfSurvived = half.survived;
+    const halfFailed = half.total - half.survived;
+    const halfLogLoss =
+      -halfSurvived * Math.log(halfP) - halfFailed * Math.log(1 - halfP);
+    const baseLogLoss =
+      -halfSurvived * Math.log(baseP) - halfFailed * Math.log(1 - baseP);
+    const logLossSavedNats = baseLogLoss - halfLogLoss; // bucket-total nats saved
+    counted.push({ deltaPp, weight: half.total, logLossSavedNats });
+  }
+  const coverageBp = counted.length;
+  if (coverageBp === 0) {
+    return {
+      score: 0,
+      coverageBp: 0,
+      meanDeltaPp: null,
+      maxDeltaPp: null,
+      minDeltaPp: null,
+      sharpe: null,
+      logLossImprovementNats: null,
+    };
+  }
+  let weightedDeltaSum = 0;
+  let weightSum = 0;
+  let totalLogLossSavedNats = 0;
+  let totalSnapshots = 0;
+  for (const { deltaPp, weight, logLossSavedNats } of counted) {
+    weightedDeltaSum += deltaPp * weight;
+    weightSum += weight;
+    totalLogLossSavedNats += logLossSavedNats;
+    totalSnapshots += weight;
   }
   const weightedMeanDelta = weightSum === 0 ? 0 : weightedDeltaSum / weightSum;
   const score = weightedMeanDelta * coverageBp;
+  // Weighted stdev of per-bucket deltas around the weighted mean.
+  // `null` when coverageBp < 2 (a single bucket has no spread).
+  let sharpe: number | null = null;
+  if (coverageBp >= 2 && weightSum > 0) {
+    let weightedSqDiffSum = 0;
+    for (const { deltaPp, weight } of counted) {
+      const diff = deltaPp - weightedMeanDelta;
+      weightedSqDiffSum += diff * diff * weight;
+    }
+    const variance = weightedSqDiffSum / weightSum;
+    const stdev = Math.sqrt(variance);
+    sharpe = stdev === 0 ? null : weightedMeanDelta / stdev;
+  }
+  const logLossImprovementNats =
+    totalSnapshots === 0 ? null : totalLogLossSavedNats / totalSnapshots;
   return {
     score,
     coverageBp,
-    meanDeltaPp: coverageBp === 0 ? null : weightedMeanDelta,
+    meanDeltaPp: weightedMeanDelta,
     maxDeltaPp,
     minDeltaPp,
+    sharpe,
+    logLossImprovementNats,
   };
+}
+
+function clampProb(p: number): number {
+  if (p < PROB_EPSILON) {
+    return PROB_EPSILON;
+  }
+  if (p > 1 - PROB_EPSILON) {
+    return 1 - PROB_EPSILON;
+  }
+  return p;
 }

@@ -121,6 +121,11 @@ type FilterSlice = {
     readonly snapshotsSkipped: number;
     readonly occurrenceTrue: number;
     readonly occurrenceFalse: number;
+    /** Headline filter quality — see `SurvivalFilterSummary.calibrationScore`. */
+    readonly calibrationScore: number;
+    readonly calibrationScoreByRemaining: Readonly<
+      Record<SurvivalRemainingMinutes, number>
+    >;
     readonly scoresByRemaining: Readonly<
       Record<
         SurvivalRemainingMinutes,
@@ -150,6 +155,8 @@ type ScoreSlice = {
   readonly meanDeltaPp: number | null;
   readonly maxDeltaPp: number | null;
   readonly minDeltaPp: number | null;
+  readonly sharpe: number | null;
+  readonly logLossImprovementNats: number | null;
 };
 
 type FilterSurfaceArrays = Readonly<
@@ -416,19 +423,17 @@ export function renderTrainingDistributionsHtml({
       border-color: var(--alea-border);
     }
     /* Two-row grid summary at every viewport: row 1 holds the
-       filter title and the expand/collapse chevron, row 2 holds
-       the score pills full-width. We deliberately don't try to
-       fit everything on one row at desktop — tablet widths produce
-       inconsistent layouts (chevron drops to row 2 only when the
-       title is too long), and the grid form reads cleanly at all
-       sizes: row 1 is "what is this filter and how do I open it",
-       row 2 is "what's its current performance". */
+       filter title, the calibration-score headline, and the
+       expand/collapse chevron; row 2 holds per-rem score pills
+       full-width. Row 1 is "what is this filter, how good is it
+       overall, how do I open it"; row 2 is "where exactly is
+       its edge". */
     details.filter-section > summary {
       list-style: none;
       cursor: pointer;
       padding: 16px 20px;
       display: grid;
-      grid-template-columns: 1fr auto;
+      grid-template-columns: 1fr auto auto;
       grid-template-rows: auto auto;
       column-gap: 18px;
       row-gap: 12px;
@@ -451,8 +456,35 @@ export function renderTrainingDistributionsHtml({
       margin: 0;
       min-width: 0;
     }
-    details.filter-section > summary > .filter-summary-chevron {
+    details.filter-section > summary > .filter-summary-calibration {
       grid-column: 2;
+      grid-row: 1;
+      display: flex;
+      flex-direction: column;
+      align-items: flex-end;
+      gap: 2px;
+      font-variant-numeric: tabular-nums;
+      min-width: 96px;
+    }
+    .filter-summary-calibration .calibration-value {
+      font-family: var(--alea-font-display);
+      font-size: 18px;
+      font-weight: 600;
+      letter-spacing: 0.02em;
+      line-height: 1;
+      color: var(--alea-gold);
+    }
+    .filter-summary-calibration .calibration-value-faint {
+      color: var(--alea-text-muted);
+    }
+    .filter-summary-calibration .calibration-label {
+      font-size: 9px;
+      letter-spacing: 0.16em;
+      text-transform: uppercase;
+      color: var(--alea-text-subtle);
+    }
+    details.filter-section > summary > .filter-summary-chevron {
+      grid-column: 3;
       grid-row: 1;
       color: var(--alea-text-subtle);
       font-size: 11px;
@@ -464,76 +496,56 @@ export function renderTrainingDistributionsHtml({
     details.filter-section[open] > summary > .filter-summary-chevron {
       color: var(--alea-gold);
     }
-    /* When the section is open the in-section tab strip is the
-       canonical source for per-rem scores; the collapsed-header
-       summary pills would just duplicate it, so hide them. Also
-       tighten the summary's bottom padding so the description
-       sits closer to the title. */
-    details.filter-section[open] > summary > .filter-summary-scores {
-      display: none;
-    }
-    details.filter-section[open] > summary {
-      padding-bottom: 6px;
-    }
-    /* Score pills span the full width on their own row. Pills are
-       fixed 140px so columns line up across filter sections. The
-       gap is generous (14px) so adjacent pills don't visually
-       collide; inside each pill the rem-to-value gap is tighter
-       (8px) so the rem and its scores read as one unit. */
+    /* Per-rem score pills span the full width on their own row.
+       They render in BOTH collapsed and expanded states (no display
+       toggle on open) so the header layout doesn't jump as the user
+       expands or collapses sections — the calibration badge stays
+       in the same horizontal position regardless of state. */
     details.filter-section > summary > .filter-summary-scores {
       grid-column: 1 / -1;
       grid-row: 2;
       display: flex;
-      gap: 14px;
+      gap: 10px;
       flex-wrap: wrap;
       align-items: center;
       justify-content: flex-start;
     }
-    /* Score pills shown in the collapsed header — non-interactive
-       summary of the per-config scores. Fixed-width so pills line up
-       across rows of different filters. Inside each pill, the rem
-       label sits in a fixed slot followed by the +/- score pair with
-       a wider gap; the +/- pair itself sits tight against each other. */
+    /* Score pill: rem label + that rem's contribution to the headline
+       calibration score in % terms. Fixed minimum width so pills line
+       up across rows of different filters. */
     .filter-summary-score {
       display: inline-flex;
-      align-items: center;
+      align-items: baseline;
       gap: 8px;
-      padding: 4px 10px;
+      padding: 5px 11px;
       border-radius: 6px;
       background: rgba(0, 0, 0, 0.25);
       border: 1px solid var(--alea-border-faint);
       font-family: var(--alea-font-sans);
-      font-size: 11px;
-      letter-spacing: 0.1em;
-      text-transform: uppercase;
       font-variant-numeric: tabular-nums;
       color: var(--alea-text-subtle);
-      min-width: 140px;
+      min-width: 96px;
       box-sizing: border-box;
     }
     .filter-summary-score .score-rem {
-      color: var(--alea-text-muted);
+      font-size: 10px;
+      letter-spacing: 0.16em;
+      text-transform: uppercase;
+      color: var(--alea-text-subtle);
       flex-shrink: 0;
     }
     .filter-summary-score .score-value {
-      letter-spacing: 0.04em;
-      text-transform: none;
-      font-size: 12px;
-      display: inline-flex;
-      align-items: center;
-      gap: 4px;
+      font-size: 13px;
+      font-weight: 500;
+      color: var(--alea-text);
       margin-left: auto;
     }
-    .filter-summary-score .score-value-good {
-      color: var(--alea-green);
+    .filter-summary-score .score-value-strong {
+      color: var(--alea-gold);
       font-weight: 600;
     }
-    .filter-summary-score .score-value-bad {
-      color: var(--alea-red);
-      font-weight: 600;
-    }
-    .filter-summary-score .score-value-sep {
-      display: none;
+    .filter-summary-score .score-value-faint {
+      color: var(--alea-text-muted);
     }
     .filter-summary-score .filter-tab-dot {
       display: inline-block;
@@ -548,6 +560,83 @@ export function renderTrainingDistributionsHtml({
       display: flex;
       flex-direction: column;
       gap: 14px;
+    }
+
+    /* Per-cell metrics — diagnostic breakdown for the currently-
+       selected (remaining) tab. Two side-by-side cards, one per half,
+       each with the half label as a heading and the metrics laid out
+       in an aligned label/value grid below. Cards stack on narrow
+       viewports. Updates in place when the user clicks a different
+       remaining-minutes tab. */
+    .filter-cell-metrics {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+      font-family: var(--alea-font-sans);
+      font-variant-numeric: tabular-nums;
+    }
+    .filter-cell-metrics .cell-half {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      padding: 10px 14px;
+      border-radius: 8px;
+      background: rgba(0, 0, 0, 0.22);
+      border: 1px solid var(--alea-border-faint);
+    }
+    .filter-cell-metrics .cell-half-header {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 12px;
+      padding-bottom: 6px;
+      border-bottom: 1px solid var(--alea-border-faint);
+    }
+    .filter-cell-metrics .cell-half-name {
+      font-size: 11px;
+      letter-spacing: 0.16em;
+      text-transform: uppercase;
+      color: var(--alea-text);
+      font-weight: 500;
+    }
+    .filter-cell-metrics .cell-half-headline {
+      font-size: 13px;
+      font-weight: 600;
+      letter-spacing: 0.02em;
+    }
+    .filter-cell-metrics .cell-half-headline-good { color: var(--alea-green); }
+    .filter-cell-metrics .cell-half-headline-bad { color: var(--alea-red); }
+    .filter-cell-metrics .cell-half-headline-faint { color: var(--alea-text-muted); }
+    .filter-cell-metrics .cell-grid {
+      display: grid;
+      grid-template-columns: auto 1fr;
+      column-gap: 14px;
+      row-gap: 4px;
+      align-items: baseline;
+    }
+    .filter-cell-metrics .cell-grid-label {
+      font-size: 10px;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+      color: var(--alea-text-subtle);
+    }
+    .filter-cell-metrics .cell-grid-value {
+      font-size: 13px;
+      font-weight: 500;
+      color: var(--alea-text);
+      text-align: right;
+    }
+    .filter-cell-metrics .cell-grid-value-good { color: var(--alea-green); }
+    .filter-cell-metrics .cell-grid-value-bad { color: var(--alea-red); }
+    .filter-cell-metrics .cell-grid-value-faint { color: var(--alea-text-muted); }
+    .filter-cell-metrics .cell-half-empty {
+      font-size: 12px;
+      color: var(--alea-text-muted);
+      font-style: italic;
+      padding: 6px 0;
+    }
+    @media (max-width: 720px) {
+      .filter-cell-metrics { grid-template-columns: 1fr; }
     }
 
     /* Delta-from-baseline chart, stacked under each filter's main chart. */
@@ -981,62 +1070,122 @@ export function renderTrainingDistributionsHtml({
       return pct < 10 ? pct.toFixed(1) + "%" : Math.round(pct) + "%";
     }
 
-    // Returns the largest-magnitude positive score and the largest-
-    // magnitude negative score across BOTH halves of a tab. Binary
-    // filter halves are anti-correlated: at every comparable bucket
-    // one half's delta is positive and the other negative, so the
-    // summed scores almost always have opposite signs. Showing only
-    // one (the larger-magnitude one) hid half the story — we want
-    // both the do-trade and avoid-trade signal visible at once so
-    // neither side is implicitly painted as good or bad.
-    //
-    // Returns null when neither half has any comparable buckets;
-    // otherwise an object with positive and negative (either may be
-    // null on its own when both halves happened to land on the same
-    // sign — degenerate, but possible with sample-weighted scoring).
-    function pickTabBothScores(remainingEntry) {
-      const trueOk = remainingEntry.true.coverageBp > 0;
-      const falseOk = remainingEntry.false.coverageBp > 0;
-      if (!trueOk && !falseOk) return null;
-      const scores = [];
-      if (trueOk) scores.push(remainingEntry.true.score);
-      if (falseOk) scores.push(remainingEntry.false.score);
-      let positive = null;
-      let negative = null;
-      for (const s of scores) {
-        if (s > 0 && (positive === null || s > positive)) positive = s;
-        if (s < 0 && (negative === null || s < negative)) negative = s;
-      }
-      // Magnitude used by the tab sort + default-tab picker.
-      const magnitude = Math.max.apply(null, scores.map(Math.abs));
-      return { positive: positive, negative: negative, magnitude: magnitude };
-    }
-
-    function formatScoreNumber(value) {
-      if (value === null || value === undefined || !Number.isFinite(value)) return "—";
-      return Math.abs(Math.round(value)).toString();
-    }
-
-    function formatTabBadge(remainingEntry) {
-      const pair = pickTabBothScores(remainingEntry);
-      if (pair === null) return "";
-      const parts = [];
-      if (pair.positive !== null) {
-        parts.push(
-          '<span class="filter-tab-delta-good">+' +
-            formatScoreNumber(pair.positive) +
-            '</span>',
+    // Calibration score formatter. The raw value is "average nats
+    // saved per population-snapshot vs no-filter baseline." For the
+    // headline display we render it as a percentage of baseline
+    // log-loss (~ln 2 ≈ 0.693 nats for a binary outcome): a 0.005
+    // raw score → 0.7%. That gives the operator an immediately
+    // interpretable scale ("how much better than nothing"). The raw
+    // value is in the tooltip for sorting precision.
+    var BASELINE_LOG_LOSS_NATS = 0.6931471805599453;
+    function formatCalibrationBadge(score) {
+      if (score === null || score === undefined || !Number.isFinite(score)) {
+        return (
+          '<div class="filter-summary-calibration" title="No comparable buckets — filter scored zero by default.">' +
+            '<span class="calibration-value calibration-value-faint">—</span>' +
+            '<span class="calibration-label">score</span>' +
+          '</div>'
         );
       }
-      if (pair.negative !== null) {
-        parts.push(
-          '<span class="filter-tab-delta-bad">−' +
-            formatScoreNumber(pair.negative) +
-            '</span>',
+      const pct = (score / BASELINE_LOG_LOSS_NATS) * 100;
+      const valueClass = score < 0.0001 ? ' calibration-value-faint' : '';
+      const tooltip = (
+        'Calibration score: ' + score.toFixed(6) + ' nats per snapshot ' +
+        '(' + pct.toFixed(2) + '% of baseline log-loss). ' +
+        'Higher = better predictions than no filter at all.'
+      );
+      return (
+        '<div class="filter-summary-calibration" title="' + tooltip + '">' +
+          '<span class="calibration-value' + valueClass + '">' + pct.toFixed(2) + '%</span>' +
+          '<span class="calibration-label">vs no-filter</span>' +
+        '</div>'
+      );
+    }
+
+    // Per-(remaining, half) detail metrics. Two side-by-side cards,
+    // one per half. Each card has the half label as a heading with a
+    // signed-score headline (since the two halves are sign-opposed by
+    // construction at any given remaining), and an aligned label/value
+    // grid below for the diagnostic metrics.
+    function formatCellGridRow(label, value, klass) {
+      const valClass = 'cell-grid-value' + (klass ? ' ' + klass : '');
+      const valHtml = (value === null || value === undefined)
+        ? '<span class="cell-grid-value cell-grid-value-faint">—</span>'
+        : '<span class="' + valClass + '">' + value + '</span>';
+      return (
+        '<span class="cell-grid-label">' + label + '</span>' +
+        valHtml
+      );
+    }
+    function formatCellHalfCard(score, halfLabel) {
+      if (!score || score.coverageBp === 0) {
+        return (
+          '<div class="cell-half">' +
+            '<div class="cell-half-header">' +
+              '<span class="cell-half-name">' + halfLabel + '</span>' +
+              '<span class="cell-half-headline cell-half-headline-faint">—</span>' +
+            '</div>' +
+            '<div class="cell-half-empty">no comparable buckets</div>' +
+          '</div>'
         );
       }
-      if (parts.length === 0) return "";
-      return ' <span class="filter-tab-delta">' + parts.join(' ') + '</span>';
+      const headlineClass = score.score >= 0
+        ? 'cell-half-headline-good'
+        : 'cell-half-headline-bad';
+      const headlineSign = score.score >= 0 ? '+' : '−';
+      const headlineText = headlineSign + Math.abs(score.score).toFixed(1);
+      const meanFmt = score.meanDeltaPp === null
+        ? null
+        : (score.meanDeltaPp >= 0 ? '+' : '−') +
+          Math.abs(score.meanDeltaPp).toFixed(2) + ' pp';
+      const meanKlass = score.meanDeltaPp === null
+        ? null
+        : (score.meanDeltaPp >= 0 ? 'cell-grid-value-good' : 'cell-grid-value-bad');
+      const sharpeFmt = score.sharpe === null ? null : score.sharpe.toFixed(2);
+      const sharpeKlass = score.sharpe === null
+        ? null
+        : (score.sharpe >= 0 ? 'cell-grid-value-good' : 'cell-grid-value-bad');
+      const logLossFmt = score.logLossImprovementNats === null
+        ? null
+        : score.logLossImprovementNats.toFixed(5);
+      return (
+        '<div class="cell-half">' +
+          '<div class="cell-half-header">' +
+            '<span class="cell-half-name">' + halfLabel + '</span>' +
+            '<span class="cell-half-headline ' + headlineClass + '">' + headlineText + '</span>' +
+          '</div>' +
+          '<div class="cell-grid">' +
+            formatCellGridRow('mean Δ', meanFmt, meanKlass) +
+            formatCellGridRow('sharpe', sharpeFmt, sharpeKlass) +
+            formatCellGridRow('logLoss', logLossFmt) +
+            formatCellGridRow('coverage', score.coverageBp + ' bp') +
+          '</div>' +
+        '</div>'
+      );
+    }
+    function formatCellMetrics(args) {
+      const filter = args.filter;
+      const remaining = args.remaining;
+      const cell = filter.summary.scoresByRemaining[remaining];
+      if (!cell) return '';
+      return (
+        formatCellHalfCard(cell.true, filter.trueLabel) +
+        formatCellHalfCard(cell.false, filter.falseLabel)
+      );
+    }
+
+    // Tab badges show this rem's calibration contribution in % terms.
+    // Same metric as the per-rem header pills, so the operator can
+    // scan one consistent number. The clickable tabs also visually
+    // mirror the header pills.
+    function formatTabBadge(filterSummary, rem) {
+      const remScore = filterSummary.calibrationScoreByRemaining[rem];
+      if (remScore === null || remScore === undefined || !Number.isFinite(remScore)) {
+        return "";
+      }
+      const pct = (remScore / BASELINE_LOG_LOSS_NATS) * 100;
+      const klass = pct >= 0.10 ? 'filter-tab-delta-good' : '';
+      return ' <span class="filter-tab-delta ' + klass + '">' + pct.toFixed(2) + '%</span>';
     }
 
     function buildFilterChart({ host, filter, remaining }) {
@@ -1342,14 +1491,9 @@ export function renderTrainingDistributionsHtml({
       // the same column across filters at a glance. The strongest
       // signal still gets the default-selected highlight (via
       // filter.defaultRemaining), but the order itself stays put.
-      const tabsSorted = survivalRemainingOrder.slice().map((rem) => {
-        const pair = pickTabBothScores(summary.scoresByRemaining[rem]);
-        return { rem: rem, pair: pair };
-      });
-      const tabsHtml = tabsSorted.map((entry) => {
-        const rem = entry.rem;
+      const tabsHtml = survivalRemainingOrder.map((rem) => {
         const isActive = rem === filter.defaultRemaining;
-        const badge = formatTabBadge(summary.scoresByRemaining[rem]);
+        const badge = formatTabBadge(summary, rem);
         // Asset-wide "best signal" / "worst signal" hotspots get a
         // small dot before the label, so the operator can spot the top
         // do-trade and avoid-trade configs at a glance across every
@@ -1368,44 +1512,30 @@ export function renderTrainingDistributionsHtml({
           dot + rem + 'm left' + badge + '</button>'
         );
       }).join("");
-      // Per-config score pills shown in the collapsed header. Same
-      // 4m → 1m order as the tabs and chart legend so the operator
-      // can scan the same column across filters at a glance.
-      const summaryScoresHtml = tabsSorted.map((entry) => {
-        const rem = entry.rem;
-        const pair = entry.pair;
-        const valueParts = [];
-        if (pair !== null) {
-          if (pair.positive !== null) {
-            valueParts.push(
-              '<span class="score-value-good">+' +
-                formatScoreNumber(pair.positive) +
-                '</span>',
-            );
-          }
-          if (pair.negative !== null) {
-            valueParts.push(
-              '<span class="score-value-bad">−' +
-                formatScoreNumber(pair.negative) +
-                '</span>',
-            );
-          }
-        }
-        const valueHtml = valueParts.length > 0
-          ? valueParts.join('<span class="score-value-sep"> </span>')
-          : '<span class="score-value">—</span>';
-        let dot = "";
-        if (hotspots.best && hotspots.best.filterId === filter.id && hotspots.best.remaining === rem) {
-          dot += '<span class="filter-tab-dot filter-tab-dot-best" title="strongest do-trade signal for this asset"></span>';
-        }
-        if (hotspots.worst && hotspots.worst.filterId === filter.id && hotspots.worst.remaining === rem) {
-          dot += '<span class="filter-tab-dot filter-tab-dot-worst" title="strongest avoid-trade signal for this asset"></span>';
-        }
+      // Per-rem pills shown in the section header — each rem's
+      // contribution to the headline calibration score in % terms.
+      // Same 4m → 1m order as the tabs and chart legend. Visible in
+      // both collapsed and expanded states so the header layout
+      // doesn't shift when toggled.
+      const summaryScoresHtml = survivalRemainingOrder.map((rem) => {
+        const remScore = filter.summary.calibrationScoreByRemaining[rem];
+        const remPct = (typeof remScore === 'number' && Number.isFinite(remScore))
+          ? (remScore / BASELINE_LOG_LOSS_NATS) * 100
+          : null;
+        const isStrong = remPct !== null && remPct >= 0.10;
+        const isFaint = remPct === null || Math.abs(remPct) < 0.005;
+        const valueClass = isStrong
+          ? ' score-value-strong'
+          : (isFaint ? ' score-value-faint' : '');
+        const valueText = remPct === null ? '—' : remPct.toFixed(2) + '%';
+        const tooltip = remPct === null
+          ? 'No comparable buckets at this remaining.'
+          : (rem + 'm contributes ' + remPct.toFixed(3) +
+             '% of the headline calibration score.');
         return (
-          '<span class="filter-summary-score">' +
-            dot +
+          '<span class="filter-summary-score" title="' + tooltip + '">' +
             '<span class="score-rem">' + rem + 'm</span>' +
-            '<span class="score-value">' + valueHtml + '</span>' +
+            '<span class="score-value' + valueClass + '">' + valueText + '</span>' +
           '</span>'
         );
       }).join("");
@@ -1417,16 +1547,23 @@ export function renderTrainingDistributionsHtml({
       // render uPlot into a 0-size host.
       const openAttr = expanded ? ' open' : '';
       const chevronText = expanded ? 'collapse ▴' : 'expand ▾';
+      const calibrationHtml = formatCalibrationBadge(summary.calibrationScore);
+      const cellMetricsHtml = formatCellMetrics({
+        filter: filter,
+        remaining: filter.defaultRemaining,
+      });
       const sectionHtml =
         '<details class="filter-section" data-filter-id="' + filter.id + '"' + openAttr + '>' +
           '<summary>' +
             '<h2 class="filter-summary-title">' + filter.displayName + '</h2>' +
+            calibrationHtml +
             '<div class="filter-summary-scores">' + summaryScoresHtml + '</div>' +
             '<span class="filter-summary-chevron">' + chevronText + '</span>' +
           '</summary>' +
           '<div class="filter-section-body">' +
             '<p class="survival-helper">' + filter.description + '</p>' +
             '<div class="filter-tabs" role="tablist">' + tabsHtml + '</div>' +
+            '<div class="filter-cell-metrics" data-filter-id="' + filter.id + '">' + cellMetricsHtml + '</div>' +
             '<div class="alea-legend">' + legendHtml + '</div>' +
             '<div class="chart-frame">' +
               '<div class="chart-host filter-chart-host" data-filter-id="' + filter.id + '"></div>' +
@@ -1502,6 +1639,16 @@ export function renderTrainingDistributionsHtml({
         const tabRem = Number(tab.getAttribute('data-remaining'));
         tab.classList.toggle('active', tabRem === remaining);
       });
+      // Sync per-cell metrics row for the new selection.
+      const metricsHost = filterSectionsHost.querySelector(
+        '.filter-cell-metrics[data-filter-id="' + filterId + '"]',
+      );
+      if (metricsHost) {
+        metricsHost.innerHTML = formatCellMetrics({
+          filter: entry.filter,
+          remaining: remaining,
+        });
+      }
     }
 
     // Walks every (filter, remaining, half) score across the asset and
@@ -1530,21 +1677,6 @@ export function renderTrainingDistributionsHtml({
       return { best: best, worst: worst };
     }
 
-    // Strongest tradeable signal magnitude across this filter's tabs.
-    // Both signs are useful (positive = do-trade, negative = avoid-
-    // trade) so we rank by max |score|, not max positive only.
-    function filterBestScoreMagnitude(filter) {
-      let best = -Infinity;
-      const scores = filter.summary.scoresByRemaining;
-      for (const rem of survivalRemainingOrder) {
-        const s = scores[rem];
-        if (!s) continue;
-        const mag = Math.max(Math.abs(s.true.score), Math.abs(s.false.score));
-        if (mag > best) best = mag;
-      }
-      return Number.isFinite(best) ? best : -Infinity;
-    }
-
     function renderFilters(slice) {
       clearFilterSections();
       if (!filterSectionsHost) return;
@@ -1553,10 +1685,13 @@ export function renderTrainingDistributionsHtml({
         return;
       }
       const hotspots = findHotspots(slice.filters);
-      // Sort by strongest |score| so the asset's most informative
-      // edge is up top regardless of sign, and auto-expand that top
-      // filter so the user sees its chart on first paint.
-      const ranked = slice.filters.slice().sort((a, b) => filterBestScoreMagnitude(b) - filterBestScoreMagnitude(a));
+      // Sort by calibration score: average nats saved per population-
+      // snapshot vs the global (no-filter) baseline. Higher = more
+      // useful in production. Auto-expand the top filter so the user
+      // sees its chart on first paint.
+      const ranked = slice.filters.slice().sort((a, b) =>
+        b.summary.calibrationScore - a.summary.calibrationScore,
+      );
       ranked.forEach((filter, idx) => {
         renderFilterSection(filter, hotspots, idx === 0);
       });
@@ -1727,6 +1862,8 @@ function toFilterSlice({
       snapshotsSkipped: result.summary.snapshotsSkipped,
       occurrenceTrue: result.summary.occurrenceTrue,
       occurrenceFalse: result.summary.occurrenceFalse,
+      calibrationScore: result.summary.calibrationScore,
+      calibrationScoreByRemaining: result.summary.calibrationScoreByRemaining,
       scoresByRemaining: result.summary.scoresByRemaining,
     },
     defaultRemaining: pickDefaultRemaining({

@@ -1,9 +1,27 @@
+import { bullishBodyAlignmentFilter } from "@alea/lib/training/survivalFilters/bullishBodyAlignment/filter";
 import { distanceAtrWithEmaAlignedFilter } from "@alea/lib/training/survivalFilters/distanceAtrWithEmaAligned/filter";
 import { distanceFromLineAtrFilter } from "@alea/lib/training/survivalFilters/distanceFromLineAtr/filter";
+import { donchian50TopAlignmentFilter } from "@alea/lib/training/survivalFilters/donchian50TopAlignment/filter";
+import { ema20AboveEma50AlignmentFilter } from "@alea/lib/training/survivalFilters/ema20AboveEma50Alignment/filter";
+import { ema50SlopeAlignmentFilter } from "@alea/lib/training/survivalFilters/ema50SlopeAlignment/filter";
+import { ema205mAlignmentFilter } from "@alea/lib/training/survivalFilters/ema205mAlignment/filter";
 import { ema505mAlignmentFilter } from "@alea/lib/training/survivalFilters/ema505mAlignment/filter";
+import { europeanSessionFilter } from "@alea/lib/training/survivalFilters/europeanSession/filter";
+import { last3x5mMajorityAlignmentFilter } from "@alea/lib/training/survivalFilters/last3x5mMajorityAlignment/filter";
+import { last5x5mMajorityAlignmentFilter } from "@alea/lib/training/survivalFilters/last5x5mMajorityAlignment/filter";
+import { ma205mAlignmentFilter } from "@alea/lib/training/survivalFilters/ma205mAlignment/filter";
+import { ma505mAlignmentFilter } from "@alea/lib/training/survivalFilters/ma505mAlignment/filter";
+import { prev5mDirectionAlignmentFilter } from "@alea/lib/training/survivalFilters/prev5mDirectionAlignment/filter";
+import { rangeExpansionFilter } from "@alea/lib/training/survivalFilters/rangeExpansion/filter";
+import { rangeWithinAtrFilter } from "@alea/lib/training/survivalFilters/rangeWithinAtr/filter";
 import { recentBreakoutAlignedFilter } from "@alea/lib/training/survivalFilters/recentBreakoutAligned/filter";
 import { roc5StrongAlignedFilter } from "@alea/lib/training/survivalFilters/roc5StrongAligned/filter";
+import { roc20StrongAlignmentFilter } from "@alea/lib/training/survivalFilters/roc20StrongAlignment/filter";
+import { roc205mAlignmentFilter } from "@alea/lib/training/survivalFilters/roc205mAlignment/filter";
+import { rsi145mAlignmentFilter } from "@alea/lib/training/survivalFilters/rsi145mAlignment/filter";
 import { rsiExtremeAgainstSideFilter } from "@alea/lib/training/survivalFilters/rsiExtremeAgainstSide/filter";
+import { stochasticExtremeAgainstFilter } from "@alea/lib/training/survivalFilters/stochasticExtremeAgainst/filter";
+import { stretchedFromEma50AlignmentFilter } from "@alea/lib/training/survivalFilters/stretchedFromEma50Alignment/filter";
 import type { SurvivalFilter } from "@alea/lib/training/survivalFilters/types";
 import { utcHourUsSessionFilter } from "@alea/lib/training/survivalFilters/utcHourUsSession/filter";
 import { volCompressionFilter } from "@alea/lib/training/survivalFilters/volCompression/filter";
@@ -11,57 +29,28 @@ import { volumeHighAlignedFilter } from "@alea/lib/training/survivalFilters/volu
 import { weekendSessionFilter } from "@alea/lib/training/survivalFilters/weekendSession/filter";
 
 /**
- * Active filters the dashboard renders. Ten after round 5's
- * 19-filter A/B (2026-05): seven carryovers, three new round-5
- * winners, and the sacred EMA-50.
+ * Broadened registry: every filter we've ever shipped, registered for
+ * re-evaluation under the new conditioned-baseline scoring (which is
+ * not directly comparable to the old global-baseline scores that drove
+ * past prune decisions). Once we look at the new data and pick the
+ * keepers, this list can be trimmed back down to the dashboard's
+ * "active" set.
  *
- *   - distance_from_line_atr — runaway winner across all rounds
- *     (200-294); decisively-displaced snapshots are decisively
- *     committed.
- *   - roc_5_strong_aligned — round-4 winner (143-221). 25-min
- *     threshold-gated momentum.
- *   - distance_atr_with_ema_aligned — NEW in round 5 (130-200).
- *     The compound that finally worked: positional (≥0.5 ATR from
- *     line) AND directional (side aligned with EMA-50). Earlier
- *     compounds failed because the parents shared too much
- *     population; here the two mechanisms are genuinely
- *     orthogonal.
- *   - rsi_extreme_against_side — RSI-tail mean reversion (93-145).
- *   - vol_compression — round-1 carryover (98-129); quiet markets
- *     hold direction better.
- *   - volume_high_aligned — NEW in round 5 (85-117). Volume-
- *     confirmed continuation: high-vol bar in the side's direction
- *     means real flow agrees.
- *   - recent_breakout_aligned — NEW in round 5 (76-101). Fresh
- *     50-bar high/low within the last 5 bars + side aligned with
- *     that extreme. Different from the dropped donchian_extreme
- *     (proximity-in-space) — this is proximity-in-time.
- *   - weekend_session — round-3 carryover (66-88). Crypto weekend
- *     microstructure.
- *   - utc_hour_us_session — round-3 carryover (54-79). NYSE-hours
- *     bias.
- *   - ema_50_5m_alignment — sacred. Original baby; baseline trend
- *     signal in the lineup.
- *
- * Round-5 displacements:
- *   - stochastic_extreme_against (round-3 winner) — knocked out;
- *     avg 57 vs utc_hour_us_session's 67 across assets.
- *   - range_within_atr (round-4 winner) — knocked out as the
- *     weakest carryover; bar-level compression isn't strong
- *     enough versus the new compound + volume + breakout
- *     mechanisms.
- *
- * Round-5 dropouts (gone for good): volume_high_against_side
- * (weaker than the aligned variant), volume_low, distance_growing
- * + micro_velocity_aligned (within-window microstructure works but
- * not strongly enough — both ~44–73), range_contraction,
- * utc_hour_settlement (narrow band didn't add over US session),
- * utc_midnight (clear loser, 6–9 across assets).
- *
- * Older 5m-trend filters (last_3, last_5, ma_20, ma_50, ema_20)
- * remain on disk unregistered.
+ * Three groups, in order:
+ *   1. The ten currently-active dashboard filters (round-5 winners +
+ *      sacred EMA-50). Same order as before so the active list reads
+ *      the same.
+ *   2. Five filters whose code stayed on disk but were unregistered
+ *      after earlier rounds (`last_3` / `last_5` majority, `ma_20` /
+ *      `ma_50` / `ema_20` 5m alignment).
+ *   3. Thirteen filters fully deleted in earlier prune commits and
+ *      now restored from git history. `prev_5m_direction_alignment`
+ *      had to be adapted — the `context.prev5mDirection` field it
+ *      relied on was replaced by `context.prev5mBar`, so the filter
+ *      now derives direction from `prev5mBar.close >= prev5mBar.open`.
  */
 export const survivalFilters: readonly SurvivalFilter[] = [
+  // --- Active dashboard filters -------------------------------------
   ema505mAlignmentFilter,
   distanceFromLineAtrFilter,
   roc5StrongAlignedFilter,
@@ -72,4 +61,24 @@ export const survivalFilters: readonly SurvivalFilter[] = [
   recentBreakoutAlignedFilter,
   weekendSessionFilter,
   utcHourUsSessionFilter,
+  // --- Unregistered (5m-trend cousins of EMA-50) --------------------
+  ema205mAlignmentFilter,
+  ma205mAlignmentFilter,
+  ma505mAlignmentFilter,
+  last3x5mMajorityAlignmentFilter,
+  last5x5mMajorityAlignmentFilter,
+  // --- Restored from earlier prune commits --------------------------
+  bullishBodyAlignmentFilter,
+  donchian50TopAlignmentFilter,
+  ema20AboveEma50AlignmentFilter,
+  ema50SlopeAlignmentFilter,
+  europeanSessionFilter,
+  prev5mDirectionAlignmentFilter,
+  rangeExpansionFilter,
+  rangeWithinAtrFilter,
+  roc205mAlignmentFilter,
+  roc20StrongAlignmentFilter,
+  rsi145mAlignmentFilter,
+  stochasticExtremeAgainstFilter,
+  stretchedFromEma50AlignmentFilter,
 ];

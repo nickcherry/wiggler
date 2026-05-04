@@ -137,6 +137,8 @@ export type SurvivalScorePayload = {
   readonly meanDeltaPp: number | null;
   readonly maxDeltaPp: number | null;
   readonly minDeltaPp: number | null;
+  readonly sharpe: number | null;
+  readonly logLossImprovementNats: number | null;
 };
 
 export type SurvivalFilterSummaryPayload = {
@@ -147,10 +149,28 @@ export type SurvivalFilterSummaryPayload = {
   readonly occurrenceTrue: number;
   readonly occurrenceFalse: number;
   /**
-   * Per-`(remaining-minutes, half)` score against baseline. Positive =
-   * filter half outperforms baseline (do-trade signal); negative =
-   * filter half underperforms (avoid-trade signal); near-zero =
-   * indistinguishable from baseline.
+   * Headline filter-quality score: average information gain in nats
+   * per population-snapshot vs the global (no-filter) baseline. See
+   * `SurvivalFilterSummary.calibrationScore` for the full convention.
+   */
+  readonly calibrationScore: number;
+  /**
+   * Per-`remaining-minutes` breakdown of `calibrationScore`. Sums to
+   * `calibrationScore`. See `SurvivalFilterSummary` for details.
+   */
+  readonly calibrationScoreByRemaining: Readonly<
+    Record<SurvivalRemainingMinutes, number>
+  >;
+  /**
+   * Per-`(remaining-minutes, half)` score against the filter-conditioned
+   * baseline (kept-only union of `whenTrue` + `whenFalse`). Positive =
+   * this side of the split outperforms the conditioned baseline (the
+   * better-performing half within the filter's kept population);
+   * negative = the worse-performing half. By construction the two
+   * halves at a given `(remaining)` are sign-opposed.
+   *
+   * See `SurvivalScore` in `survivalFilters/types.ts` for the full
+   * convention and the rationale for using a conditioned baseline.
    */
   readonly scoresByRemaining: Readonly<
     Record<

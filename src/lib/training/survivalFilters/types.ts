@@ -122,41 +122,91 @@ export type SurvivalFilterResult = {
 };
 
 /**
- * Per-`(remaining-minutes, half)` score against the baseline. The score
- * is the **signed area between the half's win-rate line and the baseline
- * line**, integrated over distance:
+ * Per-`(remaining-minutes, half)` score against a **filter-conditioned
+ * baseline** (the union of `whenTrue` + `whenFalse` at each bucket — i.e.
+ * the unconditional survival rate restricted to snapshots this filter
+ * actually classified, excluding `skip`s). The score is the signed area
+ * between the half's win-rate line and that conditioned baseline,
+ * integrated over distance:
  *
- *     score = Σ over comparable bp buckets of (halfWinRate − baselineWinRate)
+ *     score = Σ over comparable bp buckets of (halfWinRate − conditionedBaselineWinRate)
  *
  * Units are pp·bp (percentage-points × basis-points), but we render it
  * as a dimensionless number — relative magnitude is what matters for
  * ranking.
  *
- * Convention: **positive = filter half beats baseline** (higher
- * survival probability than the unconditional curve). A filter that
- * improves confidence at most distances accumulates a big positive
- * area; one that's flat-vs-baseline averages near zero; one that
- * underperforms accumulates negative area. Both signs are tradeable —
- * positive scores are "do-trade" signals, negative are "avoid-trade".
+ * Convention: **positive = this side of the split is the better-
+ * performing half within this filter's kept population**. By
+ * construction the two halves' scores are sign-opposed at each bucket
+ * (the conditioned baseline is the count-weighted average of the
+ * halves), so what `score` answers is *which* side of the split to
+ * trust, with magnitude = how cleanly the split separates the two
+ * halves. Both signs are tradeable as long as we know which side we're
+ * on; in our YES-only ("price stays") setup we follow the positive
+ * side and let the negative side act as a shut-off signal via its
+ * effect on `P(stays)`.
  *
- * "Comparable" = a bp bucket where BOTH the half and the baseline clear
- * the sample-count floor at that distance. We never compare against a
- * missing reference point.
+ * Why a conditioned baseline rather than the global unconditional one:
+ * filters with high skip rates (e.g. "only fire when ROC is extreme")
+ * were getting punished on the global comparison even when their
+ * splits were genuinely informative — the snapshots they skip have
+ * systematically different win rates, biasing the global reference.
+ * The conditioned baseline strips that out: every filter is graded on
+ * how well it sorts the population it acts on, not how that
+ * population compares to the wider universe.
+ *
+ * "Comparable" = a bp bucket where BOTH halves clear the sample-count
+ * floor at that distance. We require both because the baseline at the
+ * bucket is built from both — a thin other-half feeds noise into the
+ * comparison reference and we'd rather drop the bucket than score
+ * against a soft baseline.
  */
 export type SurvivalScore = {
   readonly score: number;
   /** Number of bp buckets where the half-vs-baseline comparison was valid. */
   readonly coverageBp: number;
   /**
-   * Mean per-bucket delta = `score / coverageBp`. A rate that strips
-   * coverage out so two filters compare on edge magnitude alone.
-   * `null` when `coverageBp === 0`.
+   * Sample-weighted mean of the per-bucket pp deltas = `score /
+   * coverageBp`. A rate that strips coverage out so two filters compare
+   * on edge magnitude alone. `null` when `coverageBp === 0`.
    */
   readonly meanDeltaPp: number | null;
   /** Largest single-bucket positive delta. `null` when no comparable buckets. */
   readonly maxDeltaPp: number | null;
   /** Largest single-bucket negative delta (your "min punishment"). */
   readonly minDeltaPp: number | null;
+  /**
+   * Consistency of the per-bucket pp deltas: `meanDeltaPp /
+   * stdevDeltaPp`. Higher absolute value = the edge holds up across
+   * distances; near zero = the per-bucket deltas are noisy around the
+   * mean and the headline score is unreliable. Sign matches
+   * `meanDeltaPp`.
+   *
+   * Stdev is sample-weighted to match how the score itself is computed
+   * (so a sparse-tail bucket can't blow up variance any more than it
+   * blows up the mean). `null` when `coverageBp < 2` (a single bucket
+   * has no spread).
+   */
+  readonly sharpe: number | null;
+  /**
+   * Information gain in nats per snapshot from using the half's bucket
+   * win-rate as the predicted probability vs. using the conditioned
+   * baseline's bucket win-rate. Positive = the half's predictions
+   * carry more information than the baseline's; zero = no improvement;
+   * negative shouldn't happen for the better-performing half but can
+   * for the worse one (which is fine — its purpose is to signal we
+   * should not act on it, or to act in the opposite direction).
+   *
+   * Per-bucket info gain is summed across buckets weighted by the
+   * half's bucket count and divided by the half's total kept snapshots
+   * (across counted buckets), so the units are "average nats saved per
+   * snapshot." Typical magnitudes are small (`0.001` – `0.05`); render
+   * as percentage of baseline log-loss for readability.
+   *
+   * Probabilities are clamped away from {0, 1} by a tiny epsilon to
+   * keep `log(0)` out of the math. `null` when `coverageBp === 0`.
+   */
+  readonly logLossImprovementNats: number | null;
 };
 
 /**
@@ -176,10 +226,51 @@ export type SurvivalFilterSummary = {
   readonly occurrenceTrue: number;
   readonly occurrenceFalse: number;
   /**
-   * One score per `(remaining-minutes, half)` config. Renderer uses
-   * this to badge each tab, sort tabs by `|score|`, default to the
-   * largest-`|score|` tab, and mark the asset-wide best (most positive)
-   * + worst (most negative) configs across all filters.
+   * Headline filter-quality score: average information gain in nats
+   * per snapshot in the **whole population** (skipped snapshots
+   * contribute zero). Computed against the **global** survival
+   * baseline (i.e. "no filter at all"), summed across every counted
+   * `(remaining, half, distance)` cell, then divided by
+   * `snapshotsTotal`.
+   *
+   * Why this is the dashboard's primary sort key:
+   *   - Directly answers the production question "is using this
+   *     filter better than using nothing?"
+   *   - Auto-trades off coverage vs precision: a high-edge rare-fire
+   *     filter (small numerator, big edge) and a small-edge always-
+   *     fire filter (big numerator, small edge) get compared on the
+   *     same axis.
+   *   - Higher-fidelity-but-noisier filters (smaller per-bucket
+   *     samples, e.g. heavily-conditioned compounds) get penalized
+   *     automatically because their bucket-level rates predict their
+   *     own outcomes worse than the parent's smoother rates would.
+   *
+   * Reference: baseline log-loss for ~50/50 binary outcomes is
+   * ≈ 0.69 nats. So 0.005 ≈ 0.7% improvement over no-filter; 0.01 ≈
+   * 1.4%; 0.05 ≈ 7%. Most filters land in the 0.0001–0.005 range; a
+   * filter scoring above 0.005 is a serious candidate for live use.
+   *
+   * `0` for filters where every cell was below the sample floor.
+   */
+  readonly calibrationScore: number;
+  /**
+   * Per-`remaining-minutes` breakdown of `calibrationScore`: each
+   * entry is the nats saved across that remaining's two halves vs the
+   * global baseline, divided by the same `snapshotsTotal` used in the
+   * headline. The four entries sum exactly to `calibrationScore`, so
+   * the dashboard can render per-rem contribution badges that are
+   * directly comparable on the same scale as the headline.
+   */
+  readonly calibrationScoreByRemaining: Readonly<
+    Record<SurvivalRemainingMinutes, number>
+  >;
+  /**
+   * One score per `(remaining-minutes, half)` config. The detail view
+   * renders these with all per-cell metrics — `meanDeltaPp`, `sharpe`,
+   * `logLossImprovementNats` (vs the conditioned baseline), etc. —
+   * for diagnosing *why* a filter scored the way it did at the
+   * top-level `calibrationScore`. By construction the two halves at
+   * a given remaining are sign-opposed.
    */
   readonly scoresByRemaining: Readonly<
     Record<
