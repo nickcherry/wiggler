@@ -540,12 +540,13 @@ export function renderTrainingDistributionsHtml({
       color: var(--alea-text);
       margin-left: auto;
     }
-    .filter-summary-score .score-value-strong {
-      color: var(--alea-gold);
+    .filter-summary-score .score-value-good {
+      color: var(--alea-green);
       font-weight: 600;
     }
-    .filter-summary-score .score-value-faint {
-      color: var(--alea-text-muted);
+    .filter-summary-score .score-value-bad {
+      color: var(--alea-red);
+      font-weight: 600;
     }
     .filter-summary-score .filter-tab-dot {
       display: inline-block;
@@ -1175,16 +1176,18 @@ export function renderTrainingDistributionsHtml({
     }
 
     // Tab badges show this rem's calibration contribution in % terms.
-    // Same metric as the per-rem header pills, so the operator can
-    // scan one consistent number. The clickable tabs also visually
-    // mirror the header pills.
+    // Same metric and same sign-based color as the per-rem header
+    // pills, so the operator can scan one consistent number across
+    // both surfaces.
     function formatTabBadge(filterSummary, rem) {
       const remScore = filterSummary.calibrationScoreByRemaining[rem];
       if (remScore === null || remScore === undefined || !Number.isFinite(remScore)) {
         return "";
       }
       const pct = (remScore / BASELINE_LOG_LOSS_NATS) * 100;
-      const klass = pct >= 0.10 ? 'filter-tab-delta-good' : '';
+      const klass = pct === 0
+        ? ''
+        : (pct > 0 ? 'filter-tab-delta-good' : 'filter-tab-delta-bad');
       return ' <span class="filter-tab-delta ' + klass + '">' + pct.toFixed(2) + '%</span>';
     }
 
@@ -1522,11 +1525,15 @@ export function renderTrainingDistributionsHtml({
         const remPct = (typeof remScore === 'number' && Number.isFinite(remScore))
           ? (remScore / BASELINE_LOG_LOSS_NATS) * 100
           : null;
-        const isStrong = remPct !== null && remPct >= 0.10;
-        const isFaint = remPct === null || Math.abs(remPct) < 0.005;
-        const valueClass = isStrong
-          ? ' score-value-strong'
-          : (isFaint ? ' score-value-faint' : '');
+        // Sign-based color: green for positive, red for negative.
+        // calibrationScoreByRemaining is non-negative by construction
+        // (per-bucket halfRate is the MLE on its own snapshots, so it
+        // can't underperform the global rate in expectation), but we
+        // honour the sign rule generically in case a future metric
+        // change exposes signed values here.
+        const valueClass = remPct === null || remPct === 0
+          ? ''
+          : (remPct > 0 ? ' score-value-good' : ' score-value-bad');
         const valueText = remPct === null ? '—' : remPct.toFixed(2) + '%';
         const tooltip = remPct === null
           ? 'No comparable buckets at this remaining.'
