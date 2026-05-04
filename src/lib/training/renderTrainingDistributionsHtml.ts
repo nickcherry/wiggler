@@ -496,11 +496,12 @@ export function renderTrainingDistributionsHtml({
     details.filter-section[open] > summary > .filter-summary-chevron {
       color: var(--alea-gold);
     }
-    /* Per-rem score pills span the full width on their own row.
-       They render in BOTH collapsed and expanded states (no display
-       toggle on open) so the header layout doesn't jump as the user
-       expands or collapses sections — the calibration badge stays
-       in the same horizontal position regardless of state. */
+    /* Per-rem score pills span the full width on their own row when
+       the section is collapsed. They're hidden when the section is
+       open because the in-section clickable tabs carry the same
+       per-rem calibration information (and the user can actually
+       *act* on tabs by clicking them). The calibration badge keeps
+       its column position in either state. */
     details.filter-section > summary > .filter-summary-scores {
       grid-column: 1 / -1;
       grid-row: 2;
@@ -509,6 +510,12 @@ export function renderTrainingDistributionsHtml({
       flex-wrap: wrap;
       align-items: center;
       justify-content: flex-start;
+    }
+    details.filter-section[open] > summary > .filter-summary-scores {
+      display: none;
+    }
+    details.filter-section[open] > summary {
+      padding-bottom: 10px;
     }
     /* Score pill: rem label + that rem's contribution to the headline
        calibration score in % terms. Fixed minimum width so pills line
