@@ -255,6 +255,43 @@ log-loss against ground truth is invariant to which population you draw
 the prediction from — it only cares whether the prediction is closer to
 the actual outcomes than the alternative prediction is.
 
+### Sweet-spot detection
+
+The headline `calibrationScore` averages information gain over the
+*entire* population. But filter edge is rarely uniform across distance
+buckets — typical shape is small near the line (price hasn't committed
+yet), peaks somewhere in the middle, falls off in the long tail. The
+**sweet spot** is the contiguous bp range that captures most of the
+filter's actual work, without including the dead zones at either end.
+
+Algorithm: for each bp bucket, compute the positive information gain
+(nats saved at that bucket vs the global baseline, summed across all
+`(remaining, half)` cells, with negatives clipped to 0). Then find the
+**narrowest contiguous `[startBp, endBp]`** whose summed gain reaches
+70% of the total. Returns `null` when the filter has no positive gain
+anywhere.
+
+The 70% threshold is tunable (`SWEET_SPOT_INFO_GAIN_THRESHOLD` in the
+compute layer). It's a policy parameter, not a magic value — see
+[the sweet-spot research note](./research/2026-05-04-sweet-spot.md)
+for the rationale and how 70% / 80% / 90% compare on real data.
+
+Each filter's summary then carries:
+
+- `sweetSpot.startBp` / `sweetSpot.endBp` — the inclusive bp range bounds.
+- `sweetSpot.calibrationScore` — calibration restricted to snapshots
+  inside that range. Same units as the headline (nats/snap ÷ baseline
+  log-loss); typically 1.2–1.7× the population score for our champion.
+- `sweetSpot.coverageFraction` — fraction of all population snapshots
+  that land inside the range. Tells you how much trade volume you'd
+  keep if you restricted acted-upon snapshots to the sweet spot.
+
+The dashboard renders the sweet spot two ways: a translucent gold
+overlay band on the per-filter "lift chart" (the small bottom chart
+showing `trueRate − globalRate` per bp) so the operator can see the
+range visually, and the three-number meta strip above it
+(`population X.XX% / sweet spot [a-b bp] Y.YY% / coverage Z%`).
+
 ### What we learned by running this
 
 A few observations from the first regen with the new methodology:

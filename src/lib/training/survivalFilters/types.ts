@@ -299,7 +299,7 @@ export type SurvivalFilterSummary = {
   /**
    * The contiguous bp range where the filter does most of its work.
    * Computed as the **narrowest** `[startBp, endBp]` that captures
-   * `SWEET_SPOT_INFO_GAIN_THRESHOLD` (default 80%) of the filter's
+   * `SWEET_SPOT_INFO_GAIN_THRESHOLD` (default 70%) of the filter's
    * total positive info gain — a "smallest stretch of distances that
    * contains most of the hill" rule.
    *

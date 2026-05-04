@@ -251,7 +251,7 @@ const MS_PER_1M = 60 * 1000;
  * any bump, so don't rev it for non-semantic refactors. Standalone export
  * so cache callers don't need to know the file's internals.
  */
-export const SNAPSHOT_PIPELINE_VERSION = 13;
+export const SNAPSHOT_PIPELINE_VERSION = 14;
 
 /**
  * Walks the 1m candle series, emitting one `SurvivalSnapshot` per usable

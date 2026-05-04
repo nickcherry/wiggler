@@ -40,3 +40,9 @@ contained — read it cold.
   numbers (calibration % vs no-filter, per asset) for every filter we've
   evaluated to date, plus the per-filter intuition behind each. The
   reference for "should I bother re-implementing X?".
+- [2026-05-04 — Sweet-spot detection](./2026-05-04-sweet-spot.md):
+  why we identify the contiguous bp range that captures most of a
+  filter's edge, the algorithm we use, the choice of 70% as the
+  info-gain capture threshold, and the trading-discipline
+  interpretation. Includes the threshold trade-off table for the
+  champion filter.

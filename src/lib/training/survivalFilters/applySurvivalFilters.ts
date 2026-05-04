@@ -372,13 +372,19 @@ function computeSummary({
 /**
  * Threshold for the sweet-spot algorithm: the smallest contiguous bp
  * range that captures this fraction of the filter's total positive
- * info gain becomes the sweet spot. 0.80 picks a range that contains
- * the bulk of the filter's signal without including the long sparse
- * tail; lower values (0.70) widen the range, higher (0.90) narrow it.
+ * info gain becomes the sweet spot. 0.70 picks a tighter range than
+ * the conventional Pareto-style 0.80 — i.e. "act only where the bulk
+ * of the edge actually lives, dropping the long flat shoulders." The
+ * trade-off: lower threshold = narrower range = sharper restricted-
+ * range calibration, but lower coverage (more snapshots fall outside
+ * the sweet spot and don't get traded on). For our champion
+ * `distance_from_line_atr`, 0.70 typically gives ≈50% coverage with
+ * meaningfully higher calibration than 0.80's ≈65%.
  *
- * Tunable; not a magic number anyone is meant to memorize.
+ * Tunable. See doc/research/2026-05-04-sweet-spot.md for the choice
+ * rationale and how the alternatives compare on real data.
  */
-const SWEET_SPOT_INFO_GAIN_THRESHOLD = 0.80;
+const SWEET_SPOT_INFO_GAIN_THRESHOLD = 0.70;
 
 /**
  * Sweet-spot detection. Aggregates per-bp positive info gain (vs
