@@ -1,14 +1,23 @@
 # Alea
 
-Probabilistic trader for Polymarket's 5-minute crypto up/down markets. We model the conditional distribution of where the underlying ends up by the close of each window, compare that to Polymarket's current odds, and only take the bet when our edge over the market is real.
+Probabilistic tooling for Polymarket's 5-minute crypto up/down markets.
+Alea studies live exchange feeds, trains settlement-side probability
+surfaces from historical candles, and runs the gated trader that only acts
+when the modeled edge clears the market.
 
 ## Docs
 
-1. [How To Work With Nick](./doc/HOW_TO_WORK_WITH_NICK.md)
-2. [Coding Conventions](./doc/CODING_CONVENTIONS.md)
-3. [CLI](./doc/CLI.md)
-4. [Latency Experiment](./doc/LATENCY_EXPERIMENT.md) — picking the leading-indicator feeds the model conditions on
-5. [Training Domain](./doc/TRAINING_DOMAIN.md) — exploring historic candles to find live-trading thresholds
-6. [Trading Domain](./doc/TRADING.md) — the live, money-touching trader (currently chunk 1: dry-run only)
-7. [Dashboards](./doc/DASHBOARDS.md) — design language shared across the HTML pages we drop into `tmp/`
-8. [Documentation](./doc/DOCUMENTATION.md)
+### Operator Workflows
+
+- [CLI](./doc/CLI.md) — command structure, examples, and side effects.
+- [Latency Experiment](./doc/LATENCY_EXPERIMENT.md) — finding the fastest useful leading-indicator feeds.
+- [Directional Agreement Experiment](./doc/RELIABILITY_EXPERIMENT.md) — checking whether candidate feeds land on the same 5-minute side as Polymarket.
+- [Training Domain](./doc/TRAINING_DOMAIN.md) — historical candle analysis and threshold discovery.
+- [Trading Domain](./doc/TRADING.md) — the live money-touching runner and failure modes.
+- [Dashboards](./doc/DASHBOARDS.md) — shared visual language for HTML reports in `tmp/`.
+
+### Engineering
+
+- [Coding Conventions](./doc/CODING_CONVENTIONS.md) — repo structure, TypeScript style, and testing expectations.
+- [Documentation](./doc/DOCUMENTATION.md) — how project docs should be written and maintained.
+- [How To Work With Nick](./doc/HOW_TO_WORK_WITH_NICK.md) — collaboration preferences.

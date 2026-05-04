@@ -5,6 +5,8 @@ import { dbMigrateCommand } from "@alea/bin/db/migrate";
 import { latencyCaptureCommand } from "@alea/bin/latency/capture";
 import { latencyChartCommand } from "@alea/bin/latency/chart";
 import { polymarketAuthCheckCommand } from "@alea/bin/polymarket/authCheck";
+import { reliabilityCaptureCommand } from "@alea/bin/reliability/capture";
+import { reliabilityChartCommand } from "@alea/bin/reliability/chart";
 import { telegramTestCommand } from "@alea/bin/telegram/test";
 import { tradingDryRunCommand } from "@alea/bin/trading/dryRun";
 import { tradingGenProbabilityTableCommand } from "@alea/bin/trading/genProbabilityTable";
@@ -22,6 +24,8 @@ const cli = createCli({
     candlesFillGapsCommand,
     latencyCaptureCommand,
     latencyChartCommand,
+    reliabilityCaptureCommand,
+    reliabilityChartCommand,
     trainingDistributionsCommand,
     telegramTestCommand,
     polymarketAuthCheckCommand,
