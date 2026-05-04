@@ -1,3 +1,8 @@
+import { MIN_ACTIONABLE_DISTANCE_BP } from "@alea/constants/trading";
+import {
+  SWEET_SPOT_INFO_GAIN_THRESHOLD,
+  SWEET_SPOT_MIN_SAMPLES,
+} from "@alea/lib/training/survivalFilters/computeSweetSpot";
 import type {
   AssetSizeDistribution,
   AssetSurvivalDistribution,
@@ -12,6 +17,16 @@ import {
   aleaChartTokens,
   aleaDesignSystemHead,
 } from "@alea/lib/ui/aleaDesignSystem";
+
+/**
+ * Filter id whose probability surface the live trader actually uses
+ * (see `computeAssetProbabilities.ts`). The dashboard surfaces this
+ * with a "LIVE" badge so the operator can tell at a glance which
+ * section corresponds to the production model versus the comparison
+ * filters. Hardcoded here rather than imported from the trading layer
+ * so the renderer doesn't take a runtime dependency on it.
+ */
+const LIVE_TRADING_FILTER_ID = "distance_from_line_atr";
 
 /**
  * Minimum snapshot count required for a `(remaining, distance)` survival
@@ -807,6 +822,329 @@ export function renderTrainingDistributionsHtml({
       .alea-subtitle { font-size: 11.5px; }
       .survival-helper { font-size: 12px; line-height: 1.45; }
     }
+
+    /* ------------------------------------------------------------------
+       Active-config strip: a single line below the page subtitle that
+       surfaces the named constants currently driving the analysis. Read-
+       only; updates on regen. The point is "here's the policy this
+       dashboard reflects" — so the operator never has to grep the source
+       to know which thresholds are in play. */
+    .alea-config-strip {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px 18px;
+      align-items: baseline;
+      margin-top: 6px;
+      padding: 8px 14px;
+      border-radius: 8px;
+      background: rgba(0, 0, 0, 0.22);
+      border: 1px solid var(--alea-border-faint);
+      font-family: var(--alea-font-sans);
+      font-size: 11px;
+      color: var(--alea-text-subtle);
+      letter-spacing: 0.06em;
+      font-variant-numeric: tabular-nums;
+    }
+    .alea-config-strip .config-item { display: inline-flex; align-items: baseline; gap: 6px; }
+    .alea-config-strip .config-key {
+      font-size: 9px;
+      letter-spacing: 0.16em;
+      text-transform: uppercase;
+      color: var(--alea-text-subtle);
+    }
+    .alea-config-strip .config-val {
+      color: var(--alea-text);
+      font-size: 12px;
+      font-weight: 500;
+      letter-spacing: 0.04em;
+    }
+
+    /* ------------------------------------------------------------------
+       Cross-asset summary: a compact table at the page top showing the
+       headline calibration % and sweet-spot range for every (filter,
+       asset) cell, so the operator can scan all 10 cells without tab-
+       switching between assets. Lives ABOVE the asset tabs. */
+    .cross-asset-summary {
+      margin-top: 14px;
+      padding: 12px 14px 10px;
+      border-radius: 10px;
+      background:
+        radial-gradient(circle at 92% 10%, rgba(215, 170, 69, 0.04), transparent 36%),
+        linear-gradient(180deg, rgba(15, 27, 18, 0.55), rgba(7, 9, 10, 0.4));
+      border: 1px solid var(--alea-border-muted);
+    }
+    .cross-asset-summary .ca-title-row {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 12px;
+      padding-bottom: 8px;
+      border-bottom: 1px solid var(--alea-border-faint);
+      margin-bottom: 10px;
+    }
+    .cross-asset-summary .ca-title {
+      font-family: var(--alea-font-display);
+      font-size: 13px;
+      letter-spacing: 0.18em;
+      text-transform: uppercase;
+      color: var(--alea-gold);
+    }
+    .cross-asset-summary .ca-hint {
+      font-size: 10px;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+      color: var(--alea-text-subtle);
+    }
+    .cross-asset-summary table {
+      width: 100%;
+      border-collapse: collapse;
+      font-variant-numeric: tabular-nums;
+    }
+    .cross-asset-summary th,
+    .cross-asset-summary td {
+      padding: 8px 10px;
+      text-align: right;
+      vertical-align: middle;
+      font-size: 12px;
+    }
+    .cross-asset-summary thead th {
+      font-size: 10px;
+      font-weight: 500;
+      letter-spacing: 0.16em;
+      text-transform: uppercase;
+      color: var(--alea-text-subtle);
+      border-bottom: 1px solid var(--alea-border-faint);
+    }
+    .cross-asset-summary thead th:first-child,
+    .cross-asset-summary tbody th {
+      text-align: left;
+    }
+    .cross-asset-summary tbody th {
+      font-weight: 500;
+      color: var(--alea-text);
+      letter-spacing: 0.04em;
+      font-family: var(--alea-font-sans);
+    }
+    .cross-asset-summary tbody tr.live-row {
+      background: rgba(215, 170, 69, 0.05);
+    }
+    .cross-asset-summary tbody tr.live-row td:last-child,
+    .cross-asset-summary tbody tr.live-row th { /* visual nudge for live row */ }
+    .cross-asset-summary .ca-cell-pop {
+      color: var(--alea-text);
+      font-weight: 500;
+      font-size: 13px;
+    }
+    .cross-asset-summary .ca-cell-pop-faint { color: var(--alea-text-muted); }
+    .cross-asset-summary .ca-cell-sweet {
+      color: var(--alea-gold);
+      font-size: 11px;
+      letter-spacing: 0.04em;
+      display: block;
+      margin-top: 2px;
+    }
+    .cross-asset-summary .ca-cell-sweet-empty {
+      color: var(--alea-text-subtle);
+      font-style: italic;
+    }
+    .cross-asset-summary .ca-filter-cell {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+    .cross-asset-summary .ca-live-tag {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      font-size: 9px;
+      letter-spacing: 0.16em;
+      text-transform: uppercase;
+      color: var(--alea-gold);
+      margin-top: 2px;
+    }
+    .cross-asset-summary .ca-live-tag::before {
+      content: "";
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: var(--alea-gold);
+      box-shadow: 0 0 4px rgba(215, 170, 69, 0.5);
+    }
+
+    /* ------------------------------------------------------------------
+       LIVE badge: small pill rendered next to the filter title for the
+       filter currently powering live trading. */
+    .filter-summary-live {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      margin-left: 10px;
+      padding: 3px 8px;
+      border-radius: 999px;
+      background: rgba(215, 170, 69, 0.10);
+      border: 1px solid rgba(215, 170, 69, 0.45);
+      font-size: 9px;
+      letter-spacing: 0.20em;
+      text-transform: uppercase;
+      color: var(--alea-gold);
+      font-family: var(--alea-font-sans);
+      vertical-align: middle;
+    }
+    .filter-summary-live::before {
+      content: "";
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: var(--alea-gold);
+      box-shadow: 0 0 4px rgba(215, 170, 69, 0.6);
+    }
+
+    /* ------------------------------------------------------------------
+       Dual headline pair: replaces the single calibration badge with a
+       side-by-side "pop / sweet [bp range]" so the operator sees both
+       the no-filter context number and the actionable restricted-range
+       number at the same level of visual prominence. */
+    details.filter-section > summary > .filter-summary-headlines {
+      grid-column: 2;
+      grid-row: 1;
+    }
+    .filter-summary-headlines {
+      display: flex;
+      align-items: stretch;
+      gap: 10px;
+      font-variant-numeric: tabular-nums;
+    }
+    .filter-summary-headline {
+      display: flex;
+      flex-direction: column;
+      align-items: flex-end;
+      gap: 2px;
+      min-width: 76px;
+    }
+    .filter-summary-headline .headline-value {
+      font-family: var(--alea-font-display);
+      font-size: 18px;
+      font-weight: 600;
+      line-height: 1;
+      letter-spacing: 0.02em;
+    }
+    .filter-summary-headline.pop .headline-value { color: var(--alea-text); }
+    .filter-summary-headline.sweet .headline-value { color: var(--alea-gold); }
+    .filter-summary-headline.faint .headline-value { color: var(--alea-text-muted); }
+    .filter-summary-headline .headline-label {
+      font-size: 9px;
+      letter-spacing: 0.16em;
+      text-transform: uppercase;
+      color: var(--alea-text-subtle);
+    }
+    .filter-summary-headline .headline-sub {
+      font-size: 10px;
+      color: var(--alea-text-muted);
+      letter-spacing: 0.04em;
+    }
+    .filter-summary-headlines .headline-divider {
+      width: 1px;
+      background: var(--alea-border-faint);
+    }
+
+    /* ------------------------------------------------------------------
+       Sub-720px tweaks already exist above. These extra-tight rules kick
+       in at phone widths where the multi-chart filter section starts to
+       waste vertical real estate. */
+    /* On mobile (and below) the filter section header uses 3 rows
+       instead of 2 so the title gets its own full-width line and the
+       headlines (pop / sweet) don't steal column space and force the
+       title to wrap word-by-word. Pills land on row 3 as before. */
+    @media (max-width: 720px) {
+      details.filter-section > summary {
+        grid-template-columns: 1fr auto;
+        grid-template-rows: auto auto auto;
+      }
+      details.filter-section > summary > .filter-summary-title {
+        grid-column: 1;
+        grid-row: 1;
+      }
+      details.filter-section > summary > .filter-summary-chevron {
+        grid-column: 2;
+        grid-row: 1;
+      }
+      details.filter-section > summary > .filter-summary-headlines {
+        grid-column: 1 / -1;
+        grid-row: 2;
+        justify-content: flex-start;
+      }
+      details.filter-section > summary > .filter-summary-headlines > .filter-summary-headline {
+        align-items: flex-start;
+      }
+      details.filter-section > summary > .filter-summary-scores {
+        grid-row: 3;
+      }
+    }
+
+    @media (max-width: 480px) {
+      .alea-title { font-size: 22px; line-height: 1.15; }
+      .alea-config-strip { gap: 4px 12px; padding: 6px 10px; font-size: 10px; }
+      .alea-config-strip .config-val { font-size: 11px; }
+
+      /* Cross-asset summary on small phones: the table itself stays
+         a normal grid but its container scrolls horizontally so all 5
+         asset columns can fit at readable size. We hide the
+         scrollbar chrome and add a subtle fade on the right edge as
+         a swipe affordance. */
+      .cross-asset-summary {
+        padding: 10px 0 8px;
+        margin-top: 10px;
+      }
+      .cross-asset-summary .ca-title-row {
+        flex-direction: column;
+        gap: 2px;
+        align-items: flex-start;
+        padding: 0 12px 6px;
+        margin-bottom: 6px;
+      }
+      .cross-asset-summary .ca-title { font-size: 11px; letter-spacing: 0.14em; }
+      .cross-asset-summary .ca-hint { font-size: 9px; letter-spacing: 0.10em; }
+      .cross-asset-summary .ca-table-wrap {
+        overflow-x: auto;
+        scrollbar-width: none;
+        -webkit-mask-image: linear-gradient(to right, black calc(100% - 24px), transparent);
+                mask-image: linear-gradient(to right, black calc(100% - 24px), transparent);
+        padding: 0 12px;
+      }
+      .cross-asset-summary .ca-table-wrap::-webkit-scrollbar { display: none; }
+      .cross-asset-summary table { min-width: 460px; }
+      .cross-asset-summary th, .cross-asset-summary td { padding: 6px 6px; font-size: 11px; white-space: nowrap; }
+      .cross-asset-summary tbody th { font-size: 11px; min-width: 110px; }
+      .cross-asset-summary .ca-cell-pop { font-size: 12px; }
+      .cross-asset-summary .ca-cell-sweet { font-size: 10px; }
+      .cross-asset-summary .ca-live-tag { font-size: 8px; letter-spacing: 0.12em; }
+
+      details.filter-section > summary { padding: 12px 12px; column-gap: 8px; }
+      details.filter-section > summary > .filter-summary-title { font-size: 14px; }
+      .filter-summary-headlines { gap: 8px; }
+      .filter-summary-headline { min-width: 0; }
+      .filter-summary-headline .headline-value { font-size: 15px; }
+      .filter-summary-live {
+        margin-left: 6px;
+        padding: 2px 6px;
+        font-size: 8px;
+        letter-spacing: 0.14em;
+      }
+      .filter-summary-live::before { width: 5px; height: 5px; }
+
+      .filter-section-body { padding: 0 12px 14px; gap: 10px; }
+      /* Charts get tighter on phones — reduce visual chrome and a touch
+         of vertical real estate, but keep tap targets and text legible. */
+      .chart-host { height: 240px; min-height: 240px; max-height: 240px; }
+      .filter-delta-host { height: 170px; min-height: 170px; max-height: 170px; }
+      .filter-lift-host { height: 130px; min-height: 130px; max-height: 130px; }
+      .filter-cell-metrics { gap: 8px; }
+      .filter-cell-metrics .cell-half { padding: 8px 10px; }
+      .filter-cell-metrics .cell-grid { column-gap: 10px; }
+      .filter-cell-metrics .cell-grid-value { font-size: 12px; }
+      .filter-lift-meta { font-size: 9px; gap: 8px; }
+      .filter-lift-meta .lift-value { font-size: 11px; }
+    }
   </style>
 </head>
 <body>
@@ -815,8 +1153,15 @@ export function renderTrainingDistributionsHtml({
       <div class="alea-brand-row">${aleaBrandMark()}</div>
       <h1 class="alea-title">Training · Point-of-No-Return</h1>
       <p class="alea-subtitle">${escapeHtml(seriesLabel)}<span class="sep">·</span>generated ${escapeHtml(generatedAt)}</p>
+      <div class="alea-config-strip" title="Constants in src/constants/trading.ts and computeSweetSpot.ts that drive scoring + sweet-spot detection. Changing any of these is a code change with reviewable diff.">
+        <span class="config-item"><span class="config-key">min distance</span><span class="config-val">${MIN_ACTIONABLE_DISTANCE_BP} bp</span></span>
+        <span class="config-item"><span class="config-key">sample floor</span><span class="config-val">${SWEET_SPOT_MIN_SAMPLES.toLocaleString()}</span></span>
+        <span class="config-item"><span class="config-key">sweet-spot threshold</span><span class="config-val">${(SWEET_SPOT_INFO_GAIN_THRESHOLD * 100).toFixed(0)}%</span></span>
+        <span class="config-item"><span class="config-key">live filter</span><span class="config-val">${escapeHtml(LIVE_TRADING_FILTER_ID)}</span></span>
+      </div>
     </header>
     <main class="alea-main">
+      ${renderCrossAssetSummary({ slices })}
       <nav class="alea-tabs" role="tablist" id="tabs">
         ${slices
           .map(
@@ -864,6 +1209,7 @@ export function renderTrainingDistributionsHtml({
     const survivalRemainingColors = ${JSON.stringify(SURVIVAL_REMAINING_COLORS)};
     const survivalMinSamples = ${SURVIVAL_MIN_SAMPLES};
     const survivalXAxisPadBp = ${SURVIVAL_X_AXIS_PAD_BP};
+    const liveTradingFilterId = ${JSON.stringify(LIVE_TRADING_FILTER_ID)};
 
     // Auto-fit the y-axis to actual data range, clamped to [0, 100] for
     // the % charts. The hard-coded [0, 100] was wasting most of the
@@ -1144,26 +1490,59 @@ export function renderTrainingDistributionsHtml({
     // interpretable scale ("how much better than nothing"). The raw
     // value is in the tooltip for sorting precision.
     var BASELINE_LOG_LOSS_NATS = 0.6931471805599453;
-    function formatCalibrationBadge(score) {
-      if (score === null || score === undefined || !Number.isFinite(score)) {
-        return (
-          '<div class="filter-summary-calibration" title="No comparable buckets — filter scored zero by default.">' +
-            '<span class="calibration-value calibration-value-faint">—</span>' +
-            '<span class="calibration-label">score</span>' +
-          '</div>'
+
+    // Headline pair: side-by-side "pop X% / sweet Y% [a-b bp]" so the
+    // operator sees the two key calibration numbers at the same level
+    // of visual prominence. The sweet-spot column carries the bp range
+    // as its sublabel since that's what live trading would gate on; the
+    // pop column carries the "vs no-filter" caption since pop is the
+    // population-wide average.
+    function formatHeadlinePair(summary) {
+      const popScore = summary.calibrationScore;
+      const popPct = (popScore === null || popScore === undefined ||
+        !Number.isFinite(popScore))
+        ? null
+        : (popScore / BASELINE_LOG_LOSS_NATS) * 100;
+      const popClass = (popPct === null || popPct < 0.05)
+        ? 'filter-summary-headline pop faint'
+        : 'filter-summary-headline pop';
+      const popValueText = popPct === null ? '—' : popPct.toFixed(2) + '%';
+      const popTooltip = popPct === null
+        ? 'No comparable buckets.'
+        : 'Population calibration: ' + popScore.toFixed(6) +
+          ' nats/snapshot vs no-filter (' + popPct.toFixed(2) + '% of baseline log-loss). Whole-data average.';
+
+      const ss = summary.sweetSpot;
+      let sweetCellHtml;
+      if (ss === null || ss === undefined) {
+        sweetCellHtml =
+          '<div class="filter-summary-headline sweet faint" title="No positive info gain — filter has no actionable bp range.">' +
+            '<span class="headline-value">—</span>' +
+            '<span class="headline-label">no sweet spot</span>' +
+          '</div>';
+      } else {
+        const sweetPct = (ss.calibrationScore / BASELINE_LOG_LOSS_NATS) * 100;
+        const sweetTooltip = (
+          'Sweet-spot calibration: ' + sweetPct.toFixed(2) +
+          '% on snapshots in [' + ss.startBp + '–' + ss.endBp + '] bp ' +
+          '(coverage = ' + (ss.coverageFraction * 100).toFixed(1) + '%). ' +
+          'This is the range the live trader acts on for this filter.'
         );
+        sweetCellHtml =
+          '<div class="filter-summary-headline sweet" title="' + sweetTooltip + '">' +
+            '<span class="headline-value">' + sweetPct.toFixed(2) + '%</span>' +
+            '<span class="headline-label">sweet [' + ss.startBp + '–' + ss.endBp + ' bp]</span>' +
+          '</div>';
       }
-      const pct = (score / BASELINE_LOG_LOSS_NATS) * 100;
-      const valueClass = score < 0.0001 ? ' calibration-value-faint' : '';
-      const tooltip = (
-        'Calibration score: ' + score.toFixed(6) + ' nats per snapshot ' +
-        '(' + pct.toFixed(2) + '% of baseline log-loss). ' +
-        'Higher = better predictions than no filter at all.'
-      );
+
       return (
-        '<div class="filter-summary-calibration" title="' + tooltip + '">' +
-          '<span class="calibration-value' + valueClass + '">' + pct.toFixed(2) + '%</span>' +
-          '<span class="calibration-label">vs no-filter</span>' +
+        '<div class="filter-summary-headlines">' +
+          '<div class="' + popClass + '" title="' + popTooltip + '">' +
+            '<span class="headline-value">' + popValueText + '</span>' +
+            '<span class="headline-label">pop</span>' +
+          '</div>' +
+          '<div class="headline-divider"></div>' +
+          sweetCellHtml +
         '</div>'
       );
     }
@@ -1850,7 +2229,10 @@ export function renderTrainingDistributionsHtml({
       // render uPlot into a 0-size host.
       const openAttr = expanded ? ' open' : '';
       const chevronText = expanded ? 'collapse ▴' : 'expand ▾';
-      const calibrationHtml = formatCalibrationBadge(summary.calibrationScore);
+      const headlinesHtml = formatHeadlinePair(summary);
+      const liveBadgeHtml = filter.id === liveTradingFilterId
+        ? '<span class="filter-summary-live" title="This is the filter the live trader currently uses (see computeAssetProbabilities.ts)">LIVE</span>'
+        : '';
       const cellMetricsHtml = formatCellMetrics({
         filter: filter,
         remaining: filter.defaultRemaining,
@@ -1859,8 +2241,8 @@ export function renderTrainingDistributionsHtml({
       const sectionHtml =
         '<details class="filter-section" data-filter-id="' + filter.id + '"' + openAttr + '>' +
           '<summary>' +
-            '<h2 class="filter-summary-title">' + filter.displayName + '</h2>' +
-            calibrationHtml +
+            '<h2 class="filter-summary-title">' + filter.displayName + liveBadgeHtml + '</h2>' +
+            headlinesHtml +
             '<div class="filter-summary-scores">' + summaryScoresHtml + '</div>' +
             '<span class="filter-summary-chevron">' + chevronText + '</span>' +
           '</summary>' +
@@ -2156,6 +2538,116 @@ export function renderTrainingDistributionsHtml({
 </body>
 </html>
 `;
+}
+
+/**
+ * Cross-asset summary table at the top of the page. Rows = filters,
+ * columns = assets. Each cell is a population calibration % stacked
+ * with the sweet-spot bp range, so the operator can scan all
+ * (filter, asset) cells without flipping between tabs. The row that
+ * powers live trading gets a subtle gold tint and a "LIVE" tag below
+ * the filter name.
+ *
+ * Rendered server-side because it's purely a derived view of the
+ * payload — keeps it out of the on-page JS slices and makes the
+ * static HTML carry its own first-paint summary.
+ */
+function renderCrossAssetSummary({
+  slices,
+}: {
+  readonly slices: readonly DashboardAssetSlice[];
+}): string {
+  if (slices.length === 0) {return "";}
+  // Collect filters by id from all slices in registry order. Filters
+  // that show up in any slice are columns; the inner map per filter
+  // is keyed by asset for the row.
+  const filterOrder: { id: string; displayName: string }[] = [];
+  const filterSeen = new Set<string>();
+  for (const slice of slices) {
+    for (const filter of slice.filters) {
+      if (filterSeen.has(filter.id)) {continue;}
+      filterSeen.add(filter.id);
+      filterOrder.push({ id: filter.id, displayName: filter.displayName });
+    }
+  }
+  if (filterOrder.length === 0) {return "";}
+
+  const baselineLogLossNats = 0.6931471805599453;
+  const headerCells = slices
+    .map((slice) => `<th>${escapeHtml(slice.assetUpper)}</th>`)
+    .join("");
+  const rows = filterOrder
+    .map((entry) => {
+      const isLive = entry.id === LIVE_TRADING_FILTER_ID;
+      const liveTag = isLive
+        ? `<span class="ca-live-tag">live trading</span>`
+        : "";
+      const cells = slices
+        .map((slice) => {
+          const filter = slice.filters.find((f) => f.id === entry.id);
+          if (filter === undefined) {
+            return `<td><span class="ca-cell-pop ca-cell-pop-faint">—</span></td>`;
+          }
+          const popPct =
+            (filter.summary.calibrationScore / baselineLogLossNats) * 100;
+          const popClass =
+            popPct < 0.05 ? "ca-cell-pop ca-cell-pop-faint" : "ca-cell-pop";
+          const sweetHtml = renderCrossAssetSweetCell({ filter });
+          return (
+            `<td>` +
+              `<span class="${popClass}">${popPct.toFixed(2)}%</span>` +
+              sweetHtml +
+            `</td>`
+          );
+        })
+        .join("");
+      return (
+        `<tr${isLive ? ' class="live-row"' : ""}>` +
+          `<th>` +
+            `<div class="ca-filter-cell">` +
+              `<span>${escapeHtml(entry.displayName)}</span>` +
+              liveTag +
+            `</div>` +
+          `</th>` +
+          cells +
+        `</tr>`
+      );
+    })
+    .join("");
+  const hint = `${filterOrder.length} filter${filterOrder.length === 1 ? "" : "s"} × ${slices.length} asset${slices.length === 1 ? "" : "s"} · pop = vs no-filter, sweet = restricted bp range`;
+  return (
+    `<section class="cross-asset-summary" aria-label="Cross-asset summary">` +
+      `<div class="ca-title-row">` +
+        `<span class="ca-title">At-a-glance</span>` +
+        `<span class="ca-hint">${escapeHtml(hint)}</span>` +
+      `</div>` +
+      `<div class="ca-table-wrap">` +
+        `<table>` +
+          `<thead><tr><th>Filter</th>${headerCells}</tr></thead>` +
+          `<tbody>${rows}</tbody>` +
+        `</table>` +
+      `</div>` +
+    `</section>`
+  );
+}
+
+/**
+ * Stacks the sweet-spot bp range under the cross-asset cell's pop %
+ * line. Honours the per-asset sweet-spot we surface on the filter
+ * slice via `summary.sweetSpot` (if available — pulled through from
+ * the trading-side schema mirror in `FilterSlice`).
+ */
+function renderCrossAssetSweetCell({
+  filter,
+}: {
+  readonly filter: FilterSlice;
+}): string {
+  const ss = (filter.summary as { sweetSpot?: { startBp: number; endBp: number } | null })
+    .sweetSpot;
+  if (ss === null || ss === undefined) {
+    return `<span class="ca-cell-sweet ca-cell-sweet-empty">no sweet spot</span>`;
+  }
+  return `<span class="ca-cell-sweet">[${ss.startBp}–${ss.endBp}] bp</span>`;
 }
 
 function toDashboardSlice({
