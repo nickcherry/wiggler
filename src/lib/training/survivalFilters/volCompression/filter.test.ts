@@ -24,6 +24,9 @@ function emptyContext(): SurvivalSnapshotContext {
     prev5mBar: null,
     prevPrev5mBar: null,
     bbStddev20x5m: null,
+    last10x5mDirections: null,
+    roc5Pct: null,
+    stoch14x5m: null,
   };
 }
 

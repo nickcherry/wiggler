@@ -156,6 +156,30 @@ export type SurvivalSnapshotContext = {
    * 20 prior closes are available.
    */
   readonly bbStddev20x5m: number | null;
+
+  /**
+   * Directions of the ten most recent COMPLETED 5m bars, oldest first.
+   * Used by majority-of-N-bars filters that look further back than
+   * `last5x5mDirections`. `null` when fewer than ten prior bars exist.
+   */
+  readonly last10x5mDirections: readonly SurvivalSide[] | null;
+
+  /**
+   * Rate of change over the last 5 completed 5m bars, in percent.
+   * Same shape as `roc20Pct` but a shorter lookback so we can compare
+   * short- vs long-momentum (acceleration). `null` until 5 prior
+   * closes are available.
+   */
+  readonly roc5Pct: number | null;
+
+  /**
+   * 14-period stochastic %K on 5m closes. Defined as
+   * `(close - lowestLow_14) / (highestHigh_14 - lowestLow_14) * 100`.
+   * Range 0–100. Different oscillator from RSI — measures position
+   * within recent range rather than gain/loss balance. `null` when
+   * fewer than 14 prior bars exist or the range is degenerate.
+   */
+  readonly stoch14x5m: number | null;
 };
 
 const SNAPSHOTS: readonly {
@@ -178,7 +202,7 @@ const MS_PER_1M = 60 * 1000;
  * any bump, so don't rev it for non-semantic refactors. Standalone export
  * so cache callers don't need to know the file's internals.
  */
-export const SNAPSHOT_PIPELINE_VERSION = 7;
+export const SNAPSHOT_PIPELINE_VERSION = 8;
 
 /**
  * Walks the 1m candle series, emitting one `SurvivalSnapshot` per usable
@@ -238,6 +262,11 @@ export function* computeSurvivalSnapshots({
     const prevPrev5mBar = ma20Index?.prevPrevBarAt({ windowStartMs }) ?? null;
     const bbStddev20x5m =
       ma20Index?.stddevAt({ windowStartMs, period: 20 }) ?? null;
+    const last10x5mDirections =
+      ma20Index?.lastNDirectionsAt({ windowStartMs, n: 10 }) ?? null;
+    const roc5Pct = ma20Index?.rocPctAt({ windowStartMs, period: 5 }) ?? null;
+    const stoch14x5m =
+      ma20Index?.stochKAt({ windowStartMs, period: 14 }) ?? null;
     // `idx` is currently only consumed by the dropped 1m lookbacks,
     // but the iterator still needs it for callers that may want it
     // back; keep it referenced so the type-checker doesn't complain
@@ -286,6 +315,9 @@ export function* computeSurvivalSnapshots({
           prev5mBar,
           prevPrev5mBar,
           bbStddev20x5m,
+          last10x5mDirections,
+          roc5Pct,
+          stoch14x5m,
         },
       };
     }
@@ -405,6 +437,18 @@ type FiveMinuteIndex = {
     readonly close: number;
   } | null;
   readonly stddevAt: (input: {
+    readonly windowStartMs: number;
+    readonly period: number;
+  }) => number | null;
+  readonly lastNDirectionsAt: (input: {
+    readonly windowStartMs: number;
+    readonly n: number;
+  }) => readonly SurvivalSide[] | null;
+  readonly rocPctAt: (input: {
+    readonly windowStartMs: number;
+    readonly period: number;
+  }) => number | null;
+  readonly stochKAt: (input: {
     readonly windowStartMs: number;
     readonly period: number;
   }) => number | null;
@@ -660,6 +704,48 @@ function build5mLookback({
         sqDiffSum += d * d;
       }
       return Math.sqrt(sqDiffSum / period);
+    },
+    lastNDirectionsAt: ({ windowStartMs, n }) => {
+      const lastIdx = indexAtOrBefore(windowStartMs);
+      return lastNDirections(lastIdx, n);
+    },
+    rocPctAt: ({ windowStartMs, period }) => {
+      const lastIdx = indexAtOrBefore(windowStartMs);
+      if (lastIdx < period) {
+        return null;
+      }
+      const now = closes[lastIdx];
+      const past = closes[lastIdx - period];
+      if (now === undefined || past === undefined || past === 0) {
+        return null;
+      }
+      return ((now - past) / past) * 100;
+    },
+    stochKAt: ({ windowStartMs, period }) => {
+      const lastIdx = indexAtOrBefore(windowStartMs);
+      if (lastIdx < period - 1) {
+        return null;
+      }
+      let hi = -Infinity;
+      let lo = Infinity;
+      for (let k = lastIdx - period + 1; k <= lastIdx; k += 1) {
+        const h = highs[k];
+        const l = lows[k];
+        if (h === undefined || l === undefined) {
+          return null;
+        }
+        if (h > hi) {
+          hi = h;
+        }
+        if (l < lo) {
+          lo = l;
+        }
+      }
+      const close = closes[lastIdx];
+      if (close === undefined || hi === lo) {
+        return null;
+      }
+      return ((close - lo) / (hi - lo)) * 100;
     },
     lastThreeDirectionsAt: ({ windowStartMs }) => {
       const lastIdx = indexAtOrBefore(windowStartMs);
