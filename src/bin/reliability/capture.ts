@@ -25,7 +25,7 @@ export const reliabilityCaptureCommand = defineCommand({
   name: "reliability:capture",
   summary: "Compare directional outcomes across exchange feeds",
   description:
-    "Opens multi-asset quote streams for Coinbase spot/perp, Binance spot/perp, and Polymarket Chainlink RTDS. It skips the partial startup window, captures full 5-minute windows, and records whether each source's own start-to-end direction agrees with Polymarket's baseline.",
+    "Opens multi-asset quote streams for Coinbase spot/perp, Binance spot/perp, and Polymarket Chainlink RTDS. It checks whether the faster exchange feeds we train and trade from virtually always finish each 5-minute window on the same side as Polymarket's Chainlink baseline.",
   options: [
     defineValueOption({
       key: "duration",

@@ -2,12 +2,32 @@
 
 ## Purpose
 
-`reliability:capture` measures whether the feeds we might trade from land on
-the same 5-minute direction as Polymarket's Chainlink-derived crypto price
-feed. This is not absolute price accuracy: Coinbase, Binance, spot, and perps
-can all carry different bases. The question is narrower and more useful for
-trading: if every source anchors to its own price at the start of the same
-Polymarket 5-minute window, does it end the window on the same side?
+`reliability:capture` is the sanity check that lets us use fast exchange feeds
+as practical proxies for Polymarket's Chainlink-settled 5-minute crypto
+markets.
+
+Training and live trading intentionally use Coinbase/Binance spot and perp
+prices instead of Polymarket's Chainlink stream:
+
+- Historical Chainlink Data Streams data is not available to us in the form we
+  need for broad local training without paid/enterprise access.
+- Coinbase/Binance spot and perp feeds are easier to capture historically and
+  arrive faster live.
+- That speed is the point: the exchange feeds may be small leading indicators
+  for the slower Chainlink-derived Polymarket settlement feed.
+
+The risk is proxy drift. If Binance/Coinbase often end a 5-minute window on the
+opposite side from Polymarket's Chainlink feed, then training on those feeds
+would teach the model the wrong settlement target and live trading would be
+measuring the wrong line. This experiment exists to detect that failure mode.
+
+This is not an absolute price-accuracy test. Coinbase, Binance, spot, and perps
+can all carry different bases. The required property is narrower: when each
+source anchors to its own price at the start of the same Polymarket 5-minute
+window, it should virtually always finish on the same directional side as
+Polymarket. "Close enough" means disagreements should be rare and should mostly
+cluster around near-zero Chainlink moves where boundary timestamp jitter can
+flip the sign.
 
 The dashboard calls this **directional agreement**.
 
@@ -36,6 +56,13 @@ For each asset/window/source:
 
 Ties favor `UP`, matching the existing trading code and Polymarket's current
 5-minute crypto market wording.
+
+The command deliberately uses live boundary ticks rather than OHLC candles.
+Polymarket's market wording is beginning-price vs ending-price over the titled
+time range, sourced from Chainlink Data Streams. For training, our historical
+pipeline approximates that with candle open/close values from the exchange
+series we can actually store and replay. This experiment checks whether that
+proxy is directionally reliable enough to keep using.
 
 ## Commands
 
@@ -76,7 +103,9 @@ process can run for hours without memory growing with exchange tick volume.
 
 An hour-long run is a smoke sample, not proof. The useful signal is whether
 disagreements cluster only around near-zero baseline moves or also appear on
-clear directional windows.
+clear directional windows. A clear-direction `DIFF` is the result that matters:
+it says the proxy feed would have trained or traded against the wrong
+settlement side for that window.
 
 ## Files
 

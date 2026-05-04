@@ -11,7 +11,7 @@ when the modeled edge clears the market.
 
 - [CLI](./doc/CLI.md) — command structure, examples, and side effects.
 - [Latency Experiment](./doc/LATENCY_EXPERIMENT.md) — finding the fastest useful leading-indicator feeds.
-- [Directional Agreement Experiment](./doc/RELIABILITY_EXPERIMENT.md) — checking whether candidate feeds land on the same 5-minute side as Polymarket.
+- [Directional Agreement Experiment](./doc/RELIABILITY_EXPERIMENT.md) — checking whether fast exchange-feed proxies are reliable enough for Polymarket-side training and live trading.
 - [Training Domain](./doc/TRAINING_DOMAIN.md) — historical candle analysis and threshold discovery.
 - [Trading Domain](./doc/TRADING.md) — the live money-touching runner and failure modes.
 - [Dashboards](./doc/DASHBOARDS.md) — shared visual language for HTML reports in `tmp/`.
