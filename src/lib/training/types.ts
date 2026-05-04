@@ -141,6 +141,13 @@ export type SurvivalScorePayload = {
   readonly logLossImprovementNats: number | null;
 };
 
+export type SurvivalSweetSpotPayload = {
+  readonly startBp: number;
+  readonly endBp: number;
+  readonly calibrationScore: number;
+  readonly coverageFraction: number;
+};
+
 export type SurvivalFilterSummaryPayload = {
   readonly snapshotsTotal: number;
   readonly snapshotsTrue: number;
@@ -161,6 +168,13 @@ export type SurvivalFilterSummaryPayload = {
   readonly calibrationScoreByRemaining: Readonly<
     Record<SurvivalRemainingMinutes, number>
   >;
+  /**
+   * The contiguous bp range where the filter does most of its work
+   * plus the restricted-range calibration on that population. See
+   * `SurvivalFilterSummary.sweetSpot` for the full convention. `null`
+   * for filters with no positive info gain anywhere.
+   */
+  readonly sweetSpot: SurvivalSweetSpotPayload | null;
   /**
    * Per-`(remaining-minutes, half)` score against the filter-conditioned
    * baseline (kept-only union of `whenTrue` + `whenFalse`). Positive =

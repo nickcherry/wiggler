@@ -349,6 +349,12 @@ function computeSummary({
         ? 0
         : natsSavedByRemaining[remaining] / snapshotsTotal;
   }
+  const sweetSpot = computeSweetSpot({
+    baseline,
+    whenTrue,
+    whenFalse,
+    snapshotsTotal,
+  });
   return {
     snapshotsTotal,
     snapshotsTrue: counts.trueCount,
@@ -358,7 +364,137 @@ function computeSummary({
     occurrenceFalse,
     calibrationScore,
     calibrationScoreByRemaining,
+    sweetSpot,
     scoresByRemaining,
+  };
+}
+
+/**
+ * Threshold for the sweet-spot algorithm: the smallest contiguous bp
+ * range that captures this fraction of the filter's total positive
+ * info gain becomes the sweet spot. 0.80 picks a range that contains
+ * the bulk of the filter's signal without including the long sparse
+ * tail; lower values (0.70) widen the range, higher (0.90) narrow it.
+ *
+ * Tunable; not a magic number anyone is meant to memorize.
+ */
+const SWEET_SPOT_INFO_GAIN_THRESHOLD = 0.80;
+
+/**
+ * Sweet-spot detection. Aggregates per-bp positive info gain (vs
+ * global baseline) across every counted `(remaining, half, distance)`
+ * cell, then picks the **narrowest contiguous bp range** that
+ * captures `SWEET_SPOT_INFO_GAIN_THRESHOLD` of the total. Returns
+ * `null` when the filter has no positive info gain anywhere.
+ *
+ * Same floor (`SUMMARY_MIN_SAMPLES`) as the score computation —
+ * sub-floor buckets contribute zero to the gain map and zero to the
+ * sweet-spot snapshot count.
+ */
+function computeSweetSpot({
+  baseline,
+  whenTrue,
+  whenFalse,
+  snapshotsTotal,
+}: {
+  readonly baseline: SurvivalSurface;
+  readonly whenTrue: SurvivalSurface;
+  readonly whenFalse: SurvivalSurface;
+  readonly snapshotsTotal: number;
+}): { startBp: number; endBp: number; calibrationScore: number; coverageFraction: number } | null {
+  const perBpGain = new Map<number, number>();
+  const perBpSnapshots = new Map<number, number>();
+  for (const remaining of REMAINING_VALUES) {
+    const globalByDistance = new Map<number, SurvivalBucket>();
+    for (const b of baseline.byRemaining[remaining]) {
+      globalByDistance.set(b.distanceBp, b);
+    }
+    for (const halfBuckets of [
+      whenTrue.byRemaining[remaining],
+      whenFalse.byRemaining[remaining],
+    ]) {
+      for (const half of halfBuckets) {
+        if (half.total < SUMMARY_MIN_SAMPLES) {continue;}
+        const global = globalByDistance.get(half.distanceBp);
+        if (global === undefined || global.total < SUMMARY_MIN_SAMPLES) {continue;}
+        const halfP = clampProb(half.survived / half.total);
+        const globalP = clampProb(global.survived / global.total);
+        const survived = half.survived;
+        const failed = half.total - half.survived;
+        const halfLogLoss =
+          -survived * Math.log(halfP) - failed * Math.log(1 - halfP);
+        const globalLogLoss =
+          -survived * Math.log(globalP) - failed * Math.log(1 - globalP);
+        const gain = Math.max(0, globalLogLoss - halfLogLoss);
+        perBpGain.set(
+          half.distanceBp,
+          (perBpGain.get(half.distanceBp) ?? 0) + gain,
+        );
+        perBpSnapshots.set(
+          half.distanceBp,
+          (perBpSnapshots.get(half.distanceBp) ?? 0) + half.total,
+        );
+      }
+    }
+  }
+  if (perBpGain.size === 0) {return null;}
+  let totalGain = 0;
+  for (const v of perBpGain.values()) {totalGain += v;}
+  if (totalGain <= 0) {return null;}
+  const bps = [...perBpGain.keys()].sort((a, b) => a - b);
+  const target = totalGain * SWEET_SPOT_INFO_GAIN_THRESHOLD;
+  // Two-pointer sliding window over the sorted bp list. For each left
+  // index `i`, advance `j` until [i..j-1] sums to ≥ target; record the
+  // window if it's the narrowest seen so far; then shrink from the
+  // left and repeat. Standard "shortest subarray with sum ≥ target"
+  // pattern. Range size is measured in bp units (bps[j-1] - bps[i] + 1),
+  // not array indices, so a window covering bps {2, 5} is size 4 even
+  // though it has only 2 entries — the empty bp 3 and 4 still count.
+  let bestStart = -1;
+  let bestEnd = -1;
+  let bestSize = Number.POSITIVE_INFINITY;
+  let runningGain = 0;
+  let j = 0;
+  for (let i = 0; i < bps.length; i += 1) {
+    while (j < bps.length && runningGain < target) {
+      const bp = bps[j];
+      if (bp === undefined) {break;}
+      runningGain += perBpGain.get(bp) ?? 0;
+      j += 1;
+    }
+    if (runningGain >= target) {
+      const startBp = bps[i] as number;
+      const endBp = bps[j - 1] as number;
+      const size = endBp - startBp + 1;
+      if (size < bestSize) {
+        bestSize = size;
+        bestStart = startBp;
+        bestEnd = endBp;
+      }
+    } else {
+      // j is at the end and we still couldn't hit target by extending.
+      // Shrinking left can't help — no smaller windows possible.
+      break;
+    }
+    runningGain -= perBpGain.get(bps[i] as number) ?? 0;
+  }
+  if (bestStart === -1 || bestEnd === -1) {return null;}
+  let snapshotsInRange = 0;
+  let gainInRange = 0;
+  for (const [bp, count] of perBpSnapshots) {
+    if (bp < bestStart || bp > bestEnd) {continue;}
+    snapshotsInRange += count;
+    gainInRange += perBpGain.get(bp) ?? 0;
+  }
+  const calibrationScore =
+    snapshotsInRange === 0 ? 0 : gainInRange / snapshotsInRange;
+  const coverageFraction =
+    snapshotsTotal === 0 ? 0 : snapshotsInRange / snapshotsTotal;
+  return {
+    startBp: bestStart,
+    endBp: bestEnd,
+    calibrationScore,
+    coverageFraction,
   };
 }
 

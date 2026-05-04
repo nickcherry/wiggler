@@ -210,6 +210,38 @@ export type SurvivalScore = {
 };
 
 /**
+ * The contiguous bp range where a filter does most of its work, plus
+ * the prediction-quality numbers restricted to that range. See
+ * `SurvivalFilterSummary.sweetSpot` for the full convention.
+ */
+export type SurvivalSweetSpot = {
+  /** Inclusive lower bound of the bp range. */
+  readonly startBp: number;
+  /** Inclusive upper bound of the bp range. */
+  readonly endBp: number;
+  /**
+   * Restricted-range calibration: average information gain in nats
+   * per snapshot **inside the sweet-spot bp range**, vs the global
+   * (no-filter) baseline. Compare directly to
+   * `SurvivalFilterSummary.calibrationScore` (which uses the same
+   * units but averages across the whole population). Typically
+   * several × larger than the population-wide score, because the
+   * sweet-spot population strips out the boring near-line and far-
+   * tail buckets that dilute the headline.
+   */
+  readonly calibrationScore: number;
+  /**
+   * Fraction of the filter's `snapshotsTotal` that falls inside the
+   * sweet-spot bp range AND was classified (not skipped). 0..1.
+   * Multiply by 100 for a percentage. A high number here means the
+   * sweet-spot restriction barely changes which snapshots we'd trade
+   * on; a low number means restricting to the sweet spot would
+   * meaningfully reduce trade volume.
+   */
+  readonly coverageFraction: number;
+};
+
+/**
  * Summary metrics for one filter against the baseline. Holds one
  * `SurvivalScore` per `(remaining-minutes, half)` cell so the dashboard
  * can compare every config of every filter on the same scale.
@@ -264,6 +296,25 @@ export type SurvivalFilterSummary = {
   readonly calibrationScoreByRemaining: Readonly<
     Record<SurvivalRemainingMinutes, number>
   >;
+  /**
+   * The contiguous bp range where the filter does most of its work.
+   * Computed as the **narrowest** `[startBp, endBp]` that captures
+   * `SWEET_SPOT_INFO_GAIN_THRESHOLD` (default 80%) of the filter's
+   * total positive info gain — a "smallest stretch of distances that
+   * contains most of the hill" rule.
+   *
+   * Used by the dashboard for two things: a translucent overlay on the
+   * per-bp lift chart so the operator can see the range visually, and
+   * the restricted-range calibration number that tells you how good
+   * predictions are *inside* the sweet spot vs. averaged across the
+   * whole population (the headline `calibrationScore` is the latter).
+   * For trading discipline: the sweet spot is the bp range where you
+   * can trust the filter's `p` enough to act on it.
+   *
+   * `null` when the filter has no positive info gain anywhere — i.e.
+   * a useless filter where no bp range carries signal.
+   */
+  readonly sweetSpot: SurvivalSweetSpot | null;
   /**
    * One score per `(remaining-minutes, half)` config. The detail view
    * renders these with all per-cell metrics — `meanDeltaPp`, `sharpe`,

@@ -126,6 +126,12 @@ type FilterSlice = {
     readonly calibrationScoreByRemaining: Readonly<
       Record<SurvivalRemainingMinutes, number>
     >;
+    readonly sweetSpot: {
+      readonly startBp: number;
+      readonly endBp: number;
+      readonly calibrationScore: number;
+      readonly coverageFraction: number;
+    } | null;
     readonly scoresByRemaining: Readonly<
       Record<
         SurvivalRemainingMinutes,
@@ -672,6 +678,51 @@ export function renderTrainingDistributionsHtml({
       max-height: 260px;
     }
 
+    /* Compact "lift" chart at the bottom of each filter section: a
+       single signed line of trueRate − globalRate per bp, with the
+       sweet-spot bp range overlaid as a translucent band. Smaller
+       than the main chart and the delta chart — it's a summary at-a-
+       glance view, not a primary read. */
+    .filter-lift-frame {
+      position: relative;
+      border-radius: 10px;
+      background:
+        radial-gradient(circle at 92% 10%, rgba(215, 170, 69, 0.04), transparent 36%),
+        linear-gradient(180deg, rgba(15, 27, 18, 0.5), rgba(7, 9, 10, 0.35));
+      border: 1px solid var(--alea-border-faint);
+      padding: 10px 8px 4px;
+    }
+    .filter-lift-host {
+      position: relative;
+      width: 100%;
+      height: 160px;
+      min-height: 160px;
+      max-height: 160px;
+    }
+    .filter-lift-meta {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      gap: 12px;
+      padding: 0 6px 6px;
+      font-family: var(--alea-font-sans);
+      font-size: 10px;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+      color: var(--alea-text-subtle);
+      font-variant-numeric: tabular-nums;
+    }
+    .filter-lift-meta .lift-label { color: var(--alea-text-muted); }
+    .filter-lift-meta .lift-value {
+      color: var(--alea-text);
+      font-size: 12px;
+      letter-spacing: 0.04em;
+      text-transform: none;
+      margin-left: 6px;
+    }
+    .filter-lift-meta .lift-value-good { color: var(--alea-green); }
+    .filter-lift-meta .lift-value-faint { color: var(--alea-text-muted); }
+
     /* Mobile / narrow-viewport tweaks. The base layout assumes there's
        enough horizontal room for the filter title, a row of pills, and
        a chevron in the same line, plus a full-width tab strip with
@@ -1189,6 +1240,36 @@ export function renderTrainingDistributionsHtml({
       );
     }
 
+    // Compact "sweet-spot summary" shown above the lift chart. Three
+    // numbers: population calibration (whole-data score), sweet-spot
+    // calibration (restricted to the bp range where the filter does
+    // most of its work), and the coverage fraction (what share of the
+    // population falls inside the sweet spot). When there's no sweet
+    // spot (filter has no positive info gain anywhere), hide the
+    // restricted numbers and show "no sweet spot" instead.
+    function formatLiftMeta(summary) {
+      const popPct = (summary.calibrationScore / BASELINE_LOG_LOSS_NATS) * 100;
+      const popHtml =
+        '<span><span class="lift-label">population</span>' +
+          '<span class="lift-value' + (popPct > 0 ? ' lift-value-good' : ' lift-value-faint') + '">' +
+            popPct.toFixed(2) + '%</span></span>';
+      const ss = summary.sweetSpot;
+      if (!ss) {
+        return popHtml +
+          '<span><span class="lift-label">sweet spot</span>' +
+            '<span class="lift-value lift-value-faint">none</span></span>';
+      }
+      const ssPct = (ss.calibrationScore / BASELINE_LOG_LOSS_NATS) * 100;
+      const coveragePct = ss.coverageFraction * 100;
+      return popHtml +
+        '<span><span class="lift-label">sweet spot ' +
+          ss.startBp + '–' + ss.endBp + ' bp</span>' +
+          '<span class="lift-value' + (ssPct > 0 ? ' lift-value-good' : ' lift-value-faint') + '">' +
+            ssPct.toFixed(2) + '%</span></span>' +
+        '<span><span class="lift-label">coverage</span>' +
+          '<span class="lift-value">' + coveragePct.toFixed(1) + '%</span></span>';
+    }
+
     // Tab badges show this rem's calibration contribution in % terms.
     // Same metric and same sign-based color as the per-rem header
     // pills, so the operator can scan one consistent number across
@@ -1497,6 +1578,207 @@ export function renderTrainingDistributionsHtml({
       }
     }
 
+    // ----------------------------------------------------------------
+     // Lift chart: a compact signed line of trueRate − globalRate per
+     // bp, with the sweet-spot bp range overlaid as a translucent
+     // band. Same x-axis as the main + delta charts so all three line
+     // up vertically. Smaller than the others — secondary read.
+     //
+     // Rebuilt on each remaining tab change, like the others, so the
+     // line shows the active cell's lift specifically. The sweet-spot
+     // overlay is per-filter (constant across tabs).
+     // ----------------------------------------------------------------
+
+     function buildLiftLine({ filter, remaining }) {
+       const baselineEntry = filter.baseline[remaining];
+       const trueEntry = filter.whenTrue[remaining];
+       const xs = filter.distancesBp;
+       const lifts = [];
+       const counts = [];
+       for (let i = 0; i < xs.length; i++) {
+         const baseV = baselineEntry.winRate[i];
+         const trueV = trueEntry.winRate[i];
+         if (baseV == null || trueV == null) {
+           lifts.push(null);
+         } else {
+           lifts.push(trueV - baseV);
+         }
+         counts.push(trueEntry.sampleCount[i] || 0);
+       }
+       return { lifts: lifts, counts: counts };
+     }
+
+     function buildLiftChart({ host, filter, remaining }) {
+       if (typeof uPlot === "undefined") {
+         host.innerHTML = '<pre class="chart-error">uPlot global is undefined</pre>';
+         return null;
+       }
+       const w = host.clientWidth || host.getBoundingClientRect().width || 800;
+       const h = host.clientHeight || 160;
+       if (w === 0 || h === 0) {
+         host.innerHTML = '<pre class="chart-error">chart host has zero size: ' + w + 'x' + h + '</pre>';
+         return null;
+       }
+       const xs = filter.distancesBp.slice();
+       const line = buildLiftLine({ filter: filter, remaining: remaining });
+       const xMax = autoFitMaxBp({ xs: xs, yArrays: [line.lifts] });
+
+       let extreme = 0;
+       for (const v of line.lifts) {
+         if (v != null && Number.isFinite(v) && Math.abs(v) > extreme) {
+           extreme = Math.abs(v);
+         }
+       }
+       const yPad = Math.max(2, extreme * 0.15);
+       const yMax = extreme === 0 ? 5 : extreme + yPad;
+
+       let maxCount = 0;
+       for (const v of line.counts) {
+         if (v > maxCount) maxCount = v;
+       }
+       const fillOpacityFor = (count) => {
+         if (maxCount === 0 || count === 0) return 0;
+         const ratio = count / maxCount;
+         return Math.max(0.14, Math.min(0.65, ratio * 0.65));
+       };
+
+       const drawDensityFill = (u, lifts, counts) => {
+         const ctx = u.ctx;
+         const yZeroPx = u.valToPos(0, "y", true);
+         for (let i = 0; i < xs.length - 1; i++) {
+           const v0 = lifts[i];
+           const v1 = lifts[i + 1];
+           if (v0 == null || v1 == null) continue;
+           const c0 = counts[i] || 0;
+           const c1 = counts[i + 1] || 0;
+           const opacity = fillOpacityFor((c0 + c1) / 2);
+           if (opacity <= 0) continue;
+           const x0Px = u.valToPos(xs[i], "x", true);
+           const x1Px = u.valToPos(xs[i + 1], "x", true);
+           const y0Px = u.valToPos(v0, "y", true);
+           const y1Px = u.valToPos(v1, "y", true);
+           const drawTrap = (xa, ya, xb, yb, color) => {
+             ctx.fillStyle = 'rgba(' + color.r + ',' + color.g + ',' + color.b + ',' + opacity + ')';
+             ctx.beginPath();
+             ctx.moveTo(xa, yZeroPx);
+             ctx.lineTo(xa, ya);
+             ctx.lineTo(xb, yb);
+             ctx.lineTo(xb, yZeroPx);
+             ctx.closePath();
+             ctx.fill();
+           };
+           const sameSign = (v0 >= 0 && v1 >= 0) || (v0 <= 0 && v1 <= 0);
+           if (sameSign) {
+             const color = (v0 + v1) / 2 >= 0 ? deltaColors.fillAbove : deltaColors.fillBelow;
+             drawTrap(x0Px, y0Px, x1Px, y1Px, color);
+           } else {
+             const t = v0 / (v0 - v1);
+             const xCrossVal = xs[i] + t * (xs[i + 1] - xs[i]);
+             const xCrossPx = u.valToPos(xCrossVal, "x", true);
+             const firstColor = v0 >= 0 ? deltaColors.fillAbove : deltaColors.fillBelow;
+             const secondColor = v1 >= 0 ? deltaColors.fillAbove : deltaColors.fillBelow;
+             drawTrap(x0Px, y0Px, xCrossPx, yZeroPx, firstColor);
+             drawTrap(xCrossPx, yZeroPx, x1Px, y1Px, secondColor);
+           }
+         }
+       };
+
+       // Sweet-spot overlay: faint translucent band from startBp to
+       // endBp, with slightly more pronounced semi-opaque vertical
+       // borders so the bounds read clearly even when the band itself
+       // is very faint. Drawn first so it sits underneath the line and
+       // density fills.
+       const sweetSpot = filter.summary.sweetSpot;
+       const drawSweetSpot = (u) => {
+         if (!sweetSpot) return;
+         const ctx = u.ctx;
+         const x0Px = u.valToPos(sweetSpot.startBp, "x", true);
+         const x1Px = u.valToPos(sweetSpot.endBp, "x", true);
+         const yTopPx = u.bbox.top;
+         const yBotPx = u.bbox.top + u.bbox.height;
+         ctx.save();
+         // Faint fill across the band.
+         ctx.fillStyle = 'rgba(215, 170, 69, 0.04)';
+         ctx.fillRect(x0Px, yTopPx, x1Px - x0Px, yBotPx - yTopPx);
+         // Slightly stronger borders so the bounds are visible.
+         ctx.strokeStyle = 'rgba(215, 170, 69, 0.45)';
+         ctx.lineWidth = 1;
+         ctx.beginPath();
+         ctx.moveTo(x0Px, yTopPx);
+         ctx.lineTo(x0Px, yBotPx);
+         ctx.moveTo(x1Px, yTopPx);
+         ctx.lineTo(x1Px, yBotPx);
+         ctx.stroke();
+         ctx.restore();
+       };
+
+       const data = [xs, line.lifts.slice()];
+       const opts = {
+         width: w,
+         height: h,
+         legend: { show: false },
+         padding: [10, 18, 8, 8],
+         scales: { x: { time: false, range: [0, xMax] }, y: { range: [-yMax, yMax] } },
+         cursor: { points: { show: false }, drag: { setScale: false, x: false, y: false } },
+         series: [
+           {},
+           { label: filter.trueLabel + " lift vs no-filter", stroke: deltaColors.trueLine, width: 1.75, spanGaps: false, points: { show: false } },
+         ],
+         axes: [
+           {
+             stroke: chartTokens.axisStroke,
+             font: chartTokens.axisFont,
+             labelFont: chartTokens.axisFont,
+             label: "distance (bp)",
+             labelSize: 22,
+             grid: { stroke: chartTokens.gridStroke, width: 1 },
+             ticks: { stroke: chartTokens.axisTickStroke, width: 1, size: 4 },
+             values: (u, splits) => splits.map((v) => Math.round(v).toLocaleString()),
+           },
+           {
+             stroke: chartTokens.axisStroke,
+             font: chartTokens.axisFont,
+             labelFont: chartTokens.axisFont,
+             label: "lift (Δpp)",
+             labelSize: 22,
+             grid: { stroke: chartTokens.gridStroke, width: 1 },
+             ticks: { stroke: chartTokens.axisTickStroke, width: 1, size: 4 },
+             values: (u, splits) => splits.map((v) => (v > 0 ? "+" : "") + Math.round(v)),
+             size: 50,
+           },
+         ],
+         hooks: {
+           drawClear: [
+             (u) => {
+               drawSweetSpot(u);
+               drawDensityFill(u, line.lifts, line.counts);
+             },
+           ],
+           drawAxes: [
+             (u) => {
+               const yPos = u.valToPos(0, "y", true);
+               const ctx = u.ctx;
+               ctx.save();
+               ctx.strokeStyle = deltaColors.zeroRule;
+               ctx.lineWidth = 1;
+               ctx.setLineDash([4, 4]);
+               ctx.beginPath();
+               ctx.moveTo(u.bbox.left, yPos);
+               ctx.lineTo(u.bbox.left + u.bbox.width, yPos);
+               ctx.stroke();
+               ctx.restore();
+             },
+           ],
+         },
+       };
+       try {
+         return new uPlot(opts, data, host);
+       } catch (err) {
+         host.innerHTML = '<pre class="chart-error">uPlot threw: ' + (err && err.message ? err.message : String(err)) + '</pre>';
+         return null;
+       }
+     }
+
     function renderFilterSection(filter, hotspots, expanded) {
       const summary = filter.summary;
       const legendHtml =
@@ -1573,6 +1855,7 @@ export function renderTrainingDistributionsHtml({
         filter: filter,
         remaining: filter.defaultRemaining,
       });
+      const liftMetaHtml = formatLiftMeta(summary);
       const sectionHtml =
         '<details class="filter-section" data-filter-id="' + filter.id + '"' + openAttr + '>' +
           '<summary>' +
@@ -1591,6 +1874,10 @@ export function renderTrainingDistributionsHtml({
             '</div>' +
             '<div class="filter-delta-frame">' +
               '<div class="filter-delta-host" data-filter-id="' + filter.id + '"></div>' +
+            '</div>' +
+            '<div class="filter-lift-frame">' +
+              '<div class="filter-lift-meta" data-filter-id="' + filter.id + '">' + liftMetaHtml + '</div>' +
+              '<div class="filter-lift-host" data-filter-id="' + filter.id + '"></div>' +
             '</div>' +
           '</div>' +
         '</details>';
@@ -1611,15 +1898,19 @@ export function renderTrainingDistributionsHtml({
         if (chevron) chevron.textContent = 'collapse ▴';
         const host = detailsEl.querySelector('.filter-chart-host');
         const deltaHost = detailsEl.querySelector('.filter-delta-host');
-        if (!host || !deltaHost) return;
+        const liftHost = detailsEl.querySelector('.filter-lift-host');
+        if (!host || !deltaHost || !liftHost) return;
         const chart = buildFilterChart({ host: host, filter: filter, remaining: filter.defaultRemaining });
         const deltaChart = buildDeltaChart({ host: deltaHost, filter: filter, remaining: filter.defaultRemaining });
+        const liftChart = buildLiftChart({ host: liftHost, filter: filter, remaining: filter.defaultRemaining });
         if (chart) {
           filterCharts.push({
             chart: chart,
             deltaChart: deltaChart,
+            liftChart: liftChart,
             host: host,
             deltaHost: deltaHost,
+            liftHost: liftHost,
             filter: filter,
             remaining: filter.defaultRemaining,
           });
@@ -1676,14 +1967,18 @@ export function renderTrainingDistributionsHtml({
       const entry = filterCharts[entryIdx];
       try { entry.chart.destroy(); } catch (e) { /* ignore */ }
       try { if (entry.deltaChart) entry.deltaChart.destroy(); } catch (e) { /* ignore */ }
+      try { if (entry.liftChart) entry.liftChart.destroy(); } catch (e) { /* ignore */ }
       const newChart = buildFilterChart({ host: entry.host, filter: entry.filter, remaining: remaining });
       const newDeltaChart = buildDeltaChart({ host: entry.deltaHost, filter: entry.filter, remaining: remaining });
+      const newLiftChart = buildLiftChart({ host: entry.liftHost, filter: entry.filter, remaining: remaining });
       if (newChart) {
         filterCharts[entryIdx] = {
           chart: newChart,
           deltaChart: newDeltaChart,
+          liftChart: newLiftChart,
           host: entry.host,
           deltaHost: entry.deltaHost,
+          liftHost: entry.liftHost,
           filter: entry.filter,
           remaining: remaining,
         };
@@ -1806,15 +2101,19 @@ export function renderTrainingDistributionsHtml({
       const filterRo = new ResizeObserver((entries) => {
         for (const entry of entries) {
           const host = entry.target;
-          const match = filterCharts.find((fc) => fc.host === host || fc.deltaHost === host);
+          const match = filterCharts.find((fc) =>
+            fc.host === host || fc.deltaHost === host || fc.liftHost === host,
+          );
           if (!match) continue;
           const w = host.clientWidth;
           const h = host.clientHeight;
           if (w <= 0 || h <= 0) continue;
           if (host === match.host) {
             match.chart.setSize({ width: w, height: h });
-          } else if (match.deltaChart) {
+          } else if (host === match.deltaHost && match.deltaChart) {
             match.deltaChart.setSize({ width: w, height: h });
+          } else if (host === match.liftHost && match.liftChart) {
+            match.liftChart.setSize({ width: w, height: h });
           }
         }
       });
@@ -1827,6 +2126,8 @@ export function renderTrainingDistributionsHtml({
           mainHosts.forEach((h) => filterRo.observe(h));
           const deltaHosts = filterSectionsHost.querySelectorAll('.filter-delta-host');
           deltaHosts.forEach((h) => filterRo.observe(h));
+          const liftHosts = filterSectionsHost.querySelectorAll('.filter-lift-host');
+          liftHosts.forEach((h) => filterRo.observe(h));
         });
         mo.observe(filterSectionsHost, { childList: true, subtree: true });
       }
@@ -1841,6 +2142,11 @@ export function renderTrainingDistributionsHtml({
           const dw = entry.deltaHost.clientWidth;
           const dh = entry.deltaHost.clientHeight;
           if (dw > 0 && dh > 0) entry.deltaChart.setSize({ width: dw, height: dh });
+        }
+        if (entry.liftChart) {
+          const lw = entry.liftHost.clientWidth;
+          const lh = entry.liftHost.clientHeight;
+          if (lw > 0 && lh > 0) entry.liftChart.setSize({ width: lw, height: lh });
         }
       }
     });
@@ -1919,6 +2225,7 @@ function toFilterSlice({
       occurrenceFalse: result.summary.occurrenceFalse,
       calibrationScore: result.summary.calibrationScore,
       calibrationScoreByRemaining: result.summary.calibrationScoreByRemaining,
+      sweetSpot: result.summary.sweetSpot,
       scoresByRemaining: result.summary.scoresByRemaining,
     },
     defaultRemaining: pickDefaultRemaining({

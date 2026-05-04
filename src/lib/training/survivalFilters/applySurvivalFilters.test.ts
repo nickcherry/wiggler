@@ -461,4 +461,83 @@ describe("applySurvivalFilters", () => {
     // Log-loss improvement still defined even with one bucket.
     expect(trueScore?.logLossImprovementNats).not.toBeNull();
   });
+
+  it("identifies the sweet spot bp range and reports restricted-range calibration", () => {
+    // Filter shape: bp 0–4 is near-line noise (both halves ≈ 50%, zero
+    // info gain); bp 5–10 has meaningful divergence (true=0.85, false=
+    // 0.30, all at the sample floor). The sweet-spot algorithm should
+    // pick a contiguous bp range that captures the bulk of the gain —
+    // in this scenario, exactly [5, 10] since 100% of positive gain
+    // lives there.
+    const snapshots: SurvivalSnapshot[] = [];
+    const push = (
+      distanceBp: number,
+      side: "true" | "false",
+      survivedCount: number,
+      total: number,
+    ) => {
+      for (let i = 0; i < total; i += 1) {
+        snapshots.push(
+          buildSnapshot({
+            windowStartMs:
+              distanceBp * 1_000_000 + (side === "true" ? 1 : 2) * 100_000 + i,
+            remaining: 1,
+            distanceBp,
+            survived: i < survivedCount,
+            context: {
+              ...emptyContext(),
+              ma20x5m: side === "true" ? 1 : -1,
+            },
+          }),
+        );
+      }
+    };
+    for (const bp of [0, 1, 2, 3, 4]) {
+      push(bp, "true", Math.round(0.50 * SAMPLE_FLOOR), SAMPLE_FLOOR);
+      push(bp, "false", Math.round(0.50 * SAMPLE_FLOOR), SAMPLE_FLOOR);
+    }
+    for (const bp of [5, 6, 7, 8, 9, 10]) {
+      push(bp, "true", Math.round(0.85 * SAMPLE_FLOOR), SAMPLE_FLOOR);
+      push(bp, "false", Math.round(0.30 * SAMPLE_FLOOR), SAMPLE_FLOOR);
+    }
+
+    const { perFilter } = applySurvivalFilters({
+      snapshots,
+      filters: [probeFilter],
+    });
+    const summary = perFilter[0]?.summary;
+    if (summary === undefined) {throw new Error("expected summary");}
+    expect(summary.sweetSpot).not.toBeNull();
+    const ss = summary.sweetSpot!;
+    // Sweet spot should be tightly inside [5, 10] (the only region
+    // with positive info gain). With all six buckets contributing
+    // roughly equally and 80% capture, the algorithm picks 5 of the 6.
+    expect(ss.startBp).toBeGreaterThanOrEqual(5);
+    expect(ss.endBp).toBeLessThanOrEqual(10);
+    // Restricted calibration is much higher than the population score
+    // — the noise buckets are excluded from the sweet-spot denominator.
+    expect(ss.calibrationScore).toBeGreaterThan(summary.calibrationScore * 1.5);
+    // Coverage is between 0 and 1.
+    expect(ss.coverageFraction).toBeGreaterThan(0);
+    expect(ss.coverageFraction).toBeLessThan(1);
+  });
+
+  it("returns null sweet spot when the filter has no positive info gain", () => {
+    // Both halves have the SAME win rate at every bucket — the filter
+    // carries no information, so info gain everywhere is 0 and the
+    // sweet-spot algorithm has nothing to pick.
+    const snapshots = buildBalancedSnapshots({
+      remaining: 1,
+      distanceBp: 5,
+      trueClassifier: () => true,
+      totalEach: SAMPLE_FLOOR,
+      trueWinRate: 0.5,
+      falseWinRate: 0.5,
+    });
+    const { perFilter } = applySurvivalFilters({
+      snapshots,
+      filters: [probeFilter],
+    });
+    expect(perFilter[0]?.summary.sweetSpot).toBeNull();
+  });
 });
