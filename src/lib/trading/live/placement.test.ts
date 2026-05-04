@@ -141,7 +141,7 @@ function emas() {
 }
 
 function atrs() {
-  // Small bar range → small ATR-14, so the test's tick distance of
+  // Small bar range → small configured live ATR, so the test's tick distance of
   // 0.05 (currentPrice 100.05 − line 100) clears the
   // |distance| ≥ 0.5 × ATR threshold and the snapshot resolves as
   // `aligned = true`. ATR ≈ 0.05 here → 0.5 × ATR = 0.025 < 0.05.

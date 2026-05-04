@@ -46,12 +46,13 @@ Each in-window snapshot is classified by:
 - `remaining` — minutes left in the window, floored to one of
   `{1, 2, 3, 4}` per the training pipeline's snapshot convention
   (snapshots happen at +1m, +2m, +3m, +4m with `remaining = 5 − N`).
-- `aligned` — was `|currentPrice − line| ≥ 0.5 × ATR-14` at decision
-  time, where ATR-14 is the Wilder ATR through and including the
-  most recently closed 5m bar. Mirrors the training-side
-  `distance_from_line_atr` filter exactly so the live classification
-  matches the historical classifications baked into the probability
-  table. (The field name `aligned` is kept for back-compat with the
+- `aligned` — was `|currentPrice − line| ≥ 0.5 × ATR` at decision
+  time, where ATR is the Wilder ATR period configured by
+  `LIVE_TRADING_ATR_PERIOD` through and including the most recently
+  closed 5m bar. Today that is ATR-3. Mirrors the training-side
+  `LIVE_TRADING_FILTER` exactly so the live classification matches
+  the historical classifications baked into the probability table.
+  (The field name `aligned` is kept for back-compat with the
   surrounding code; semantically `true` = "decisively away" and
   `false` = "near the line" — it does **not** refer to EMA-50
   alignment anymore.)
@@ -73,9 +74,10 @@ and rolled forward by the websocket close-stream:
 - `fiveMinuteEmaTracker` — running EMA-50 (used for diagnostic
   logging only since the filter swap; retained because operator-
   facing messages still reference it).
-- `fiveMinuteAtrTracker` — running Wilder ATR-14 (the active
-  conditioning variable). Memory is O(1) after warmup; each tracker
-  keeps only its current value plus the previous bar's close.
+- `fiveMinuteAtrTracker` — running Wilder ATR at
+  `LIVE_TRADING_ATR_PERIOD` (the active conditioning variable; ATR-3
+  today). Memory is O(1) after warmup; each tracker keeps only its
+  current value plus the previous bar's close.
 
 A focused unit test (`fiveMinuteAtrTracker.test.ts`) asserts the
 live ATR tracker matches the training pipeline's `computeWilderAtrSeries`
@@ -130,8 +132,8 @@ Polymarket directly.
 The orchestrator (`runLive.ts`) only does three things:
 
 1. **Boot.** Hydrate lifetime PnL from the checkpoint, then reconcile it
-   against vendor trade history. Hydrate EMA-50/ATR-14. Open the configured
-   live price source. Open the vendor's user fill stream.
+   against vendor trade history. Hydrate EMA-50 and the configured live ATR.
+   Open the configured live price source. Open the vendor's user fill stream.
 2. **Tick.** Every 250 ms, detect window rollover, capture lines,
    evaluate decisions, fire `placeWithRetry` for empty slots that
    pass the edge filter.

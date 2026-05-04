@@ -99,7 +99,7 @@ export function emaReadyForWindow({
 }
 
 /**
- * Sister of `emaReadyForWindow` for the ATR-14 tracker. Returns the
+ * Sister of `emaReadyForWindow` for the configured live ATR tracker. Returns the
  * tracker's current value only if the last bar incorporated is the
  * one ending exactly at the current window's start — same staleness
  * rule as EMA, so the live filter classification matches the
