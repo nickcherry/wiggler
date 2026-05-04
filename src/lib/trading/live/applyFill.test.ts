@@ -24,6 +24,7 @@ function activeSlot({
   sharesIfFilled = 10,
   sharesFilled = 2,
   costUsd = 1,
+  feesUsd = 0,
   feeRateBpsAvg = 10,
 }: {
   readonly outcomeRef?: string;
@@ -31,6 +32,7 @@ function activeSlot({
   readonly sharesIfFilled?: number;
   readonly sharesFilled?: number;
   readonly costUsd?: number;
+  readonly feesUsd?: number;
   readonly feeRateBpsAvg?: number;
 } = {}): Extract<AssetSlot, { kind: "active" }> {
   return {
@@ -43,6 +45,7 @@ function activeSlot({
     sharesIfFilled,
     sharesFilled,
     costUsd,
+    feesUsd,
     feeRateBpsAvg,
   };
 }
@@ -99,6 +102,7 @@ describe("applyFill", () => {
       orderId: "order-1",
       sharesFilled: 5,
       costUsd: 2.2,
+      feesUsd: 0.00144,
       feeRateBpsAvg: 16,
     });
     expect(events).toHaveLength(1);

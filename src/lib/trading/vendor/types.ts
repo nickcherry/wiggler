@@ -124,6 +124,7 @@ export type MarketHydration = {
   readonly outcomeRef: string | null;
   readonly sharesFilled: number;
   readonly costUsd: number;
+  readonly feesUsd: number;
   readonly feeRateBpsAvg: number;
 };
 

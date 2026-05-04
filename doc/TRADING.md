@@ -385,7 +385,8 @@ debugging the model without risking a dollar.
 Constructs the Polymarket vendor with `eagerAuth: true` (fails fast
 on missing wallet env), opens all the streams, places maker-only
 GTC limit BUYs ($20 stake), watches fills via the user WS, settles
-each window with real PnL net of fees, and ships the per-window
+each window with real PnL net of the same normalized Polymarket fill
+fees used by the performance dashboard, and ships the per-window
 Telegram summary. Refuses to start without `--commit`.
 
 ### `trading:hydrate-lifetime-pnl`
@@ -395,6 +396,15 @@ Polymarket trade history and overwrites the lifetime-PnL
 checkpoint. Useful after manual trades on the wallet outside the
 bot, or whenever the checkpoint feels stale. Read-only against
 Polymarket — never places or cancels orders.
+
+### `trading:performance`
+
+`bun alea trading:performance` scans the configured wallet's full
+authenticated Polymarket CLOB trade history, fetches touched CLOB
+markets for resolution metadata, and writes a `tmp/` HTML dashboard
+plus JSON sidecar. It uses only Polymarket API data, does not touch the
+database, and shares the same post-fee PnL normalization as the live
+runner and lifetime-PnL scanner.
 
 ## Files
 

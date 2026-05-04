@@ -56,6 +56,8 @@ export type AssetSlot =
       readonly sharesIfFilled: number;
       readonly sharesFilled: number;
       readonly costUsd: number;
+      /** Exact USDC fees observed so far, normalized at the vendor boundary. */
+      readonly feesUsd: number;
       /** Share-weighted average maker fee rate across observed fills. */
       readonly feeRateBpsAvg: number;
     }

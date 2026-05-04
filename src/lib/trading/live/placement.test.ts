@@ -167,6 +167,7 @@ function emptyHydration(): MarketHydration {
     outcomeRef: null,
     sharesFilled: 0,
     costUsd: 0,
+    feesUsd: 0,
     feeRateBpsAvg: 0,
   };
 }
@@ -194,7 +195,9 @@ function vendorWith({
       throw new Error("not used");
     },
     streamUserFills(
-      _input: { readonly markets: readonly TradableMarket[] } & UserStreamCallbacks,
+      _input: {
+        readonly markets: readonly TradableMarket[];
+      } & UserStreamCallbacks,
     ) {
       return { stop: async () => {} };
     },
@@ -274,6 +277,7 @@ describe("placeWithRetry", () => {
           outcomeRef: "UP",
           sharesFilled: 0,
           costUsd: 0,
+          feesUsd: 0,
           feeRateBpsAvg: 0,
         },
       }),

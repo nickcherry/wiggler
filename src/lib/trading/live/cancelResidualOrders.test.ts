@@ -37,6 +37,7 @@ function activeSlot(
     sharesIfFilled: 10,
     sharesFilled: 2,
     costUsd: 1,
+    feesUsd: 0,
     feeRateBpsAvg: 0,
   };
 }

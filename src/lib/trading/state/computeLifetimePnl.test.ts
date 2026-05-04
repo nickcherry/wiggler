@@ -30,15 +30,15 @@ function buy({
   tokenId,
   size,
   price,
-  feeRateBps = 0,
+  feeUsd = 0,
 }: {
   readonly conditionId: string;
   readonly tokenId: string;
   readonly size: number;
   readonly price: number;
-  readonly feeRateBps?: number;
+  readonly feeUsd?: number;
 }): ScanTrade {
-  return { conditionId, tokenId, side: "BUY", size, price, feeRateBps };
+  return { conditionId, tokenId, side: "BUY", size, price, feeUsd };
 }
 
 function sell({
@@ -46,15 +46,15 @@ function sell({
   tokenId,
   size,
   price,
-  feeRateBps = 0,
+  feeUsd = 0,
 }: {
   readonly conditionId: string;
   readonly tokenId: string;
   readonly size: number;
   readonly price: number;
-  readonly feeRateBps?: number;
+  readonly feeUsd?: number;
 }): ScanTrade {
-  return { conditionId, tokenId, side: "SELL", size, price, feeRateBps };
+  return { conditionId, tokenId, side: "SELL", size, price, feeUsd };
 }
 
 describe("computeLifetimePnl", () => {
@@ -84,12 +84,12 @@ describe("computeLifetimePnl", () => {
           tokenId: UP,
           size: 100,
           price: 0.3,
-          feeRateBps: 100, // 1% on $30 cost = $0.30
+          feeUsd: 0.21,
         }),
       ],
       resolutions: [resolved({ conditionId: "M1", winner: "up" })],
     });
-    expect(winResult.lifetimePnlUsd).toBeCloseTo(69.7, 9);
+    expect(winResult.lifetimePnlUsd).toBeCloseTo(69.79, 9);
 
     const lossResult = computeLifetimePnl({
       trades: [
@@ -98,12 +98,12 @@ describe("computeLifetimePnl", () => {
           tokenId: UP,
           size: 100,
           price: 0.3,
-          feeRateBps: 100,
+          feeUsd: 0.21,
         }),
       ],
       resolutions: [resolved({ conditionId: "M1", winner: "down" })],
     });
-    expect(lossResult.lifetimePnlUsd).toBeCloseTo(-30.3, 9);
+    expect(lossResult.lifetimePnlUsd).toBeCloseTo(-30.21, 9);
   });
 
   it("treats SELL fills as positive cash flow that nets out inventory", () => {

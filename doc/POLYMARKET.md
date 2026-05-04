@@ -51,3 +51,7 @@ The canonical URL set lives in
 - The user WebSocket subscription uses `markets` populated with condition IDs,
   not token IDs. Fill frames are normalized into Alea's vendor-agnostic
   `FillEvent` shape.
+- CLOB trade fees are normalized from the venue's fee curve:
+  `shares * (fee_rate_bps / 10000) * price * (1 - price)`, rounded to five
+  decimal places. Trades reported as `trader_side=MAKER` are treated as
+  zero-fee, matching Polymarket's current fee model.

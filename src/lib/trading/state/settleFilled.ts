@@ -14,8 +14,7 @@ import type { LeadingSide } from "@alea/lib/trading/types";
  *     break the training and decision pipelines use.
  *   - Gross win:  `sharesFilled × $1 − costUsd`.
  *   - Gross loss: `−costUsd`.
- *   - Maker fee:  `feeRateBpsAvg / 10_000 × costUsd` (Polymarket charges
- *     the maker rate as a fraction of cost).
+ *   - Fees:       exact fill fees accumulated at the vendor boundary.
  *   - Net PnL:    `gross − fee`.
  *
  * If `active.sharesFilled === 0` (we placed an order, nothing filled)
@@ -53,7 +52,7 @@ export function settleFilled({
   const won = active.side === winningSide;
   const grossPayout = won ? active.sharesFilled * WINNING_YES_PAYOUT_USD : 0;
   const grossPnl = grossPayout - active.costUsd;
-  const feesUsd = (active.feeRateBpsAvg / 10_000) * active.costUsd;
+  const feesUsd = active.feesUsd;
   const netPnl = grossPnl - feesUsd;
   const fillPriceAvg = active.costUsd / active.sharesFilled;
   return {

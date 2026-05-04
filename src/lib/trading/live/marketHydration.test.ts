@@ -98,6 +98,7 @@ function vendorWith({
           outcomeRef: null,
           sharesFilled: 0,
           costUsd: 0,
+          feesUsd: 0,
           feeRateBpsAvg: 0,
         }
       );
@@ -158,6 +159,7 @@ describe("hydrateAssetMarket", () => {
           outcomeRef: null,
           sharesFilled: 4,
           costUsd: 2,
+          feesUsd: 0.01,
           feeRateBpsAvg: 12,
         },
       }),
@@ -177,6 +179,7 @@ describe("hydrateAssetMarket", () => {
       sharesIfFilled: 4,
       sharesFilled: 4,
       costUsd: 2,
+      feesUsd: 0.01,
       feeRateBpsAvg: 12,
     });
     expect(assetRecord.hydrationStatus).toBe("ready");
