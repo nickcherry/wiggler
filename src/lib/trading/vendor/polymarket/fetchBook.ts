@@ -4,6 +4,7 @@ import {
   parseBookConstraints,
 } from "@alea/lib/trading/vendor/polymarket/marketConstraints";
 import type {
+  PriceLevel,
   TopOfBook,
   TradableMarket,
   UpDownBook,
@@ -73,9 +74,13 @@ async function fetchTokenBook({
     );
   }
   const parsed = bookSchema.parse(await response.json());
+  const bids = parseLevels({ levels: parsed.bids });
+  const asks = parseLevels({ levels: parsed.asks });
   return {
-    bestBid: pickBest({ levels: parsed.bids, side: "bid" }),
-    bestAsk: pickBest({ levels: parsed.asks, side: "ask" }),
+    bestBid: pickBest({ levels: bids, side: "bid" }),
+    bestAsk: pickBest({ levels: asks, side: "ask" }),
+    bidLevels: bids,
+    askLevels: asks,
     constraints: parseBookConstraints({ raw: parsed }),
   };
 }
@@ -89,16 +94,12 @@ function pickBest({
   levels,
   side,
 }: {
-  readonly levels: readonly { readonly price: string; readonly size: string }[];
+  readonly levels: readonly PriceLevel[];
   readonly side: "bid" | "ask";
 }): number | null {
   let best: number | null = null;
   for (const level of levels) {
-    const price = Number(level.price);
-    const size = Number(level.size);
-    if (!Number.isFinite(price) || !Number.isFinite(size) || size <= 0) {
-      continue;
-    }
+    const price = level.price;
     if (best === null) {
       best = price;
       continue;
@@ -108,6 +109,28 @@ function pickBest({
     }
   }
   return best;
+}
+
+function parseLevels({
+  levels,
+}: {
+  readonly levels: readonly { readonly price: string; readonly size: string }[];
+}): PriceLevel[] {
+  const out: PriceLevel[] = [];
+  for (const level of levels) {
+    const price = Number(level.price);
+    const size = Number(level.size);
+    if (
+      !Number.isFinite(price) ||
+      !Number.isFinite(size) ||
+      price <= 0 ||
+      size <= 0
+    ) {
+      continue;
+    }
+    out.push({ price, size });
+  }
+  return out;
 }
 
 const levelSchema = z.object({ price: z.string(), size: z.string() });

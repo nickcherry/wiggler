@@ -3,13 +3,7 @@ import type { FiveMinuteAtrTracker } from "@alea/lib/livePrices/fiveMinuteAtrTra
 import type { FiveMinuteEmaTracker } from "@alea/lib/livePrices/fiveMinuteEmaTracker";
 import type { LivePriceTick } from "@alea/lib/livePrices/types";
 import { sendTelegramMessage } from "@alea/lib/telegram/sendTelegramMessage";
-import { evaluateDecision } from "@alea/lib/trading/decision/evaluateDecision";
-import {
-  atrReadyForWindow,
-  emaReadyForWindow,
-  tickIsFresh,
-  usableBookForMarket,
-} from "@alea/lib/trading/live/freshness";
+import { evaluateRecordDecision } from "@alea/lib/trading/live/evaluateRecordDecision";
 import { activeSlotFromHydration } from "@alea/lib/trading/live/slotHydration";
 import type {
   AssetWindowRecord,
@@ -298,55 +292,26 @@ function currentDecision({
   readonly nowMs: number;
 }): CurrentDecision | null {
   const market = record.market;
-  if (
-    market === null ||
-    record.hydrationStatus !== "ready" ||
-    record.line === null
-  ) {
+  if (market === null) {
     return null;
   }
-  const tick = lastTick.get(asset);
-  const tracker = emas.get(asset);
-  const atrTracker = atrs.get(asset);
-  if (tick === undefined || tracker === undefined || atrTracker === undefined) {
-    return null;
-  }
-  if (!tickIsFresh({ tick, windowStartMs: window.windowStartMs, nowMs })) {
-    return null;
-  }
-  const ema50 = emaReadyForWindow({
-    tracker,
-    windowStartMs: window.windowStartMs,
-  });
-  const atr14 = atrReadyForWindow({
-    tracker: atrTracker,
-    windowStartMs: window.windowStartMs,
-  });
-  if (atr14 === null) {
-    return null;
-  }
-  const book = usableBookForMarket({
-    book: books.get(market.vendorRef),
-    vendorRef: market.vendorRef,
-    windowStartMs: market.windowStartMs,
-    nowMs,
-  });
-  const decision = evaluateDecision({
+  const decision = evaluateRecordDecision({
     asset,
-    windowStartMs: window.windowStartMs,
-    nowMs,
-    line: record.line,
-    currentPrice: tick.mid,
-    ema50,
-    atr14,
-    upBestBid: book?.up.bestBid ?? null,
-    downBestBid: book?.down.bestBid ?? null,
-    upTokenId: market.upRef,
-    downTokenId: market.downRef,
+    record,
+    window,
+    lastTick,
+    emas,
+    atrs,
+    books,
     table,
     minEdge,
+    nowMs,
   });
-  if (decision.kind !== "trade" || decision.chosen.bid === null) {
+  if (
+    decision === null ||
+    decision.kind !== "trade" ||
+    decision.chosen.bid === null
+  ) {
     return null;
   }
   return {

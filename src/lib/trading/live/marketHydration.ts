@@ -1,7 +1,7 @@
 import { EMA50_BOOTSTRAP_BARS } from "@alea/constants/trading";
-import { fetchRecentFiveMinuteBars } from "@alea/lib/livePrices/binancePerp/fetchRecentFiveMinuteBars";
 import type { FiveMinuteAtrTracker } from "@alea/lib/livePrices/fiveMinuteAtrTracker";
 import type { FiveMinuteEmaTracker } from "@alea/lib/livePrices/fiveMinuteEmaTracker";
+import type { LivePriceSource } from "@alea/lib/livePrices/source";
 import { activeSlotFromHydration } from "@alea/lib/trading/live/slotHydration";
 import type {
   AssetWindowRecord,
@@ -29,19 +29,21 @@ export async function hydrateMovingTrackers({
   atrs,
   signal,
   emit,
+  priceSource,
 }: {
   readonly assets: readonly Asset[];
   readonly emas: Map<Asset, FiveMinuteEmaTracker>;
   readonly atrs: Map<Asset, FiveMinuteAtrTracker>;
   readonly signal: AbortSignal;
   readonly emit: (event: LiveEvent) => void;
+  readonly priceSource: LivePriceSource;
 }): Promise<void> {
   for (const asset of assets) {
     if (signal.aborted) {
       return;
     }
     try {
-      const bars = await fetchRecentFiveMinuteBars({
+      const bars = await priceSource.fetchRecentFiveMinuteBars({
         asset,
         count: EMA50_BOOTSTRAP_BARS,
         signal,

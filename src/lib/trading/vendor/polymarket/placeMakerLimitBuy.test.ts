@@ -1,4 +1,7 @@
-import { placePolymarketMakerLimitBuy } from "@alea/lib/trading/vendor/polymarket/placeMakerLimitBuy";
+import {
+  placePolymarketMakerLimitBuy,
+  preparePolymarketMakerLimitBuy,
+} from "@alea/lib/trading/vendor/polymarket/placeMakerLimitBuy";
 import {
   PostOnlyRejectionError,
   type TradableMarket,
@@ -150,6 +153,28 @@ describe("placePolymarketMakerLimitBuy", () => {
       expiresAtMs: expireBeforeMs,
     });
     expect(placed.placedAtMs).toBeGreaterThan(0);
+  });
+
+  it("prepares the same maker GTD order shape without signing or posting", () => {
+    const prepared = preparePolymarketMakerLimitBuy({
+      market,
+      side: "down",
+      limitPrice: 0.333,
+      stakeUsd: 20,
+      expireBeforeMs,
+      constraints,
+    });
+
+    expect(prepared).toMatchObject({
+      side: "down",
+      outcomeRef: "DOWN_TOKEN",
+      limitPrice: 0.33,
+      sharesIfFilled: 60.6,
+      feeRateBps: 0,
+      orderType: "GTD",
+      expiresAtMs: expireBeforeMs,
+    });
+    expect(prepared.preparedAtMs).toBe(Date.now());
   });
 
   it("translates venue post-only rejection phrases into PostOnlyRejectionError", async () => {

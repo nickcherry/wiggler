@@ -1,4 +1,4 @@
-import { fetchExactFiveMinuteBar } from "@alea/lib/livePrices/binancePerp/fetchRecentFiveMinuteBars";
+import type { LivePriceSource } from "@alea/lib/livePrices/source";
 import type { ClosedFiveMinuteBar } from "@alea/lib/livePrices/types";
 import { sendTelegramMessage } from "@alea/lib/telegram/sendTelegramMessage";
 import { settleRecord } from "@alea/lib/trading/live/settleRecord";
@@ -26,6 +26,7 @@ type WrapUpWindowParams = {
   readonly conditionIdIndex: ConditionIndex;
   readonly lifetimePnl: LifetimePnlBox;
   readonly walletAddress: string;
+  readonly priceSource: LivePriceSource;
   readonly emit: (event: LiveEvent) => void;
 };
 
@@ -52,13 +53,19 @@ export async function wrapUpWindow(
     conditionIdIndex,
     lifetimePnl,
     walletAddress,
+    priceSource,
     emit,
   } = params;
   if (window.summarySent) {
     return;
   }
 
-  await hydrateMissingSettlementBars({ window, lastClosedBars, emit });
+  await hydrateMissingSettlementBars({
+    window,
+    lastClosedBars,
+    priceSource,
+    emit,
+  });
 
   const outcomes: AssetWindowOutcome[] = [];
   for (const record of window.perAsset.values()) {
@@ -142,10 +149,12 @@ export async function wrapUpWindow(
 async function hydrateMissingSettlementBars({
   window,
   lastClosedBars,
+  priceSource,
   emit,
 }: {
   readonly window: WindowRecord;
   readonly lastClosedBars: Map<Asset, ClosedFiveMinuteBar>;
+  readonly priceSource: LivePriceSource;
   readonly emit: (event: LiveEvent) => void;
 }): Promise<void> {
   const missing = new Map<Asset, number>();
@@ -163,7 +172,10 @@ async function hydrateMissingSettlementBars({
   await Promise.all(
     [...missing].map(async ([asset, openTimeMs]) => {
       try {
-        const exact = await fetchExactFiveMinuteBar({ asset, openTimeMs });
+        const exact = await priceSource.fetchExactFiveMinuteBar({
+          asset,
+          openTimeMs,
+        });
         if (exact !== null) {
           lastClosedBars.set(asset, exact);
         }

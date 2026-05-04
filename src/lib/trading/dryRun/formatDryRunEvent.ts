@@ -23,6 +23,12 @@ export function formatDryRunEvent({
       return `${ts} ${pc.red(event.message)}`;
     case "decision":
       return `${ts} ${formatDecision({ decision: event.decision })}`;
+    case "virtual-order":
+      return `${ts} ${pc.green("DRY ORDER")} ${pc.bold(labelAsset(event.asset))} ${event.order.side.toUpperCase()} @${event.order.limitPrice.toFixed(3)} shares=${event.order.sharesIfFilled.toFixed(2)} queue=${event.order.queueAheadShares === null ? "unknown" : event.order.queueAheadShares.toFixed(2)}`;
+    case "virtual-fill":
+      return `${ts} ${pc.green("DRY FILL")} ${pc.bold(labelAsset(event.asset))} ${event.order.side.toUpperCase()} shares=${event.order.canonicalFilledShares.toFixed(2)} latency=${event.order.canonicalFirstFillAtMs === null ? "?" : `${event.order.canonicalFirstFillAtMs - event.order.placedAtMs}ms`}`;
+    case "window-finalized":
+      return `${ts} ${pc.bold("DRY WINDOW")} ${new Date(event.windowStartMs).toISOString().slice(11, 16)}→${new Date(event.windowEndMs).toISOString().slice(11, 16)} orders=${event.metrics.orderCount} filled=${event.metrics.canonical.filledCount} pnl=${formatSignedUsd({ value: event.metrics.canonical.pnlUsd })} allFilled=${formatSignedUsd({ value: event.metrics.allOrdersFilled.pnlUsd })}`;
   }
 }
 
@@ -116,6 +122,11 @@ function formatEdge({ edge }: { readonly edge: number | null }): string {
 function formatSigned({ value }: { readonly value: number }): string {
   const sign = value >= 0 ? "+" : "";
   return `${sign}${value.toFixed(3)}`;
+}
+
+function formatSignedUsd({ value }: { readonly value: number }): string {
+  const sign = value >= 0 ? "+" : "";
+  return `${sign}$${Math.abs(value).toFixed(2)}`;
 }
 
 function decimalsFor({ asset }: { readonly asset: Asset }): number {

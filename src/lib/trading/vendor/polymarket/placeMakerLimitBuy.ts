@@ -3,6 +3,7 @@ import type { PolymarketOrderConstraints } from "@alea/lib/trading/vendor/polyma
 import {
   type PlacedOrder,
   PostOnlyRejectionError,
+  type PreparedMakerLimitOrder,
   type TradableMarket,
 } from "@alea/lib/trading/vendor/types";
 import { type ClobClient, OrderType, Side } from "@polymarket/clob-client-v2";
@@ -45,50 +46,24 @@ export async function placePolymarketMakerLimitBuy({
   readonly expireBeforeMs: number;
   readonly constraints: PolymarketOrderConstraints;
 }): Promise<PlacedOrder> {
-  if (!Number.isFinite(limitPrice) || limitPrice <= 0 || limitPrice >= 1) {
-    throw new Error(
-      `placePolymarketMakerLimitBuy: limitPrice must be in (0, 1), got ${limitPrice}`,
-    );
-  }
-  const nowMs = Date.now();
-  const minimumValidityMs = Math.max(
-    GTD_MIN_VALIDITY_MS,
-    constraints.minimumOrderAgeSeconds * 1000,
-  );
-  if (nowMs + minimumValidityMs >= expireBeforeMs) {
-    throw new Error(
-      `placePolymarketMakerLimitBuy: not enough time before GTD expiry to satisfy minimum validity (${minimumValidityMs}ms)`,
-    );
-  }
-  const tickedPrice = floorToTick({
-    price: limitPrice,
-    tickSize: constraints.priceTickSize,
+  const prepared = preparePolymarketMakerLimitBuy({
+    market,
+    side,
+    limitPrice,
+    stakeUsd,
+    expireBeforeMs,
+    constraints,
   });
-  if (tickedPrice <= 0 || tickedPrice >= 1) {
-    throw new Error(
-      `placePolymarketMakerLimitBuy: ticked price ${tickedPrice} fell outside (0, 1)`,
-    );
+  if (prepared.expiresAtMs === null) {
+    throw new Error("placePolymarketMakerLimitBuy: GTD order missing expiry");
   }
-  const rawShares = stakeUsd / tickedPrice;
-  const shares = Math.floor(rawShares * 100) / 100;
-  if (shares <= 0) {
-    throw new Error(
-      `placePolymarketMakerLimitBuy: computed shares ≤ 0 (price=${tickedPrice}, stake=${stakeUsd})`,
-    );
-  }
-  if (shares < constraints.minOrderSize) {
-    throw new Error(
-      `placePolymarketMakerLimitBuy: computed shares ${shares} below venue minimum ${constraints.minOrderSize}`,
-    );
-  }
-  const tokenId = side === "up" ? market.upRef : market.downRef;
-  const expiration = Math.floor(expireBeforeMs / 1000);
+  const expiration = Math.floor(prepared.expiresAtMs / 1000);
 
   const signed = await client.createOrder(
     {
-      tokenID: tokenId,
-      price: tickedPrice,
-      size: shares,
+      tokenID: prepared.outcomeRef,
+      price: prepared.limitPrice,
+      size: prepared.sharesIfFilled,
       side: Side.BUY,
       expiration,
     },
@@ -128,8 +103,68 @@ export async function placePolymarketMakerLimitBuy({
     );
   }
 
+  const { preparedAtMs, ...rest } = prepared;
   return {
+    ...rest,
     orderId: parsed.data.orderID,
+    placedAtMs: preparedAtMs,
+  };
+}
+
+export function preparePolymarketMakerLimitBuy({
+  market,
+  side,
+  limitPrice,
+  stakeUsd,
+  expireBeforeMs,
+  constraints,
+}: {
+  readonly market: TradableMarket;
+  readonly side: LeadingSide;
+  readonly limitPrice: number;
+  readonly stakeUsd: number;
+  readonly expireBeforeMs: number;
+  readonly constraints: PolymarketOrderConstraints;
+}): PreparedMakerLimitOrder {
+  if (!Number.isFinite(limitPrice) || limitPrice <= 0 || limitPrice >= 1) {
+    throw new Error(
+      `preparePolymarketMakerLimitBuy: limitPrice must be in (0, 1), got ${limitPrice}`,
+    );
+  }
+  const nowMs = Date.now();
+  const minimumValidityMs = Math.max(
+    GTD_MIN_VALIDITY_MS,
+    constraints.minimumOrderAgeSeconds * 1000,
+  );
+  if (nowMs + minimumValidityMs >= expireBeforeMs) {
+    throw new Error(
+      `preparePolymarketMakerLimitBuy: not enough time before GTD expiry to satisfy minimum validity (${minimumValidityMs}ms)`,
+    );
+  }
+  const tickedPrice = floorToTick({
+    price: limitPrice,
+    tickSize: constraints.priceTickSize,
+  });
+  if (tickedPrice <= 0 || tickedPrice >= 1) {
+    throw new Error(
+      `preparePolymarketMakerLimitBuy: ticked price ${tickedPrice} fell outside (0, 1)`,
+    );
+  }
+  const rawShares = stakeUsd / tickedPrice;
+  const shares = Math.floor(rawShares * 100) / 100;
+  if (shares <= 0) {
+    throw new Error(
+      `preparePolymarketMakerLimitBuy: computed shares ≤ 0 (price=${tickedPrice}, stake=${stakeUsd})`,
+    );
+  }
+  if (shares < constraints.minOrderSize) {
+    throw new Error(
+      `preparePolymarketMakerLimitBuy: computed shares ${shares} below venue minimum ${constraints.minOrderSize}`,
+    );
+  }
+  const tokenId = side === "up" ? market.upRef : market.downRef;
+
+  return {
     side,
     outcomeRef: tokenId,
     limitPrice: tickedPrice,
@@ -137,7 +172,7 @@ export async function placePolymarketMakerLimitBuy({
     feeRateBps: 0,
     orderType: "GTD",
     expiresAtMs: expireBeforeMs,
-    placedAtMs: nowMs,
+    preparedAtMs: nowMs,
   };
 }
 

@@ -62,6 +62,13 @@ export type MarketOrderConstraints = {
 export type TopOfBook = {
   readonly bestBid: number | null;
   readonly bestAsk: number | null;
+  readonly bidLevels?: readonly PriceLevel[];
+  readonly askLevels?: readonly PriceLevel[];
+};
+
+export type PriceLevel = {
+  readonly price: number;
+  readonly size: number;
 };
 
 export type UpDownBook = {
@@ -69,6 +76,17 @@ export type UpDownBook = {
   readonly up: TopOfBook;
   readonly down: TopOfBook;
   readonly fetchedAtMs: number;
+};
+
+export type PreparedMakerLimitOrder = {
+  readonly side: LeadingSide;
+  readonly outcomeRef: string;
+  readonly limitPrice: number;
+  readonly sharesIfFilled: number;
+  readonly feeRateBps: number;
+  readonly orderType: "GTC" | "GTD";
+  readonly expiresAtMs: number | null;
+  readonly preparedAtMs: number;
 };
 
 export type PlacedOrder = {
@@ -127,6 +145,80 @@ export type UserStreamHandle = {
   readonly stop: () => Promise<void>;
 };
 
+export type MarketDataStreamHandle = {
+  readonly stop: () => Promise<void>;
+};
+
+export type MarketDataTradeEvent = {
+  readonly kind: "trade";
+  readonly vendorRef: string | null;
+  readonly outcomeRef: string;
+  readonly price: number;
+  readonly size: number | null;
+  readonly side: "BUY" | "SELL" | null;
+  readonly atMs: number;
+};
+
+export type MarketDataBookEvent = {
+  readonly kind: "book";
+  readonly vendorRef: string | null;
+  readonly outcomeRef: string;
+  readonly bids: readonly PriceLevel[];
+  readonly asks: readonly PriceLevel[];
+  readonly atMs: number;
+};
+
+export type MarketDataBestBidAskEvent = {
+  readonly kind: "best-bid-ask";
+  readonly vendorRef: string | null;
+  readonly outcomeRef: string;
+  readonly bestBid: number | null;
+  readonly bestAsk: number | null;
+  readonly atMs: number;
+};
+
+export type MarketDataPriceChangeEvent = {
+  readonly kind: "price-change";
+  readonly vendorRef: string | null;
+  readonly outcomeRef: string;
+  readonly price: number;
+  readonly side: "BUY" | "SELL" | null;
+  readonly size: number | null;
+  readonly atMs: number;
+};
+
+export type MarketDataTickSizeChangeEvent = {
+  readonly kind: "tick-size-change";
+  readonly vendorRef: string | null;
+  readonly outcomeRef: string | null;
+  readonly oldTickSize: number | null;
+  readonly newTickSize: number;
+  readonly atMs: number;
+};
+
+export type MarketDataResolvedEvent = {
+  readonly kind: "resolved";
+  readonly vendorRef: string;
+  readonly winningOutcomeRef: string | null;
+  readonly winningSide: LeadingSide | null;
+  readonly atMs: number;
+};
+
+export type MarketDataEvent =
+  | MarketDataTradeEvent
+  | MarketDataBookEvent
+  | MarketDataBestBidAskEvent
+  | MarketDataPriceChangeEvent
+  | MarketDataTickSizeChangeEvent
+  | MarketDataResolvedEvent;
+
+export type MarketDataStreamCallbacks = {
+  readonly onEvent: (event: MarketDataEvent) => void;
+  readonly onConnect?: () => void;
+  readonly onDisconnect?: (reason: string) => void;
+  readonly onError?: (error: Error) => void;
+};
+
 export type UserStreamCallbacks = {
   readonly onFill: (event: FillEvent) => void;
   readonly onConnect?: () => void;
@@ -148,6 +240,21 @@ export type MarketHydration = {
   readonly feesUsd: number;
   readonly feeRateBpsAvg: number;
 };
+
+export type MarketOutcome =
+  | {
+      readonly status: "pending";
+      readonly market: TradableMarket;
+      readonly checkedAtMs: number;
+      readonly reason: string | null;
+    }
+  | {
+      readonly status: "resolved";
+      readonly market: TradableMarket;
+      readonly winningSide: LeadingSide;
+      readonly winningOutcomeRef: string;
+      readonly resolvedAtMs: number;
+    };
 
 export type LifetimePnlScanProgress =
   | { readonly kind: "trades-page"; readonly tradesSoFar: number }
@@ -191,6 +298,14 @@ export type Vendor = {
     readonly signal?: AbortSignal;
   }): Promise<UpDownBook>;
 
+  prepareMakerLimitBuy?(input: {
+    readonly market: TradableMarket;
+    readonly side: LeadingSide;
+    readonly limitPrice: number;
+    readonly stakeUsd: number;
+    readonly expireBeforeMs: number;
+  }): Promise<PreparedMakerLimitOrder>;
+
   placeMakerLimitBuy(input: {
     readonly market: TradableMarket;
     readonly side: LeadingSide;
@@ -207,9 +322,20 @@ export type Vendor = {
     } & UserStreamCallbacks,
   ): UserStreamHandle;
 
+  streamMarketData?(
+    input: {
+      readonly markets: readonly TradableMarket[];
+    } & MarketDataStreamCallbacks,
+  ): MarketDataStreamHandle;
+
   hydrateMarketState(input: {
     readonly market: TradableMarket;
   }): Promise<MarketHydration>;
+
+  resolveMarketOutcome?(input: {
+    readonly market: TradableMarket;
+    readonly signal?: AbortSignal;
+  }): Promise<MarketOutcome>;
 
   scanLifetimePnl(input: {
     readonly onProgress?: (event: LifetimePnlScanProgress) => void;

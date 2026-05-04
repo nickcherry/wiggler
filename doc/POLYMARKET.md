@@ -31,6 +31,9 @@ The canonical URL set lives in
   current production order format, V2 signatures, and removed V1 order fields.
 - [CLOB user channel](https://docs.polymarket.com/market-data/websocket/user-channel) —
   authenticated fill/order updates scoped by condition IDs.
+- [CLOB market channel](https://docs.polymarket.com/market-data/websocket/market-channel) —
+  public book, price-change, trade-price, tick-size, and resolution events
+  scoped by token IDs.
 - [WebSocket quickstart](https://docs.polymarket.com/quickstart/websocket/WSS-Quickstart) —
   channel list and subscription shapes.
 
@@ -52,7 +55,16 @@ The canonical URL set lives in
   with string prices and sizes. Alea scans levels and picks best bid/ask
   rather than trusting array order. Book responses also carry
   `min_order_size`, `tick_size`, and `neg_risk`; the adapter merges those with
-  the `/clob-markets` metadata before placement.
+  the `/clob-markets` metadata before placement. The adapter now preserves the
+  parsed depth levels as well as top-of-book so dry trading can estimate queue
+  ahead at the simulated maker price.
+- The public market WebSocket subscription sends
+  `{ type: "market", assets_ids: [...tokenIds], custom_feature_enabled: true }`.
+  Dry trading consumes `book`/`best_bid_ask` for market state,
+  `last_trade_price` for queue-aware fill simulation, `tick_size_change` as
+  operator-visible venue metadata, and `market_resolved` for official-first
+  dry settlement. REST resolution remains the fallback if the websocket event
+  is missed.
 - Live order placement is maker-only and GTD. The adapter floors prices to the
   venue tick, rejects sizes below the venue minimum, signs a V2 BUY order with
   a pre-close expiration, and posts it as
@@ -61,6 +73,9 @@ The canonical URL set lives in
   rejection code through the TypeScript client, so the adapter translates known
   rejection phrases into
   `PostOnlyRejectionError`.
+- Dry order preparation uses the same Polymarket tick/size/GTD validation as
+  live order placement but stops before signing or posting. This is exposed as
+  `Vendor.prepareMakerLimitBuy` and is safe without wallet credentials.
 - The user WebSocket subscription uses `markets` populated with condition IDs,
   not token IDs. Fill frames are normalized into Alea's vendor-agnostic
   `FillEvent` shape. The stream sends `PING` heartbeats, ignores `PONG`, and

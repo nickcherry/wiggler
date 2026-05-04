@@ -4,8 +4,13 @@ import { discoverPolymarketMarket } from "@alea/lib/trading/vendor/polymarket/di
 import { fetchPolymarketBook } from "@alea/lib/trading/vendor/polymarket/fetchBook";
 import { hydratePolymarketMarketState } from "@alea/lib/trading/vendor/polymarket/hydrateMarketState";
 import type { PolymarketOrderConstraints } from "@alea/lib/trading/vendor/polymarket/marketConstraints";
-import { placePolymarketMakerLimitBuy } from "@alea/lib/trading/vendor/polymarket/placeMakerLimitBuy";
+import {
+  placePolymarketMakerLimitBuy,
+  preparePolymarketMakerLimitBuy,
+} from "@alea/lib/trading/vendor/polymarket/placeMakerLimitBuy";
+import { resolvePolymarketMarketOutcome } from "@alea/lib/trading/vendor/polymarket/resolveMarketOutcome";
 import { scanPolymarketLifetimePnl } from "@alea/lib/trading/vendor/polymarket/scanLifetimePnl";
+import { streamPolymarketMarketData } from "@alea/lib/trading/vendor/polymarket/streamMarketData";
 import { streamPolymarketUserFills } from "@alea/lib/trading/vendor/polymarket/streamUserFills";
 import type { Vendor } from "@alea/lib/trading/vendor/types";
 import type { ClobClient } from "@polymarket/clob-client-v2";
@@ -111,6 +116,31 @@ export async function createPolymarketVendor(
       return book;
     },
 
+    async prepareMakerLimitBuy({
+      market,
+      side,
+      limitPrice,
+      stakeUsd,
+      expireBeforeMs,
+    }) {
+      const constraints =
+        constraintsByConditionId.get(market.vendorRef) ??
+        (market.constraints as PolymarketOrderConstraints | undefined);
+      if (constraints === undefined) {
+        throw new Error(
+          `Polymarket constraints missing for ${market.vendorRef}; refusing to place an order without venue tick/min-size parameters.`,
+        );
+      }
+      return preparePolymarketMakerLimitBuy({
+        market,
+        side,
+        limitPrice,
+        stakeUsd,
+        expireBeforeMs,
+        constraints,
+      });
+    },
+
     async placeMakerLimitBuy({
       market,
       side,
@@ -150,9 +180,17 @@ export async function createPolymarketVendor(
       return streamPolymarketUserFills(input);
     },
 
+    streamMarketData(input) {
+      return streamPolymarketMarketData(input);
+    },
+
     async hydrateMarketState({ market }) {
       const { client } = await auth();
       return hydratePolymarketMarketState({ client, market });
+    },
+
+    async resolveMarketOutcome({ market, signal }) {
+      return resolvePolymarketMarketOutcome({ market, signal });
     },
 
     async scanLifetimePnl({ onProgress }) {

@@ -3,7 +3,7 @@ import {
   STAKE_USD,
   WINDOW_SUMMARY_DELAY_MS,
 } from "@alea/constants/trading";
-import { streamBinancePerpLive } from "@alea/lib/livePrices/binancePerp/streamBinancePerpLive";
+import { binancePerpLivePriceSource } from "@alea/lib/livePrices/binancePerp/source";
 import {
   createFiveMinuteAtrTracker,
   type FiveMinuteAtrTracker,
@@ -17,19 +17,16 @@ import {
   FIVE_MINUTES_MS,
   flooredRemainingMinutes,
 } from "@alea/lib/livePrices/fiveMinuteWindow";
+import type { LivePriceSource } from "@alea/lib/livePrices/source";
 import type {
   ClosedFiveMinuteBar,
   LivePriceTick,
 } from "@alea/lib/livePrices/types";
-import { evaluateDecision } from "@alea/lib/trading/decision/evaluateDecision";
 import { applyFill } from "@alea/lib/trading/live/applyFill";
 import { cancelResidualOrders } from "@alea/lib/trading/live/cancelResidualOrders";
+import { evaluateRecordDecision } from "@alea/lib/trading/live/evaluateRecordDecision";
 import {
-  atrReadyForWindow,
-  emaReadyForWindow,
   tickCanCaptureLine,
-  tickIsFresh,
-  usableBookForMarket,
 } from "@alea/lib/trading/live/freshness";
 import { bootstrapLifetimePnl } from "@alea/lib/trading/live/lifetimePnlBootstrap";
 import {
@@ -63,6 +60,7 @@ export type RunLiveParams = {
   readonly assets: readonly Asset[];
   readonly table: ProbabilityTable;
   readonly minEdge: number;
+  readonly priceSource?: LivePriceSource;
   readonly telegramBotToken: string;
   readonly telegramChatId: string;
   readonly emit: (event: LiveEvent) => void;
@@ -104,6 +102,7 @@ export async function runLive({
   assets,
   table,
   minEdge,
+  priceSource = binancePerpLivePriceSource,
   telegramBotToken,
   telegramChatId,
   emit,
@@ -112,7 +111,7 @@ export async function runLive({
   emit({
     kind: "info",
     atMs: Date.now(),
-    message: `live trader starting: vendor=${vendor.id} assets=${assets.join(",")} stake=$${STAKE_USD} minEdge=${minEdge.toFixed(3)} wallet=${vendor.walletAddress.slice(0, 10)}…`,
+      message: `live trader starting: vendor=${vendor.id} priceSource=${priceSource.id} assets=${assets.join(",")} stake=$${STAKE_USD} minEdge=${minEdge.toFixed(3)} wallet=${vendor.walletAddress.slice(0, 10)}…`,
   });
 
   const lifetimePnl: LifetimePnlBox = { value: 0 };
@@ -127,7 +126,14 @@ export async function runLive({
     emas.set(asset, createFiveMinuteEmaTracker());
     atrs.set(asset, createFiveMinuteAtrTracker());
   }
-  await hydrateMovingTrackers({ assets, emas, atrs, signal, emit });
+  await hydrateMovingTrackers({
+    assets,
+    emas,
+    atrs,
+    priceSource,
+    signal,
+    emit,
+  });
   if (signal.aborted) {
     return;
   }
@@ -138,7 +144,7 @@ export async function runLive({
   const windows = new Map<number, WindowRecord>();
   const conditionIdIndex: ConditionIndex = new Map();
 
-  const feedHandle = streamBinancePerpLive({
+  const feedHandle = priceSource.stream({
     assets,
     onTick: (tick) => {
       lastTick.set(tick.asset, tick);
@@ -161,19 +167,19 @@ export async function runLive({
       emit({
         kind: "info",
         atMs: Date.now(),
-        message: "binance-perp ws connected",
+        message: `${priceSource.id} ws connected`,
       }),
     onDisconnect: (reason) =>
       emit({
         kind: "warn",
         atMs: Date.now(),
-        message: `binance-perp ws disconnected: ${reason}`,
+        message: `${priceSource.id} ws disconnected: ${reason}`,
       }),
     onError: (error) =>
       emit({
         kind: "error",
         atMs: Date.now(),
-        message: `binance-perp ws error: ${error.message}`,
+        message: `${priceSource.id} ws error: ${error.message}`,
       }),
   });
 
@@ -301,6 +307,7 @@ export async function runLive({
         nowMs,
         vendor,
         lastClosedBars,
+        priceSource,
         telegramBotToken,
         telegramChatId,
         windowsAll: windows,
@@ -394,6 +401,7 @@ function schedulePerWindowTimers({
   nowMs,
   vendor,
   lastClosedBars,
+  priceSource,
   telegramBotToken,
   telegramChatId,
   windowsAll,
@@ -406,6 +414,7 @@ function schedulePerWindowTimers({
   readonly nowMs: number;
   readonly vendor: Vendor;
   readonly lastClosedBars: Map<Asset, ClosedFiveMinuteBar>;
+  readonly priceSource: LivePriceSource;
   readonly telegramBotToken: string;
   readonly telegramChatId: string;
   readonly windowsAll: Map<number, WindowRecord>;
@@ -429,6 +438,7 @@ function schedulePerWindowTimers({
       void wrapUpWindow({
         window,
         lastClosedBars,
+        priceSource,
         telegramBotToken,
         telegramChatId,
         windowsAll,
@@ -512,58 +522,29 @@ function stepAsset({
     return;
   }
 
-  const tick = lastTick.get(asset);
-  const tracker = emas.get(asset);
-  const atrTracker = atrs.get(asset);
   const market = record.market;
   if (
-    tick === undefined ||
-    tracker === undefined ||
-    atrTracker === undefined ||
     market === null ||
     record.hydrationStatus !== "ready" ||
     record.line === null
   ) {
     return;
   }
-  if (!tickIsFresh({ tick, windowStartMs: window.windowStartMs, nowMs })) {
-    return;
-  }
-  const ema50 = emaReadyForWindow({
-    tracker,
-    windowStartMs: window.windowStartMs,
-  });
-  if (ema50 === null) {
-    return;
-  }
-  const atr14 = atrReadyForWindow({
-    tracker: atrTracker,
-    windowStartMs: window.windowStartMs,
-  });
-  if (atr14 === null) {
-    return;
-  }
-  const book = usableBookForMarket({
-    book: books.get(market.vendorRef),
-    vendorRef: market.vendorRef,
-    windowStartMs: market.windowStartMs,
-    nowMs,
-  });
-  const decision = evaluateDecision({
+  const decision = evaluateRecordDecision({
     asset,
-    windowStartMs: window.windowStartMs,
-    nowMs,
-    line: record.line,
-    currentPrice: tick.mid,
-    ema50,
-    atr14,
-    upBestBid: book?.up.bestBid ?? null,
-    downBestBid: book?.down.bestBid ?? null,
-    upTokenId: market.upRef,
-    downTokenId: market.downRef,
+    record,
+    window,
+    lastTick,
+    emas,
+    atrs,
+    books,
     table,
     minEdge,
+    nowMs,
   });
+  if (decision === null) {
+    return;
+  }
   if (bucketChanged) {
     record.lastDecisionRemaining = remaining;
     emit({ kind: "decision", atMs: nowMs, decision });

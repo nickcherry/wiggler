@@ -84,16 +84,17 @@ caught before it silently miscalibrates live trading.
 
 ## Architecture
 
-The runner is vendor-agnostic. Anything Polymarket-specific is
-isolated behind the `Vendor` interface; the orchestrator never
-imports Polymarket directly. Adding Kalshi or Hyperliquid is a new
-directory under `src/lib/trading/vendor/<id>/` plus a one-line
-factory swap at the CLI layer.
+The runner is vendor-agnostic, and its underlying price feed is
+abstracted behind `LivePriceSource`. Binance perp remains the default
+source, but live and dry trading receive it by injection rather than
+importing Binance directly. Anything Polymarket-specific is isolated
+behind the `Vendor` interface; the orchestrator never imports
+Polymarket directly.
 
 ```
                   ┌──────────────────────┐
-                  │  Binance perp WS     │  bookTicker + kline_5m
-                  │  (vendor-neutral)    │
+                  │  LivePriceSource     │  ticks + closed 5m bars
+                  │  (Binance default)   │
                   └─────────┬────────────┘
                             │ ticks + closes
               ┌─────────────▼─────────────┐
@@ -109,8 +110,9 @@ factory swap at the CLI layer.
               │   lifetimePnlBootstrap.ts │
               └─────┬──────────────┬──────┘
                     │              │
-   discoverMarket   │              │  fetchBook / placeMakerLimitBuy
-   hydrateMarket    │              │  cancelOrder / streamUserFills
+   discoverMarket   │              │  fetchBook / prepareMakerLimitBuy
+   hydrateMarket    │              │  placeMakerLimitBuy / cancelOrder
+   streamMarketData │              │  streamUserFills / resolveOutcome
    scanLifetimePnl  │              │  …
                     ▼              ▼
         ┌──────────────────────────────────┐
@@ -128,8 +130,8 @@ factory swap at the CLI layer.
 The orchestrator (`runLive.ts`) only does three things:
 
 1. **Boot.** Hydrate lifetime PnL from the checkpoint, then reconcile it
-   against vendor trade history. Hydrate EMA-50. Open the Binance WS feed.
-   Open the vendor's user fill stream.
+   against vendor trade history. Hydrate EMA-50/ATR-14. Open the configured
+   live price source. Open the vendor's user fill stream.
 2. **Tick.** Every 250 ms, detect window rollover, capture lines,
    evaluate decisions, fire `placeWithRetry` for empty slots that
    pass the edge filter.
@@ -141,18 +143,21 @@ Everything else lives in single-responsibility modules under `live/`.
 
 The complete vendor contract lives in
 [src/lib/trading/vendor/types.ts](../src/lib/trading/vendor/types.ts).
-Seven methods, all named for what the runner needs rather than how
+Methods are named for what the runner needs rather than how
 Polymarket happens to expose it today:
 
-| Method               | Purpose                                                  | Network shape                                     |
-| -------------------- | -------------------------------------------------------- | ------------------------------------------------- |
-| `discoverMarket`     | Locate the venue's market for an `(asset, windowStart)`  | REST GETs for Gamma + venue constraints           |
-| `fetchBook`          | Top-of-book plus venue tick/min-size constraints         | Two parallel REST GETs                            |
-| `placeMakerLimitBuy` | Sign + post a `postOnly: true` GTD limit BUY             | One REST POST (signed)                            |
-| `cancelOrder`        | Cancel a resting order by id                             | One REST POST (signed)                            |
-| `streamUserFills`    | Long-lived WS for our wallet's fill events               | One auth WS, auto-reconnecting                    |
-| `hydrateMarketState` | Open orders + cumulative fills for one market            | Two parallel REST GETs (signed)                   |
-| `scanLifetimePnl`    | Walk all wallet trades and compute realized lifetime PnL | Paginated REST + per-market REST (concurrency 10) |
+| Method                 | Purpose                                                  | Network shape                                     |
+| ---------------------- | -------------------------------------------------------- | ------------------------------------------------- |
+| `discoverMarket`       | Locate the venue's market for an `(asset, windowStart)`  | REST GETs for Gamma + venue constraints           |
+| `fetchBook`            | Top-of-book, depth, and venue tick/min-size constraints  | Two parallel REST GETs                            |
+| `prepareMakerLimitBuy` | Validate/round/size a maker BUY without signing it       | Local/read-only                                   |
+| `placeMakerLimitBuy`   | Sign + post a `postOnly: true` GTD limit BUY             | One REST POST (signed)                            |
+| `cancelOrder`          | Cancel a resting order by id                             | One REST POST (signed)                            |
+| `streamMarketData`     | Public market book/trade/resolution updates             | One public WS, auto-reconnecting                  |
+| `streamUserFills`      | Long-lived WS for our wallet's fill events               | One auth WS, auto-reconnecting                    |
+| `hydrateMarketState`   | Open orders + cumulative fills for one market            | Two parallel REST GETs (signed)                   |
+| `resolveMarketOutcome` | Read official token winner for a market                  | One public REST GET                               |
+| `scanLifetimePnl`      | Walk all wallet trades and compute realized lifetime PnL | Paginated REST + per-market REST (concurrency 10) |
 
 `PostOnlyRejectionError` is a typed throw from `placeMakerLimitBuy`;
 the runner's retry loop distinguishes it from generic errors.
@@ -261,18 +266,27 @@ several-thousand-trade wallet it can take 30 s – 2 min depending on
 how many unique markets we have to resolve. The CLI prints
 incremental progress so the operator can see it advancing.
 
-### Polymarket CLOB WS (user fill stream)
+### Polymarket CLOB WS
+
+`wss://ws-subscriptions-clob.polymarket.com/ws/market`. Public
+market channel used by dry trading to observe order-book changes,
+last trade prices, tick-size changes, and official resolution events.
+Subscriptions are by CLOB token id and include
+`custom_feature_enabled: true` so `best_bid_ask` and `market_resolved`
+frames are emitted. Dry trading uses `last_trade_price` frames for
+queue-aware fill simulation and `market_resolved` as the fastest
+official outcome source, with REST resolution as fallback.
 
 `wss://ws-subscriptions-clob.polymarket.com/ws/user`. Authenticated
-on every connect with the L2 HMAC bundle.
+user channel used only by live trading.
 
-| Stream     | Usage                                       | Frequency                                                                                                 |
-| ---------- | ------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
-| `/ws/user` | Real-time fill notifications for our wallet | Continuous, narrowed to the active conditionIds; resubscribed on every market discovery (~once per 5 min) |
+| Stream       | Usage                                       | Frequency                                                                                                 |
+| ------------ | ------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
+| `/ws/market` | Public market book/trade/resolution events | Continuous, narrowed to active token IDs; dry-run resubscribes on market discovery                        |
+| `/ws/user`   | Real-time fill notifications for our wallet | Continuous, narrowed to active conditionIds; live resubscribes on every market discovery (~once per 5 min) |
 
-Reconnect schedule mirrors the Binance feed: `[1, 2, 5, 10, 30] s`.
-Connect + auth-subscribe round trip is comparable to Binance's first-
-frame measurement (~700 ms – 1 s).
+Reconnect schedule mirrors the live price feed: `[1, 2, 5, 10, 30] s`.
+The user stream authenticates on connect; the market stream is public.
 
 ### Telegram Bot API
 
@@ -288,6 +302,7 @@ loop. A failed send logs a `warn` and keeps moving.
 | Path                                   | Usage                   | Frequency                                   |
 | -------------------------------------- | ----------------------- | ------------------------------------------- |
 | `tmp/lifetime-pnl.json` (atomic write) | Lifetime PnL checkpoint | Read at boot; rewritten after startup reconciliation and once per window-end |
+| `tmp/dry-trading/dry-trading_<timestamp>.jsonl` | Dry-trading session ledger | New file per dry-run session; append session/window/order records |
 
 ## Failure modes and recovery
 
@@ -391,11 +406,28 @@ model change shows up as a reviewable diff.
 
 ### `trading:dry-run`
 
-`bun alea trading:dry-run` runs the full decision pipeline against
-real feeds without placing any order — only the read-side of the
-`Vendor` interface is exercised, so it can run without
-`POLYMARKET_PRIVATE_KEY` set. Right tool for inspecting signals or
-debugging the model without risking a dollar.
+`bun alea trading:dry-run` runs the live decision and maker-order
+preparation path against real feeds without signing, placing, or
+cancelling any order. It still discovers real Polymarket markets,
+hydrates real books, performs the same just-in-time book refresh before
+entry, prepares the same GTD maker BUY shape live would post, and then
+tracks whether public market trades would likely have filled it.
+
+Dry fills are queue-aware by default:
+
+- A later trade below our BUY limit fills the simulated order at our
+  limit.
+- A later trade exactly at our limit fills only after observed size
+  clears the placement-time queue ahead.
+- Unknown same-price queue depth is treated conservatively as
+  unfilled, though the optimistic touch counterfactual is still logged.
+
+Each session writes `tmp/dry-trading/dry-trading_<timestamp>.jsonl`.
+The ledger appends `session_start`, `virtual_order`,
+`window_checkpoint`, `window_finalized`, and `session_stop` records.
+Finalized windows include canonical queue-aware fill metrics plus
+optimistic touch, all-orders-filled, and unfilled-order counterfactual
+PnL/win-rate views.
 
 ### `trading:live --commit`
 
@@ -438,7 +470,7 @@ Vendor-agnostic core:
 - Lifetime PnL math (pure): [src/lib/trading/state/computeLifetimePnl.ts](../src/lib/trading/state/computeLifetimePnl.ts)
 - Telegram composers: [src/lib/trading/telegram/](../src/lib/trading/telegram/)
 - Live runner (orchestrator + per-concern modules): [src/lib/trading/live/](../src/lib/trading/live/)
-- Dry-run runner: [src/lib/trading/dryRun/runDryRun.ts](../src/lib/trading/dryRun/runDryRun.ts)
+- Dry-run simulator: [src/lib/trading/dryRun/](../src/lib/trading/dryRun/)
 - Probability table types + generator: [src/lib/trading/](../src/lib/trading/)
 - Live price feed: [src/lib/livePrices/](../src/lib/livePrices/)
 

@@ -12,20 +12,18 @@ import pc from "picocolors";
 import { z } from "zod";
 
 /**
- * Long-running dry-run trader. No orders are placed and no auth is
- * exercised — the daemon connects to Binance perp BBO + 5m kline
- * streams, polls the Polymarket up/down book, runs the same decision
- * evaluator the live trader will use, and prints what it *would* have
- * done. Designed to be the first thing an operator runs after
- * generating a fresh probability table: a few minutes of clean output
- * proves the wiring before any money goes in.
+ * Long-running dry trader. No orders are placed and no auth is
+ * exercised. The daemon connects to the same live price source as the
+ * live trader, discovers current Polymarket markets, subscribes to the
+ * public market-data websocket, prepares virtual maker orders through
+ * the vendor order-prep path, and simulates queue-aware fills.
  */
 export const tradingDryRunCommand = defineCommand({
   name: "trading:dry-run",
   summary:
-    "Run the live decision pipeline against real feeds without placing orders",
+    "Simulate live trading against real feeds without placing orders",
   description:
-    "Loads the committed probability table, hydrates EMA-50 from the Binance fapi REST endpoint, opens a single combined-stream WebSocket for bookTicker + kline_5m on every requested asset, polls the Polymarket CLOB book for the current 5m up/down market every 2s, and prints a structured decision line on every minute boundary inside each window. Exits cleanly on SIGINT.",
+    "Loads the committed probability table, hydrates moving trackers from the configured live price source, opens live price and Polymarket public market-data websockets, runs the same decision and maker-order preparation path as trading:live, and simulates queue-aware fills instead of signing or posting orders. Appends JSONL session/window records under tmp/dry-trading/ and exits cleanly on SIGINT.",
   options: [
     defineValueOption({
       key: "assets",
@@ -57,9 +55,9 @@ export const tradingDryRunCommand = defineCommand({
     "bun alea trading:dry-run --min-edge 0.08",
   ],
   output:
-    "Streams a one-line-per-event log: boot status, ws/connect cycles, per-minute decisions, per-window summaries.",
+    "Streams a one-line-per-event log: boot status, ws/connect cycles, per-minute decisions, virtual orders/fills, and finalized dry-window summaries. Writes a timestamped JSONL session log under tmp/dry-trading/.",
   sideEffects:
-    "Opens a Binance perp WebSocket; calls fapi.binance.com REST at boot for EMA-50 hydration; polls Polymarket gamma-api and CLOB REST endpoints every few seconds. No orders are placed; no Polymarket auth is exercised.",
+    "Opens live price and Polymarket public market-data WebSockets; calls price-source REST at boot and settlement; polls Polymarket gamma-api/CLOB read endpoints; appends JSONL files under alea/tmp/dry-trading/. No orders are placed, cancelled, signed, or authenticated.",
   async run({ io, options }) {
     if (probabilityTable.assets.length === 0) {
       throw new CliUsageError(

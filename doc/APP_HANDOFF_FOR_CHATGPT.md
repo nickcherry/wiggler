@@ -36,9 +36,10 @@ The app has four large operating modes:
 3. Offline training: reads historical Binance perpetual candles and produces
    survival surfaces and filter overlays. A production subset of this training
    becomes the committed live probability table.
-4. Trading: dry-run and live runners use Binance perpetual futures as the fast
-   live price input, Polymarket as the venue, a generated probability table as
-   the model, and Telegram as the operator notification channel.
+4. Trading: dry-run and live runners use an injected live price source
+   (Binance perpetual futures by default), Polymarket as the venue, a generated
+   probability table as the model, and Telegram as the live operator
+   notification channel.
 
 The live trader currently trades Polymarket through a vendor abstraction. It
 only places maker-only limit BUY orders on YES outcome tokens. It does not
@@ -1197,33 +1198,41 @@ Source:
 
 Purpose:
 
-- Runs the live decision pipeline against real feeds without placing orders.
-- Uses only read-side vendor methods: `discoverMarket` and `fetchBook`.
+- Runs the live decision and maker-order preparation path against real feeds
+  without placing orders.
+- Uses read-only vendor methods: `discoverMarket`, `fetchBook`,
+  `prepareMakerLimitBuy`, `streamMarketData`, and `resolveMarketOutcome`.
 - Does not open user fill stream.
 - Does not hydrate lifetime PnL.
 - Does not require Polymarket credentials.
 - Does not send Telegram messages.
+- Writes a timestamped JSONL session ledger under `tmp/dry-trading/`.
 
 Flow:
 
 1. Create EMA and ATR trackers per asset.
-2. Hydrate recent 60 closed five-minute Binance perp bars per asset.
-3. Start Binance perp websocket for BBO ticks and five-minute close bars.
-4. Start book polling every 2000 ms for discovered markets.
+2. Hydrate recent 60 closed five-minute bars from the configured live price
+   source.
+3. Start the live price websocket for BBO ticks and five-minute close bars.
+4. Discover markets, poll books, and subscribe to Polymarket public market
+   websocket updates for active token IDs.
 5. Tick every 250 ms.
-6. On window rollover, emit previous window summary, create new per-asset
-   window state, capture line from last tick if available, and asynchronously
-   discover market.
-7. On each remaining-minute bucket transition, run `evaluateDecision`.
-8. Print formatted decision lines and window summaries.
+6. On window rollover, create new per-asset window state and asynchronously
+   discover markets.
+7. Use the same freshness checks and `evaluateDecision` path as live trading.
+8. On TAKE, force a just-in-time book refresh, re-evaluate, prepare the maker
+   GTD order through the vendor, then create a virtual order.
+9. Simulate queue-aware fills from `last_trade_price` events and write
+   `window_checkpoint` / `window_finalized` JSONL records.
 
 Dry-run differences from live:
 
-- Dry-run captures line from last tick if available when the window state is
-  created, then later captures from any tick if still null. Live has stricter
-  freshness/line-capture checks.
+- Dry-run prepares but never signs, posts, or cancels orders.
+- Dry-run uses the public market websocket for simulated fills and official
+  resolution, with REST outcome lookup as fallback.
+- Dry-run tracks canonical queue-aware fills plus touch/all-filled/unfilled
+  counterfactual metrics. Live tracks real user fills and wallet PnL.
 - Dry-run book poll interval is 2000 ms. Live uses 1500 ms.
-- Dry-run does not require hydration status from venue state.
 
 ## Live Trader
 
@@ -1874,12 +1883,13 @@ Dry-run trading flow:
 
 1. Load committed probability table.
 2. Create lazy Polymarket vendor without credentials.
-3. Hydrate EMA/ATR from Binance recent bars.
-4. Stream Binance perp ticks and close bars.
+3. Hydrate EMA/ATR from the injected live price source.
+4. Stream live price ticks and close bars.
 5. Discover Polymarket markets.
-6. Poll books.
-7. Run evaluator and print decisions.
-8. Place no orders.
+6. Poll books and stream public market data.
+7. Run evaluator and prepare virtual maker orders through the vendor.
+8. Simulate queue-aware fills and official-first settlement.
+9. Append JSONL session/window/order records under `tmp/dry-trading/`.
 
 Live trading flow:
 
