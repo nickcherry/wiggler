@@ -383,8 +383,15 @@ export function renderTrainingDistributionsHtml({
       text-transform: none;
       color: var(--alea-text-subtle);
     }
-    .filter-tab .filter-tab-delta-good { color: var(--alea-green); }
-    .filter-tab .filter-tab-delta-bad { color: var(--alea-red); }
+    .filter-tab .filter-tab-delta-good {
+      color: var(--alea-green);
+      font-weight: 600;
+    }
+    .filter-tab .filter-tab-delta-bad {
+      color: var(--alea-red);
+      font-weight: 600;
+      margin-left: 6px;
+    }
     .filter-tab.active .filter-tab-delta-good { color: var(--alea-green); }
     .filter-tab.active .filter-tab-delta-bad { color: var(--alea-red); }
     /* Asset-wide best/worst hotspot dots, prepended to the tab label. */
@@ -483,13 +490,22 @@ export function renderTrainingDistributionsHtml({
       color: var(--alea-text-muted);
     }
     .filter-summary-score .score-value {
-      font-weight: 600;
       letter-spacing: 0.04em;
       text-transform: none;
       font-size: 12px;
     }
-    .filter-summary-score .score-value-good { color: var(--alea-green); }
-    .filter-summary-score .score-value-bad { color: var(--alea-red); }
+    .filter-summary-score .score-value-good {
+      color: var(--alea-green);
+      font-weight: 600;
+    }
+    .filter-summary-score .score-value-bad {
+      color: var(--alea-red);
+      font-weight: 600;
+    }
+    .filter-summary-score .score-value-sep {
+      color: var(--alea-text-subtle);
+      margin: 0 4px;
+    }
     .filter-summary-score .filter-tab-dot {
       display: inline-block;
       width: 6px;
@@ -1029,31 +1045,62 @@ export function renderTrainingDistributionsHtml({
       return pct < 10 ? pct.toFixed(1) + "%" : Math.round(pct) + "%";
     }
 
-    // Picks the "headline" score for a tab: the half whose |score| is
-    // largest, returning the signed score. The badge sign tells you
-    // which way it leans (positive = do-trade, negative = avoid-trade).
-    function pickTabSignedScore(remainingEntry) {
+    // Returns the largest-magnitude positive score and the largest-
+    // magnitude negative score across BOTH halves of a tab. Binary
+    // filter halves are anti-correlated: at every comparable bucket
+    // one half's delta is positive and the other negative, so the
+    // summed scores almost always have opposite signs. Showing only
+    // one (the larger-magnitude one) hid half the story — we want
+    // both the do-trade and avoid-trade signal visible at once so
+    // neither side is implicitly painted as good or bad.
+    //
+    // Returns null when neither half has any comparable buckets;
+    // otherwise an object with positive and negative (either may be
+    // null on its own when both halves happened to land on the same
+    // sign — degenerate, but possible with sample-weighted scoring).
+    function pickTabBothScores(remainingEntry) {
       const trueOk = remainingEntry.true.coverageBp > 0;
       const falseOk = remainingEntry.false.coverageBp > 0;
       if (!trueOk && !falseOk) return null;
-      const trueAbs = trueOk ? Math.abs(remainingEntry.true.score) : -1;
-      const falseAbs = falseOk ? Math.abs(remainingEntry.false.score) : -1;
-      return trueAbs >= falseAbs
-        ? remainingEntry.true.score
-        : remainingEntry.false.score;
+      const scores = [];
+      if (trueOk) scores.push(remainingEntry.true.score);
+      if (falseOk) scores.push(remainingEntry.false.score);
+      let positive = null;
+      let negative = null;
+      for (const s of scores) {
+        if (s > 0 && (positive === null || s > positive)) positive = s;
+        if (s < 0 && (negative === null || s < negative)) negative = s;
+      }
+      // Magnitude used by the tab sort + default-tab picker.
+      const magnitude = Math.max.apply(null, scores.map(Math.abs));
+      return { positive: positive, negative: negative, magnitude: magnitude };
     }
 
-    function formatScore(value) {
+    function formatScoreNumber(value) {
       if (value === null || value === undefined || !Number.isFinite(value)) return "—";
-      const rounded = Math.round(value);
-      return (rounded > 0 ? "+" : rounded < 0 ? "−" : "") + Math.abs(rounded);
+      return Math.abs(Math.round(value)).toString();
     }
 
     function formatTabBadge(remainingEntry) {
-      const signed = pickTabSignedScore(remainingEntry);
-      if (signed === null) return "";
-      const cls = signed > 0 ? "filter-tab-delta-good" : signed < 0 ? "filter-tab-delta-bad" : "";
-      return ' <span class="filter-tab-delta ' + cls + '">' + formatScore(signed) + '</span>';
+      const pair = pickTabBothScores(remainingEntry);
+      if (pair === null) return "";
+      const parts = [];
+      if (pair.positive !== null) {
+        parts.push(
+          '<span class="filter-tab-delta-good">+' +
+            formatScoreNumber(pair.positive) +
+            '</span>',
+        );
+      }
+      if (pair.negative !== null) {
+        parts.push(
+          '<span class="filter-tab-delta-bad">−' +
+            formatScoreNumber(pair.negative) +
+            '</span>',
+        );
+      }
+      if (parts.length === 0) return "";
+      return ' <span class="filter-tab-delta">' + parts.join(' ') + '</span>';
     }
 
     function buildFilterChart({ host, filter, remaining }) {
@@ -1343,27 +1390,23 @@ export function renderTrainingDistributionsHtml({
         '<span class="alea-legend-item"><span class="alea-legend-swatch" style="background:' + filterColors.whenTrue + '"></span>' + filter.trueLabel + '</span>' +
         '<span class="alea-legend-item"><span class="alea-legend-swatch" style="background:' + filterColors.whenFalse + '"></span>' + filter.falseLabel + '</span>';
 
-      // Sort tabs by |signed badge score| descending so the strongest
-      // signal sits leftmost — the one we default to. Tabs without
-      // measurable data sink to the right with no badge.
+      // Tabs render in fixed 4m → 1m order so the operator can compare
+      // the same column across filters at a glance. The strongest
+      // signal still gets the default-selected highlight (via
+      // filter.defaultRemaining), but the order itself stays put.
       const tabsSorted = survivalRemainingOrder.slice().map((rem) => {
-        const signed = pickTabSignedScore(summary.scoresByRemaining[rem]);
-        return { rem: rem, signedScore: signed };
-      });
-      tabsSorted.sort((a, b) => {
-        const aMag = a.signedScore === null ? -1 : Math.abs(a.signedScore);
-        const bMag = b.signedScore === null ? -1 : Math.abs(b.signedScore);
-        return bMag - aMag;
+        const pair = pickTabBothScores(summary.scoresByRemaining[rem]);
+        return { rem: rem, pair: pair };
       });
       const tabsHtml = tabsSorted.map((entry) => {
         const rem = entry.rem;
         const isActive = rem === filter.defaultRemaining;
         const badge = formatTabBadge(summary.scoresByRemaining[rem]);
         // Asset-wide "best signal" / "worst signal" hotspots get a
-        // small dot before the label, so the operator can spot the
-        // top do-trade and avoid-trade configs at a glance across
-        // every filter section. Both can apply to the same tab when
-        // the binary halves split into both extremes there.
+        // small dot before the label, so the operator can spot the top
+        // do-trade and avoid-trade configs at a glance across every
+        // filter section. Both can apply to the same tab when the
+        // binary halves split into both extremes there.
         let dot = "";
         if (hotspots.best && hotspots.best.filterId === filter.id && hotspots.best.remaining === rem) {
           dot += '<span class="filter-tab-dot filter-tab-dot-best" title="strongest do-trade signal for this asset"></span>';
@@ -1378,15 +1421,32 @@ export function renderTrainingDistributionsHtml({
         );
       }).join("");
       // Per-config score pills shown in the collapsed header. Same
-      // ordering as the tabs (sorted by |score| desc), each with a
-      // signed score and the asset-wide best/worst dot if applicable.
+      // ordering as the tabs (sorted by magnitude desc), each with both
+      // the positive and negative score visible — the binary halves
+      // are anti-correlated so showing one was hiding half the story.
       const summaryScoresHtml = tabsSorted.map((entry) => {
         const rem = entry.rem;
-        const signed = entry.signedScore;
-        const valueCls = signed === null ? "" :
-          signed > 0 ? "score-value-good" :
-          signed < 0 ? "score-value-bad" : "";
-        const valueText = signed === null ? "—" : formatScore(signed);
+        const pair = entry.pair;
+        const valueParts = [];
+        if (pair !== null) {
+          if (pair.positive !== null) {
+            valueParts.push(
+              '<span class="score-value-good">+' +
+                formatScoreNumber(pair.positive) +
+                '</span>',
+            );
+          }
+          if (pair.negative !== null) {
+            valueParts.push(
+              '<span class="score-value-bad">−' +
+                formatScoreNumber(pair.negative) +
+                '</span>',
+            );
+          }
+        }
+        const valueHtml = valueParts.length > 0
+          ? valueParts.join('<span class="score-value-sep"> </span>')
+          : '<span class="score-value">—</span>';
         let dot = "";
         if (hotspots.best && hotspots.best.filterId === filter.id && hotspots.best.remaining === rem) {
           dot += '<span class="filter-tab-dot filter-tab-dot-best" title="strongest do-trade signal for this asset"></span>';
@@ -1398,7 +1458,7 @@ export function renderTrainingDistributionsHtml({
           '<span class="filter-summary-score">' +
             dot +
             '<span class="score-rem">' + rem + 'm</span>' +
-            '<span class="score-value ' + valueCls + '">' + valueText + '</span>' +
+            '<span class="score-value">' + valueHtml + '</span>' +
           '</span>'
         );
       }).join("");
