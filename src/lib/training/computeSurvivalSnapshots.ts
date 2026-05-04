@@ -82,6 +82,60 @@ export type SurvivalSnapshotContext = {
 
   /** 50-period EMA of 5m closes; same semantics as `ema20x5m`. */
   readonly ema50x5m: number | null;
+
+  /**
+   * Slope of the EMA-50 over the last 10 completed 5m bars, expressed
+   * as the % change `(ema50_now − ema50_10ago) / ema50_10ago * 100`.
+   * Positive = trend rising, negative = falling. Decoupled from the
+   * price-vs-EMA filter — a flat trend can still have price above the
+   * MA. `null` until 10 prior EMA-50 readings are available.
+   */
+  readonly ema50SlopePct: number | null;
+
+  /**
+   * 14-period RSI on 5m closes (Wilder's smoothing). Range 0–100, with
+   * 50 the neutral midpoint. `null` until 14 prior closes are available.
+   */
+  readonly rsi14x5m: number | null;
+
+  /**
+   * Rate-of-change over the last 20 completed 5m bars, in percent:
+   * `(close_now − close_20ago) / close_20ago * 100`. Sign indicates
+   * direction; magnitude indicates momentum. `null` until 20 prior
+   * closes are available.
+   */
+  readonly roc20Pct: number | null;
+
+  /**
+   * 14-period Average True Range on 5m bars. Wilder's smoothing on
+   * `max(high−low, |high−prevClose|, |prevClose−low|)`. Used as a
+   * volatility unit for stretch-from-mean and range-expansion filters.
+   */
+  readonly atr14x5m: number | null;
+
+  /** 50-period ATR on 5m bars. Used for vol-regime comparison vs ATR-14. */
+  readonly atr50x5m: number | null;
+
+  /**
+   * Highest high and lowest low across the last 50 completed 5m bars
+   * — a Donchian channel. Used to position the current price within
+   * its recent range. Both fields `null` until 50 prior bars exist.
+   */
+  readonly donchian50High: number | null;
+  readonly donchian50Low: number | null;
+
+  /**
+   * The most recent COMPLETED 5m bar's OHLC (the one ending at the
+   * start of the current window). Used by bar-shape filters
+   * (body/range ratio, range expansion). `null` when no prior bar is
+   * present in the loaded series.
+   */
+  readonly prev5mBar: {
+    readonly open: number;
+    readonly high: number;
+    readonly low: number;
+    readonly close: number;
+  } | null;
 };
 
 const SNAPSHOTS: readonly {
@@ -104,7 +158,7 @@ const MS_PER_1M = 60 * 1000;
  * any bump, so don't rev it for non-semantic refactors. Standalone export
  * so cache callers don't need to know the file's internals.
  */
-export const SNAPSHOT_PIPELINE_VERSION = 5;
+export const SNAPSHOT_PIPELINE_VERSION = 6;
 
 /**
  * Walks the 1m candle series, emitting one `SurvivalSnapshot` per usable
@@ -152,6 +206,15 @@ export function* computeSurvivalSnapshots({
     const ma50x5m = ma20Index?.smaAt({ windowStartMs, period: 50 }) ?? null;
     const ema20x5m = ma20Index?.ema20At({ windowStartMs }) ?? null;
     const ema50x5m = ma20Index?.ema50At({ windowStartMs }) ?? null;
+    const ema50SlopePct =
+      ma20Index?.ema50SlopePctAt({ windowStartMs }) ?? null;
+    const rsi14x5m = ma20Index?.rsi14At({ windowStartMs }) ?? null;
+    const roc20Pct = ma20Index?.roc20PctAt({ windowStartMs }) ?? null;
+    const atr14x5m = ma20Index?.atrAt({ windowStartMs, period: 14 }) ?? null;
+    const atr50x5m = ma20Index?.atrAt({ windowStartMs, period: 50 }) ?? null;
+    const donchian50 =
+      ma20Index?.donchianAt({ windowStartMs, period: 50 }) ?? null;
+    const prev5mBar = ma20Index?.prevBarAt({ windowStartMs }) ?? null;
     // `idx` is currently only consumed by the dropped 1m lookbacks,
     // but the iterator still needs it for callers that may want it
     // back; keep it referenced so the type-checker doesn't complain
@@ -190,6 +253,14 @@ export function* computeSurvivalSnapshots({
           ma50x5m,
           ema20x5m,
           ema50x5m,
+          ema50SlopePct,
+          rsi14x5m,
+          roc20Pct,
+          atr14x5m,
+          atr50x5m,
+          donchian50High: donchian50?.high ?? null,
+          donchian50Low: donchian50?.low ?? null,
+          prev5mBar,
         },
       };
     }
@@ -249,12 +320,20 @@ function* iterateWindows(candles: readonly Candle[]): Generator<{
  *
  *   - `smaAt({ period })` — N-period SMA of close prices (O(1) via prefix sum).
  *   - `ema20At` / `ema50At` — N-period EMA, precomputed per-index (O(1) lookup).
+ *   - `ema50SlopePctAt` — % change in EMA-50 over the last 10 bars.
+ *   - `rsi14At` — 14-period Wilder RSI on closes.
+ *   - `roc20PctAt` — 20-bar % rate of change.
+ *   - `atrAt({ period })` — N-period Wilder ATR (14 and 50 supported).
+ *   - `donchianAt({ period })` — N-bar high/low range (50 supported).
+ *   - `prevBarAt` — OHLC of the most recent completed bar.
  *   - `lastThreeDirectionsAt` / `lastFiveDirectionsAt` — directions of the
  *     N most recent completed bars (oldest first).
  *
  * EMA convention: smoothing factor α = 2 / (N + 1), seeded with the SMA
- * of the first N closes and rolled forward thereafter. EMA value at
- * index `i` represents the EMA computed THROUGH AND INCLUDING bar `i`.
+ * of the first N closes and rolled forward thereafter. RSI + ATR use
+ * Wilder smoothing (α = 1/N), seeded with simple averages over the
+ * first N samples. All series indexed so `seriesAt[i]` = value computed
+ * THROUGH AND INCLUDING bar i.
  */
 type FiveMinuteIndex = {
   readonly smaAt: (input: {
@@ -267,6 +346,31 @@ type FiveMinuteIndex = {
   readonly ema50At: (input: {
     readonly windowStartMs: number;
   }) => number | null;
+  readonly ema50SlopePctAt: (input: {
+    readonly windowStartMs: number;
+  }) => number | null;
+  readonly rsi14At: (input: {
+    readonly windowStartMs: number;
+  }) => number | null;
+  readonly roc20PctAt: (input: {
+    readonly windowStartMs: number;
+  }) => number | null;
+  readonly atrAt: (input: {
+    readonly windowStartMs: number;
+    readonly period: 14 | 50;
+  }) => number | null;
+  readonly donchianAt: (input: {
+    readonly windowStartMs: number;
+    readonly period: 50;
+  }) => { readonly high: number; readonly low: number } | null;
+  readonly prevBarAt: (input: {
+    readonly windowStartMs: number;
+  }) => {
+    readonly open: number;
+    readonly high: number;
+    readonly low: number;
+    readonly close: number;
+  } | null;
   readonly lastThreeDirectionsAt: (input: {
     readonly windowStartMs: number;
   }) => readonly [SurvivalSide, SurvivalSide, SurvivalSide] | null;
@@ -283,6 +387,9 @@ type FiveMinuteIndex = {
     | null;
 };
 
+const EMA50_SLOPE_LOOKBACK = 10;
+const ROC_PERIOD = 20;
+
 function build5mLookback({
   candles5m,
 }: {
@@ -293,11 +400,14 @@ function build5mLookback({
   }
   // Single O(n) pass over the 5m series (already sorted ascending by
   // the loader): build the chronological start-time array for binary
-  // search, the per-index direction array for last-N lookups, the
-  // running cumulative-close prefix sum used to answer SMAs in O(1),
-  // and the per-index EMA arrays for the EMA periods we expose.
+  // search, per-index OHLC + direction arrays for bar-shape filters,
+  // the running cumulative-close prefix sum used to answer SMAs in
+  // O(1), and the per-index EMA arrays for the EMA periods we expose.
   const startTimes: number[] = [];
   const directions: SurvivalSide[] = [];
+  const opens: number[] = [];
+  const highs: number[] = [];
+  const lows: number[] = [];
   const closes: number[] = [];
   const cumulativeCloses: number[] = []; // cumulativeCloses[i] = Σ closes[0..i]
   let cumulative = 0;
@@ -307,12 +417,18 @@ function build5mLookback({
     cumulative += candle.close;
     startTimes.push(startMs);
     directions.push(direction);
+    opens.push(candle.open);
+    highs.push(candle.high);
+    lows.push(candle.low);
     closes.push(candle.close);
     cumulativeCloses.push(cumulative);
   }
 
   const ema20 = computeEmaSeries({ closes, period: 20 });
   const ema50 = computeEmaSeries({ closes, period: 50 });
+  const rsi14 = computeWilderRsiSeries({ closes, period: 14 });
+  const atr14 = computeWilderAtrSeries({ highs, lows, closes, period: 14 });
+  const atr50 = computeWilderAtrSeries({ highs, lows, closes, period: 50 });
 
   const indexAtOrBefore = (target: number): number => {
     let lo = 0;
@@ -375,26 +491,116 @@ function build5mLookback({
     },
     ema20At: ({ windowStartMs }) => {
       const lastIdx = indexAtOrBefore(windowStartMs);
-      if (lastIdx < 0) {return null;}
+      if (lastIdx < 0) {
+        return null;
+      }
       return ema20[lastIdx] ?? null;
     },
     ema50At: ({ windowStartMs }) => {
       const lastIdx = indexAtOrBefore(windowStartMs);
-      if (lastIdx < 0) {return null;}
+      if (lastIdx < 0) {
+        return null;
+      }
       return ema50[lastIdx] ?? null;
+    },
+    ema50SlopePctAt: ({ windowStartMs }) => {
+      const lastIdx = indexAtOrBefore(windowStartMs);
+      if (lastIdx < EMA50_SLOPE_LOOKBACK) {
+        return null;
+      }
+      const now = ema50[lastIdx];
+      const past = ema50[lastIdx - EMA50_SLOPE_LOOKBACK];
+      if (now == null || past == null || past === 0) {
+        return null;
+      }
+      return ((now - past) / past) * 100;
+    },
+    rsi14At: ({ windowStartMs }) => {
+      const lastIdx = indexAtOrBefore(windowStartMs);
+      if (lastIdx < 0) {
+        return null;
+      }
+      return rsi14[lastIdx] ?? null;
+    },
+    roc20PctAt: ({ windowStartMs }) => {
+      const lastIdx = indexAtOrBefore(windowStartMs);
+      if (lastIdx < ROC_PERIOD) {
+        return null;
+      }
+      const now = closes[lastIdx];
+      const past = closes[lastIdx - ROC_PERIOD];
+      if (now === undefined || past === undefined || past === 0) {
+        return null;
+      }
+      return ((now - past) / past) * 100;
+    },
+    atrAt: ({ windowStartMs, period }) => {
+      const lastIdx = indexAtOrBefore(windowStartMs);
+      if (lastIdx < 0) {
+        return null;
+      }
+      const series = period === 14 ? atr14 : atr50;
+      return series[lastIdx] ?? null;
+    },
+    donchianAt: ({ windowStartMs, period }) => {
+      const lastIdx = indexAtOrBefore(windowStartMs);
+      if (lastIdx < period - 1) {
+        return null;
+      }
+      let hi = -Infinity;
+      let lo = Infinity;
+      for (let k = lastIdx - period + 1; k <= lastIdx; k += 1) {
+        const h = highs[k];
+        const l = lows[k];
+        if (h === undefined || l === undefined) {
+          return null;
+        }
+        if (h > hi) {
+          hi = h;
+        }
+        if (l < lo) {
+          lo = l;
+        }
+      }
+      return { high: hi, low: lo };
+    },
+    prevBarAt: ({ windowStartMs }) => {
+      const lastIdx = indexAtOrBefore(windowStartMs);
+      if (lastIdx < 0) {
+        return null;
+      }
+      const o = opens[lastIdx];
+      const h = highs[lastIdx];
+      const l = lows[lastIdx];
+      const c = closes[lastIdx];
+      if (
+        o === undefined ||
+        h === undefined ||
+        l === undefined ||
+        c === undefined
+      ) {
+        return null;
+      }
+      return { open: o, high: h, low: l, close: c };
     },
     lastThreeDirectionsAt: ({ windowStartMs }) => {
       const lastIdx = indexAtOrBefore(windowStartMs);
       const out = lastNDirections(lastIdx, 3);
-      if (out === null) {return null;}
+      if (out === null) {
+        return null;
+      }
       const [a, b, c] = out;
-      if (a === undefined || b === undefined || c === undefined) {return null;}
+      if (a === undefined || b === undefined || c === undefined) {
+        return null;
+      }
       return [a, b, c];
     },
     lastFiveDirectionsAt: ({ windowStartMs }) => {
       const lastIdx = indexAtOrBefore(windowStartMs);
       const out = lastNDirections(lastIdx, 5);
-      if (out === null) {return null;}
+      if (out === null) {
+        return null;
+      }
       const [a, b, c, d, e] = out;
       if (
         a === undefined ||
@@ -447,6 +653,144 @@ function computeEmaSeries({
       continue;
     }
     prev = alpha * c + (1 - alpha) * prev;
+    out[i] = prev;
+  }
+  return out;
+}
+
+/**
+ * Wilder RSI series: `out[i]` is the N-period RSI computed through and
+ * including `closes[i]`. Implementation follows the canonical Wilder
+ * smoothing: average gains and losses over the first N intervals
+ * (using diff between consecutive closes), then roll forward with
+ * `avg = ((N-1)*avg_prev + current) / N`. RSI = 100 − 100/(1 + RS)
+ * where RS = avgGain / avgLoss. The first usable index is `period`
+ * (need N price diffs); earlier indices are `null`.
+ */
+function computeWilderRsiSeries({
+  closes,
+  period,
+}: {
+  readonly closes: readonly number[];
+  readonly period: number;
+}): (number | null)[] {
+  const out: (number | null)[] = new Array<number | null>(closes.length).fill(
+    null,
+  );
+  if (closes.length <= period) {
+    return out;
+  }
+  let gainSum = 0;
+  let lossSum = 0;
+  for (let i = 1; i <= period; i += 1) {
+    const a = closes[i - 1];
+    const b = closes[i];
+    if (a === undefined || b === undefined) {
+      return out;
+    }
+    const diff = b - a;
+    if (diff >= 0) {
+      gainSum += diff;
+    } else {
+      lossSum -= diff;
+    }
+  }
+  let avgGain = gainSum / period;
+  let avgLoss = lossSum / period;
+  out[period] = rsiOf({ avgGain, avgLoss });
+  for (let i = period + 1; i < closes.length; i += 1) {
+    const a = closes[i - 1];
+    const b = closes[i];
+    if (a === undefined || b === undefined) {
+      continue;
+    }
+    const diff = b - a;
+    const gain = diff > 0 ? diff : 0;
+    const loss = diff < 0 ? -diff : 0;
+    avgGain = (avgGain * (period - 1) + gain) / period;
+    avgLoss = (avgLoss * (period - 1) + loss) / period;
+    out[i] = rsiOf({ avgGain, avgLoss });
+  }
+  return out;
+}
+
+function rsiOf({
+  avgGain,
+  avgLoss,
+}: {
+  readonly avgGain: number;
+  readonly avgLoss: number;
+}): number {
+  if (avgLoss === 0) {
+    return 100;
+  }
+  const rs = avgGain / avgLoss;
+  return 100 - 100 / (1 + rs);
+}
+
+/**
+ * Wilder ATR series. True range per bar i:
+ *   TR_i = max(high_i − low_i, |high_i − close_{i-1}|, |close_{i-1} − low_i|)
+ * The ATR series uses Wilder smoothing seeded with the simple average
+ * of the first N true ranges, then `atr_i = ((N-1)·atr_{i-1} + TR_i) / N`.
+ * `out[i]` is the ATR through and including bar i; first usable index
+ * is `period - 1` (need N bars to seed). Indices before that are `null`.
+ */
+function computeWilderAtrSeries({
+  highs,
+  lows,
+  closes,
+  period,
+}: {
+  readonly highs: readonly number[];
+  readonly lows: readonly number[];
+  readonly closes: readonly number[];
+  readonly period: number;
+}): (number | null)[] {
+  const n = closes.length;
+  const out: (number | null)[] = new Array<number | null>(n).fill(null);
+  if (n < period) {
+    return out;
+  }
+  // True range per bar; bar 0's TR is just high − low (no prior close).
+  const tr: number[] = new Array<number>(n).fill(0);
+  for (let i = 0; i < n; i += 1) {
+    const h = highs[i];
+    const l = lows[i];
+    if (h === undefined || l === undefined) {
+      return out;
+    }
+    if (i === 0) {
+      tr[i] = h - l;
+      continue;
+    }
+    const prevClose = closes[i - 1];
+    if (prevClose === undefined) {
+      return out;
+    }
+    tr[i] = Math.max(
+      h - l,
+      Math.abs(h - prevClose),
+      Math.abs(prevClose - l),
+    );
+  }
+  // Seed with simple average of first `period` TR values.
+  let sum = 0;
+  for (let i = 0; i < period; i += 1) {
+    const v = tr[i];
+    if (v === undefined) {
+      return out;
+    }
+    sum += v;
+  }
+  let prev = sum / period;
+  out[period - 1] = prev;
+  for (let i = period; i < n; i += 1) {
+    const v = tr[i];
+    if (v === undefined) {
+      continue;
+    }
+    prev = (prev * (period - 1) + v) / period;
     out[i] = prev;
   }
   return out;

@@ -18,6 +18,14 @@ function emptyContext(): SurvivalSnapshotContext {
     ma50x5m: null,
     ema20x5m: null,
     ema50x5m: null,
+    ema50SlopePct: null,
+    rsi14x5m: null,
+    roc20Pct: null,
+    atr14x5m: null,
+    atr50x5m: null,
+    donchian50High: null,
+    donchian50Low: null,
+    prev5mBar: null,
   };
 }
 

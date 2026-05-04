@@ -3,7 +3,7 @@ import type {
   SurvivalSnapshot,
   SurvivalSnapshotContext,
 } from "@alea/lib/training/computeSurvivalSnapshots";
-import { ma205mAlignmentFilter } from "@alea/lib/training/survivalFilters/ma205mAlignment/filter";
+import { donchian50TopAlignmentFilter } from "@alea/lib/training/survivalFilters/donchian50TopAlignment/filter";
 import { describe, expect, it } from "bun:test";
 
 function emptyContext(): SurvivalSnapshotContext {
@@ -28,11 +28,11 @@ function emptyContext(): SurvivalSnapshotContext {
 function buildSnapshot({
   currentSide,
   line = 100,
-  context,
+  ctx,
 }: {
   readonly currentSide: SurvivalSide;
   readonly line?: number;
-  readonly context: SurvivalSnapshotContext;
+  readonly ctx: SurvivalSnapshotContext;
 }): SurvivalSnapshot {
   return {
     windowStartMs: 0,
@@ -45,43 +45,40 @@ function buildSnapshot({
     distanceBp: 0,
     remaining: 1,
     survived: true,
-    context,
+    context: ctx,
   };
 }
 
-describe("ma205mAlignmentFilter", () => {
-  it("aligns UP when line >= MA", () => {
+describe("donchian50TopAlignmentFilter", () => {
+  it("line in top half + UP = aligned", () => {
     const snap = buildSnapshot({
       currentSide: "up",
-      line: 105,
-      context: { ...emptyContext(), ma20x5m: 100 },
+      line: 110,
+      ctx: { ...emptyContext(), donchian50High: 120, donchian50Low: 100 },
     });
-    expect(ma205mAlignmentFilter.classify(snap, snap.context)).toBe(true);
+    expect(donchian50TopAlignmentFilter.classify(snap, snap.context)).toBe(true);
   });
 
-  it("DOWN against bullish regime is not aligned", () => {
+  it("line in bottom half + DOWN = aligned", () => {
     const snap = buildSnapshot({
       currentSide: "down",
-      line: 105,
-      context: { ...emptyContext(), ma20x5m: 100 },
+      line: 102,
+      ctx: { ...emptyContext(), donchian50High: 120, donchian50Low: 100 },
     });
-    expect(ma205mAlignmentFilter.classify(snap, snap.context)).toBe(false);
+    expect(donchian50TopAlignmentFilter.classify(snap, snap.context)).toBe(true);
   });
 
-  it("aligns DOWN when line < MA", () => {
-    const snap = buildSnapshot({
-      currentSide: "down",
-      line: 95,
-      context: { ...emptyContext(), ma20x5m: 100 },
-    });
-    expect(ma205mAlignmentFilter.classify(snap, snap.context)).toBe(true);
-  });
-
-  it("skips when MA unavailable", () => {
+  it("skips on degenerate range", () => {
     const snap = buildSnapshot({
       currentSide: "up",
-      context: emptyContext(),
+      line: 100,
+      ctx: { ...emptyContext(), donchian50High: 100, donchian50Low: 100 },
     });
-    expect(ma205mAlignmentFilter.classify(snap, snap.context)).toBe("skip");
+    expect(donchian50TopAlignmentFilter.classify(snap, snap.context)).toBe("skip");
+  });
+
+  it("skips when range unavailable", () => {
+    const snap = buildSnapshot({ currentSide: "up", ctx: emptyContext() });
+    expect(donchian50TopAlignmentFilter.classify(snap, snap.context)).toBe("skip");
   });
 });

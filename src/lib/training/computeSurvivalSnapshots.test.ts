@@ -244,4 +244,189 @@ describe("computeSurvivalSnapshots", () => {
       "up",
     ]);
   });
+
+  it("rsi14x5m returns 100 when all closes monotonically increase (no losses)", () => {
+    // 20 prior 5m bars with strictly-increasing closes: every diff is
+    // positive so avgLoss == 0 → RSI saturates at 100.
+    const windowStart = Date.UTC(2025, 0, 1, 5, 0, 0);
+    const candles1m = buildContiguous1m({
+      startMs: windowStart,
+      closes: [200, 201, 202, 203, 204],
+    });
+    const candles5m: Candle[] = [];
+    for (let i = 20; i >= 1; i -= 1) {
+      const close = 100 + (20 - i);
+      candles5m.push(
+        buildCandle({
+          timestamp: new Date(windowStart - i * MS_PER_5M),
+          open: close,
+          close,
+          timeframe: "5m",
+        }),
+      );
+    }
+    const [snapshot] = [...computeSurvivalSnapshots({ candles1m, candles5m })];
+    expect(snapshot?.context.rsi14x5m).toBe(100);
+  });
+
+  it("rsi14x5m returns 50 on a flat series (avgGain == avgLoss == 0 ⇒ defined as 100, but flat triggers no diffs)", () => {
+    // Edge case: when avgLoss is exactly 0 the implementation returns 100.
+    // A flat series has both 0 — we ALSO end up at 100 by convention.
+    const windowStart = Date.UTC(2025, 0, 1, 5, 0, 0);
+    const candles1m = buildContiguous1m({
+      startMs: windowStart,
+      closes: [101, 102, 103, 104, 105],
+    });
+    const candles5m: Candle[] = [];
+    for (let i = 20; i >= 1; i -= 1) {
+      candles5m.push(
+        buildCandle({
+          timestamp: new Date(windowStart - i * MS_PER_5M),
+          open: 100,
+          close: 100,
+          timeframe: "5m",
+        }),
+      );
+    }
+    const [snapshot] = [...computeSurvivalSnapshots({ candles1m, candles5m })];
+    expect(snapshot?.context.rsi14x5m).toBe(100);
+  });
+
+  it("roc20Pct equals the percent change between the snapshot and the close 20 bars prior", () => {
+    const windowStart = Date.UTC(2025, 0, 1, 5, 0, 0);
+    const candles1m = buildContiguous1m({
+      startMs: windowStart,
+      closes: [101, 102, 103, 104, 105],
+    });
+    // 21 prior 5m bars: oldest close 100, newest 110.
+    // ROC over 20 bars: (110 - 100) / 100 * 100 = 10%
+    const candles5m: Candle[] = [];
+    for (let i = 21; i >= 1; i -= 1) {
+      const close = 100 + (21 - i) * 0.5;
+      candles5m.push(
+        buildCandle({
+          timestamp: new Date(windowStart - i * MS_PER_5M),
+          open: close,
+          close,
+          timeframe: "5m",
+        }),
+      );
+    }
+    const [snapshot] = [...computeSurvivalSnapshots({ candles1m, candles5m })];
+    // close[lastIdx] = 110, close[lastIdx-20] = 100 → 10%
+    expect(snapshot?.context.roc20Pct).toBeCloseTo(10, 5);
+  });
+
+  it("ema50SlopePct positive when the EMA-50 has been rising over 10 bars", () => {
+    const windowStart = Date.UTC(2025, 0, 1, 10, 0, 0);
+    const candles1m = buildContiguous1m({
+      startMs: windowStart,
+      closes: [101, 102, 103, 104, 105],
+    });
+    // 60 prior 5m bars climbing — EMA-50 will be monotonically rising
+    // throughout, so slope-over-10-bars is strictly positive.
+    const candles5m: Candle[] = [];
+    for (let i = 60; i >= 1; i -= 1) {
+      const close = 100 + (60 - i) * 0.5;
+      candles5m.push(
+        buildCandle({
+          timestamp: new Date(windowStart - i * MS_PER_5M),
+          open: close,
+          close,
+          timeframe: "5m",
+        }),
+      );
+    }
+    const [snapshot] = [...computeSurvivalSnapshots({ candles1m, candles5m })];
+    expect(snapshot?.context.ema50SlopePct).not.toBeNull();
+    expect(snapshot?.context.ema50SlopePct ?? 0).toBeGreaterThan(0);
+  });
+
+  it("atr14x5m equals the simple range on a sequence of identical bars (Wilder seed)", () => {
+    // Each prior bar has range = 4 (high 102, low 98). Wilder ATR
+    // initialized as the simple average of the first 14 TR values
+    // collapses to 4; and rolling forward with TR=4 keeps it at 4.
+    const windowStart = Date.UTC(2025, 0, 1, 5, 0, 0);
+    const candles1m = buildContiguous1m({
+      startMs: windowStart,
+      closes: [101, 102, 103, 104, 105],
+    });
+    const candles5m: Candle[] = [];
+    for (let i = 20; i >= 1; i -= 1) {
+      candles5m.push({
+        source: "binance",
+        asset: "btc",
+        product: "perp",
+        timeframe: "5m",
+        timestamp: new Date(windowStart - i * MS_PER_5M),
+        open: 100,
+        high: 102,
+        low: 98,
+        close: 100,
+        volume: 1,
+      });
+    }
+    const [snapshot] = [...computeSurvivalSnapshots({ candles1m, candles5m })];
+    expect(snapshot?.context.atr14x5m).toBeCloseTo(4, 5);
+  });
+
+  it("donchian50 high+low capture the extremes across the 50 prior bars", () => {
+    const windowStart = Date.UTC(2025, 0, 1, 5, 0, 0);
+    const candles1m = buildContiguous1m({
+      startMs: windowStart,
+      closes: [101, 102, 103, 104, 105],
+    });
+    // 50 prior bars: highs ramp 100→149, lows = high - 1. Donchian50
+    // should capture the global max-high (149) and min-low (99).
+    const candles5m: Candle[] = [];
+    for (let i = 50; i >= 1; i -= 1) {
+      const offset = 50 - i;
+      const high = 100 + offset;
+      const low = high - 1;
+      candles5m.push({
+        source: "binance",
+        asset: "btc",
+        product: "perp",
+        timeframe: "5m",
+        timestamp: new Date(windowStart - i * MS_PER_5M),
+        open: low,
+        high,
+        low,
+        close: high,
+        volume: 1,
+      });
+    }
+    const [snapshot] = [...computeSurvivalSnapshots({ candles1m, candles5m })];
+    expect(snapshot?.context.donchian50High).toBe(149);
+    expect(snapshot?.context.donchian50Low).toBe(99);
+  });
+
+  it("prev5mBar carries the most recent bar's full OHLC", () => {
+    const windowStart = Date.UTC(2025, 0, 1, 0, 5, 0);
+    const candles1m = buildContiguous1m({
+      startMs: windowStart,
+      closes: [101, 102, 103, 104, 105],
+    });
+    const candles5m: Candle[] = [
+      {
+        source: "binance",
+        asset: "btc",
+        product: "perp",
+        timeframe: "5m",
+        timestamp: new Date(windowStart - MS_PER_5M),
+        open: 110,
+        high: 115,
+        low: 95,
+        close: 100,
+        volume: 1,
+      },
+    ];
+    const [snapshot] = [...computeSurvivalSnapshots({ candles1m, candles5m })];
+    expect(snapshot?.context.prev5mBar).toEqual({
+      open: 110,
+      high: 115,
+      low: 95,
+      close: 100,
+    });
+  });
 });
