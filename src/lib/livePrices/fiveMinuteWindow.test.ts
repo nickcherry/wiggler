@@ -39,17 +39,19 @@ describe("fiveMinuteWindow", () => {
     ).toBe(4 * 60_000);
   });
 
-  it("flooredRemainingMinutes lands on the four trading minutes", () => {
+  it("flooredRemainingMinutes mirrors the training snapshot convention", () => {
     const cases: { offsetMs: number; expected: 1 | 2 | 3 | 4 | null }[] = [
-      { offsetMs: 0, expected: 4 },
-      { offsetMs: 30_000, expected: 4 },
-      { offsetMs: 60_000, expected: 3 },
-      { offsetMs: 119_999, expected: 3 },
-      { offsetMs: 120_000, expected: 2 },
-      { offsetMs: 180_000, expected: 1 },
-      { offsetMs: 239_999, expected: 1 },
-      { offsetMs: 240_000, expected: null },
-      { offsetMs: 299_999, expected: null },
+      { offsetMs: 0, expected: null },
+      { offsetMs: 30_000, expected: null },
+      { offsetMs: 59_999, expected: null },
+      { offsetMs: 60_000, expected: 4 },
+      { offsetMs: 119_999, expected: 4 },
+      { offsetMs: 120_000, expected: 3 },
+      { offsetMs: 180_000, expected: 2 },
+      { offsetMs: 239_999, expected: 2 },
+      { offsetMs: 240_000, expected: 1 },
+      { offsetMs: 299_999, expected: 1 },
+      { offsetMs: 300_000, expected: null },
     ];
     for (const { offsetMs, expected } of cases) {
       expect(
