@@ -507,7 +507,12 @@ export function renderTrainingDistributionsHtml({
       letter-spacing: 0.16em;
       text-transform: uppercase;
       white-space: nowrap;
-      transition: transform 160ms ease, color 120ms ease;
+      /* Fix the column width so the title (1fr) doesn't reflow when
+         the chevron text swaps between "expand ▾" and "collapse ▴". */
+      display: inline-block;
+      min-width: 92px;
+      text-align: right;
+      transition: color 120ms ease;
     }
     details.filter-section[open] > summary > .filter-summary-chevron {
       color: var(--alea-gold);
@@ -872,17 +877,12 @@ export function renderTrainingDistributionsHtml({
       font-weight: 500;
       font-size: 13px;
     }
-    .cross-asset-summary .ca-cell-pop-faint { color: var(--alea-text-muted); }
     .cross-asset-summary .ca-cell-sweet {
-      color: var(--alea-gold);
+      color: var(--alea-text);
       font-size: 11px;
       letter-spacing: 0.04em;
       display: block;
       margin-top: 2px;
-    }
-    .cross-asset-summary .ca-cell-sweet-empty {
-      color: var(--alea-text-subtle);
-      font-style: italic;
     }
     .cross-asset-summary .ca-filter-cell {
       display: flex;
@@ -2228,16 +2228,14 @@ function renderCrossAssetSummary({
         .map((slice) => {
           const filter = slice.filters.find((f) => f.id === entry.id);
           if (filter === undefined) {
-            return `<td><span class="ca-cell-pop ca-cell-pop-faint">—</span></td>`;
+            return `<td><span class="ca-cell-pop">—</span></td>`;
           }
           const popPct =
             (filter.summary.calibrationScore / baselineLogLossNats) * 100;
-          const popClass =
-            popPct < 0.05 ? "ca-cell-pop ca-cell-pop-faint" : "ca-cell-pop";
           const sweetHtml = renderCrossAssetSweetCell({ filter });
           return (
             `<td>` +
-              `<span class="${popClass}">${popPct.toFixed(2)}%</span>` +
+              `<span class="ca-cell-pop">${popPct.toFixed(2)}%</span>` +
               sweetHtml +
             `</td>`
           );
@@ -2287,7 +2285,7 @@ function renderCrossAssetSweetCell({
   const ss = (filter.summary as { sweetSpot?: { startBp: number; endBp: number } | null })
     .sweetSpot;
   if (ss === null || ss === undefined) {
-    return `<span class="ca-cell-sweet ca-cell-sweet-empty">no sweet spot</span>`;
+    return `<span class="ca-cell-sweet">no sweet spot</span>`;
   }
   return `<span class="ca-cell-sweet">[${ss.startBp}–${ss.endBp}] bp</span>`;
 }
