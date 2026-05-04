@@ -1,47 +1,39 @@
-import { bullishBodyAlignmentFilter } from "@alea/lib/training/survivalFilters/bullishBodyAlignment/filter";
 import { donchian50TopAlignmentFilter } from "@alea/lib/training/survivalFilters/donchian50TopAlignment/filter";
-import { ema20AboveEma50AlignmentFilter } from "@alea/lib/training/survivalFilters/ema20AboveEma50Alignment/filter";
-import { ema50SlopeAlignmentFilter } from "@alea/lib/training/survivalFilters/ema50SlopeAlignment/filter";
 import { ema505mAlignmentFilter } from "@alea/lib/training/survivalFilters/ema505mAlignment/filter";
-import { europeanSessionFilter } from "@alea/lib/training/survivalFilters/europeanSession/filter";
 import { rangeExpansionFilter } from "@alea/lib/training/survivalFilters/rangeExpansion/filter";
-import { roc205mAlignmentFilter } from "@alea/lib/training/survivalFilters/roc205mAlignment/filter";
 import { rsi145mAlignmentFilter } from "@alea/lib/training/survivalFilters/rsi145mAlignment/filter";
 import { stretchedFromEma50AlignmentFilter } from "@alea/lib/training/survivalFilters/stretchedFromEma50Alignment/filter";
 import type { SurvivalFilter } from "@alea/lib/training/survivalFilters/types";
 import { volCompressionFilter } from "@alea/lib/training/survivalFilters/volCompression/filter";
 
 /**
- * Active filters the dashboard renders. Two groups:
+ * Active filters the dashboard renders. Selected as the union of the
+ * top-5 by max |score| across each of the 5 active assets after the
+ * 10-filter A/B in 2026-05:
  *
- *   1. The reigning champion — `ema_50_5m_alignment` — at the top so
- *      its scores are always in the first comparison slot.
- *   2. 10 experimental filters being A/B'd against it: 4 trend
- *      variants, 2 momentum/extension, 4 orthogonal-mechanism
- *      (bar-shape, vol-event, vol-regime, time-of-day).
+ *   - vol_compression — clear winner across every asset (~99–129 score
+ *     range, 2-3× EMA-50). Quiet markets hold direction better.
+ *   - stretched_from_ema_50 — strong second; mean-reversion signal
+ *     when price is ≥1 ATR-14 from the EMA-50.
+ *   - range_expansion — vol-event signal; strong magnitude on the
+ *     "after-spike" half but only ~12% occurrence.
+ *   - ema_50_5m_alignment — kept regardless; the original baby and
+ *     still solidly top-5 on every asset.
+ *   - rsi_14 — top-5 on every asset.
+ *   - donchian_50_top — top-5 only on SOL but kept since the union
+ *     of per-asset top-5s permits per-asset variance.
  *
- * Each filter lives in its own subdirectory under `survivalFilters/`
- * (`filter.ts` + `filter.test.ts`); registration here is what makes
- * the dashboard compute and display it. To freeze the active set,
- * comment out the imports + entries you don't want.
+ * Implementations of the filters that didn't make the cut
+ * (ema_20_above_ema_50, ema_50_slope, roc_20, bullish_body,
+ * european_session) have been removed entirely. Older 5m-trend
+ * filters (last_3, last_5, ma_20, ma_50, ema_20) remain on disk
+ * unregistered for easy A/B reactivation if the question changes.
  */
 export const survivalFilters: readonly SurvivalFilter[] = [
-  // Reigning champion.
-  ema505mAlignmentFilter,
-  // Trend-direction variants.
-  ema20AboveEma50AlignmentFilter,
-  ema50SlopeAlignmentFilter,
-  rsi145mAlignmentFilter,
-  roc205mAlignmentFilter,
-  // Range / extension.
-  donchian50TopAlignmentFilter,
-  stretchedFromEma50AlignmentFilter,
-  // Bar-shape and vol-event.
-  bullishBodyAlignmentFilter,
-  rangeExpansionFilter,
-  // Vol-regime and time-of-day (most orthogonal).
   volCompressionFilter,
-  europeanSessionFilter,
-  // Other implementations are on disk under `survivalFilters/`
-  // (last3, last5, ma20, ma50, ema20) but unregistered.
+  stretchedFromEma50AlignmentFilter,
+  rangeExpansionFilter,
+  ema505mAlignmentFilter,
+  rsi145mAlignmentFilter,
+  donchian50TopAlignmentFilter,
 ];
