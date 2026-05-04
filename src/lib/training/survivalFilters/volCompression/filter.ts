@@ -13,7 +13,7 @@ export const volCompressionFilter: SurvivalFilter = {
   id: "vol_compression",
   displayName: "Volatility compression (ATR14 < ATR50)",
   description:
-    "Splits snapshots by whether short-term realized volatility (ATR-14) is below the longer-term reference (ATR-50).",
+    "Is the market unusually quiet right now? (Recent volatility is below its longer-term baseline.)",
   trueLabel: "compressed vol",
   falseLabel: "expanded vol",
   version: 1,

@@ -48,6 +48,21 @@ export type SurvivalFilter = {
   /**
    * One-or-two-sentence prose explanation of what the split means.
    * Rendered verbatim under the section title.
+   *
+   * Style guide:
+   *   - Phrase as a yes/no question. Filters are binary splits, so a
+   *     question reads naturally: "Is price decisively away from
+   *     the window's open?" (✓) vs "Splits snapshots by..." (✗).
+   *   - Write for a non-quant reader. Translate jargon: "ATR-14"
+   *     becomes "typical 5-min swing", "EMA-50" becomes "longer-
+   *     term trend", "current side" becomes "leading side", "5m
+   *     start line" becomes "where the window opened".
+   *   - It's fine — encouraged — to mention the precise threshold
+   *     in parentheses for the reader who wants the technical
+   *     version, e.g. "(at least half a typical 5-min swing away)"
+   *     or "(RSI ≥ 70 or ≤ 30)". Keep it short.
+   *   - Aim for ≤ 25 words. The dashboard renders the description
+   *     verbatim and a long blurb pushes the chart down.
    */
   readonly description: string;
 

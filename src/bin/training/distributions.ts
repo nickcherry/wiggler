@@ -427,6 +427,26 @@ async function processAsset({
     }
   }
 
+  // Overlay the live filter object's display metadata
+  // (displayName, description, labels) on top of cached entries so
+  // copy edits don't need a cache invalidation. The cached entry's
+  // numerical surfaces are authoritative; only the labels swap in.
+  if (perFilter !== null) {
+    perFilter = perFilter.map((entry) => {
+      const live = survivalFilters.find((f) => f.id === entry.id);
+      if (live === undefined) {
+        return entry;
+      }
+      return {
+        ...entry,
+        displayName: live.displayName,
+        description: live.description,
+        trueLabel: live.trueLabel,
+        falseLabel: live.falseLabel,
+      };
+    });
+  }
+
   const filterResults: AssetSurvivalFilters | null =
     perFilter === null ? null : { asset, results: perFilter };
 

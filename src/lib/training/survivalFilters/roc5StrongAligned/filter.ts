@@ -17,7 +17,7 @@ export const roc5StrongAlignedFilter: SurvivalFilter = {
   id: "roc_5_strong_aligned",
   displayName: "ROC-5 strong + aligned",
   description:
-    "Splits snapshots where |ROC-5| ≥ 0.25% by whether the current side matches the ROC's direction.",
+    "Is fresh momentum pushing in the leading side's direction? (Price moved ≥ 0.25% over the last 25 minutes, with the side.)",
   trueLabel: "with strong ROC-5",
   falseLabel: "against strong ROC-5",
   version: 1,

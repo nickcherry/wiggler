@@ -18,7 +18,7 @@ export const ema505mAlignmentFilter: SurvivalFilter = {
   id: "ema_50_5m_alignment",
   displayName: "50-period 5m EMA alignment",
   description:
-    "Splits snapshots by whether the current side agrees with the line-vs-EMA50 regime at the start of the window.",
+    "Is the leading side aligned with the longer-term trend (price above/below EMA-50 at window open)?",
   trueLabel: "aligned with EMA50",
   falseLabel: "against EMA50",
   version: 1,

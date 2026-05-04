@@ -20,7 +20,7 @@ export const distanceAtrWithEmaAlignedFilter: SurvivalFilter = {
   id: "distance_atr_with_ema_aligned",
   displayName: "Decisively away AND EMA-50 aligned",
   description:
-    "Splits snapshots by whether they are BOTH ≥ 0.5 × ATR-14 from the line AND have the current side aligned with EMA-50.",
+    "Is price both decisively away from the window's open AND riding the longer-term trend?",
   trueLabel: "decisive + trend-aligned",
   falseLabel: "either condition fails",
   version: 1,

@@ -19,7 +19,7 @@ export const volumeHighAlignedFilter: SurvivalFilter = {
   id: "volume_high_aligned",
   displayName: "Volume spike + bar aligned with side",
   description:
-    "Splits snapshots by whether the most recent 5m bar had volume ≥ 1.5× the trailing 50-bar average AND the bar's direction matched the current side.",
+    "Did the last 5-min bar print on heavy volume (≥ 1.5× recent average) and close in the leading side's direction?",
   trueLabel: "vol-confirmed continuation",
   falseLabel: "no spike or against",
   version: 1,

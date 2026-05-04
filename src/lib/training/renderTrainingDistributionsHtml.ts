@@ -466,9 +466,14 @@ export function renderTrainingDistributionsHtml({
     }
     /* When the section is open the in-section tab strip is the
        canonical source for per-rem scores; the collapsed-header
-       summary pills would just duplicate it, so hide them. */
+       summary pills would just duplicate it, so hide them. Also
+       tighten the summary's bottom padding so the description
+       sits closer to the title. */
     details.filter-section[open] > summary > .filter-summary-scores {
       display: none;
+    }
+    details.filter-section[open] > summary {
+      padding-bottom: 6px;
     }
     /* Score pills span the full width on their own row. Pills are
        fixed 140px so columns line up across filter sections. The

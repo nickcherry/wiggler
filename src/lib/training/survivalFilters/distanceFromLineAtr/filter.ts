@@ -14,7 +14,7 @@ export const distanceFromLineAtrFilter: SurvivalFilter = {
   id: "distance_from_line_atr",
   displayName: "Distance from price line ≥ 0.5 ATR",
   description:
-    "Splits snapshots by whether the current price has moved at least 0.5× ATR-14 away from the 5m start line.",
+    "Has price decisively pulled away from where the window opened? (At least half a typical 5-min swing away.)",
   trueLabel: "decisively away",
   falseLabel: "near the line",
   version: 1,

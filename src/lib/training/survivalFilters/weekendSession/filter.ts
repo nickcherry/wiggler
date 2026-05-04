@@ -17,7 +17,7 @@ export const weekendSessionFilter: SurvivalFilter = {
   id: "weekend_session",
   displayName: "Weekend (UTC Sat/Sun)",
   description:
-    "Splits snapshots by whether the 5m window started on a UTC Saturday or Sunday.",
+    "Is the window on a weekend (UTC Saturday or Sunday)?",
   trueLabel: "weekend",
   falseLabel: "weekday",
   version: 1,

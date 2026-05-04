@@ -17,7 +17,7 @@ export const recentBreakoutAlignedFilter: SurvivalFilter = {
   id: "recent_breakout_aligned",
   displayName: "Fresh 50-bar extreme + aligned",
   description:
-    "Splits snapshots by whether the 50-bar high (or low) printed within the last 5 completed 5m bars AND the current side matches that extreme's direction.",
+    "Did price just break to a new 50-bar high or low (within the last 5 bars), with the leading side riding it?",
   trueLabel: "fresh breakout + aligned",
   falseLabel: "no fresh breakout / against",
   version: 1,

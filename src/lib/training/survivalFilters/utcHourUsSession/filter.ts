@@ -21,7 +21,7 @@ export const utcHourUsSessionFilter: SurvivalFilter = {
   id: "utc_hour_us_session",
   displayName: "UTC US session (13:00–21:00)",
   description:
-    "Splits snapshots by whether the 5m window started during the US session (UTC hours 13–21).",
+    "Is the window during US trading hours (UTC 13–21, when NYSE is open)?",
   trueLabel: "US session",
   falseLabel: "off-hours",
   version: 1,
