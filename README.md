@@ -18,6 +18,7 @@ when the modeled edge clears the market.
 
 ### Engineering
 
+- [Polymarket Integration](./doc/POLYMARKET.md) — endpoint contracts and external docs we rely on.
 - [Coding Conventions](./doc/CODING_CONVENTIONS.md) — repo structure, TypeScript style, and testing expectations.
 - [Documentation](./doc/DOCUMENTATION.md) — how project docs should be written and maintained.
 - [How To Work With Nick](./doc/HOW_TO_WORK_WITH_NICK.md) — collaboration preferences.

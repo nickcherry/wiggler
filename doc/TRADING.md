@@ -31,12 +31,13 @@ at the 5m boundary, per the venue's resolution oracle (Polymarket
 uses Chainlink BTC/USD and friends).
 
 **Measurement vs. settlement.** The model conditions on Binance USDT-
-margined perpetual futures, not the resolution oracle: Binance is
-faster (tens of milliseconds vs. Chainlink's hundreds), the relative
-move tracks the oracle closely, and the trade-off (an occasional
-Binance↔Chainlink directional disagreement) is dwarfed by the
-latency win on entry. The wallet's USDC balance — not our internal
-PnL accounting — remains the on-chain source of truth.
+margined perpetual futures, not the resolution oracle: Binance is denser
+and arrives earlier, while Polymarket's Chainlink-derived RTDS baseline is
+slower (~1 Hz and visibly delayed during sharp moves). The relative move
+tracks the oracle closely, and the trade-off (an occasional
+Binance↔Chainlink directional disagreement) is dwarfed by the latency win
+on entry. The wallet's USDC balance — not our internal PnL accounting —
+remains the on-chain source of truth.
 
 Each in-window snapshot is classified by:
 
@@ -348,7 +349,7 @@ Latest Window Pnl: $0.00
 Total Pnl: -$143.21
 ```
 
-### Order error (terminal — only after one silent retry also failed)
+### Order error alert (only after one silent retry also failed)
 
 ```
 Error placing SOL ↑ order: polymarket clob 502 (gateway timeout)

@@ -61,9 +61,9 @@ const cacheDir = resolvePath(tmpDir, "cache/training-distributions");
  */
 export const trainingDistributionsCommand = defineCommand({
   name: "training:distributions",
-  summary: "Compute candle body/wick percentile distributions per asset",
+  summary: "Compute training distributions, survival surfaces, and filters",
   description:
-    "Reads the local Postgres for the configured training candle series (today: binance-perp 5m) and computes percentile distributions of the body (|close - open| / open) and wick ((high - low) / open) for each requested asset, outputting an HTML dashboard with one tab per asset plus a JSON sidecar containing the same data plus per-year breakdowns.",
+    "Reads local Postgres for the configured training candle series (today: binance-perp 5m plus matching 1m snapshots) and computes body/wick distributions, the point-of-no-return survival surface, and every registered binary filter overlay. Writes an HTML dashboard focused on survival/filter analysis plus a JSON sidecar with the full raw payload.",
   options: [
     defineValueOption({
       key: "assets",

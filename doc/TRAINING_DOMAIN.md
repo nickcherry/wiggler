@@ -5,9 +5,13 @@
 Training is the offline-analysis side of the project: we pull historical candles
 out of the local database and study them to figure out where live-trading
 thresholds should sit. It is intentionally separate from the trading bot
-itself — these scripts never place orders, never hit external APIs, and never
-mutate the candles table. They read, compute, and write artifacts to
-`alea/tmp/`.
+itself. The analysis path never places orders and never mutates the candles
+table. It reads local Postgres, computes, and writes artifacts to `alea/tmp/`.
+
+By default `training:distributions` has no external network dependency beyond
+the local database. The explicit `--deploy` flag is the exception: after
+rendering the dashboard locally, it shells out to Wrangler and publishes the
+latest HTML to the Alea Cloudflare Worker.
 
 The dashboards under this domain are temp pages, not product pages. The
 visual pattern they share is documented in
@@ -15,12 +19,17 @@ visual pattern they share is documented in
 
 ## Candle series under study
 
-Today the training domain studies a single candle series:
-**binance-perp 5m**. That choice is centralized in
+Today the training domain studies one canonical source/product pair:
+**binance-perp**. The default timeframe for that pair is **5m**, centralized in
 [`src/constants/training.ts`](../src/constants/training.ts) as
 `trainingCandleSeries`. Every analysis pulls from this constant rather than
 hardcoding source/product/timeframe separately, so widening or swapping the
 series later is a one-line edit.
+
+Some analyses also need the matching **1m** bars for the same source/product.
+The survival pipeline uses 1m closes for in-window snapshots and 5m bars for
+the window line plus lookback context. Body/wick distributions use only the
+canonical 5m slice.
 
 The `(source, product, timeframe)` tuple itself is typed as
 [`CandleSeries`](../src/types/candleSeries.ts), with a Zod schema sourced
@@ -31,8 +40,8 @@ from the existing `candleSourceSchema`, `productSchema`, and
 
 ### `training:distributions`
 
-`bun alea training:distributions` runs three analyses in one pass and writes
-a paired HTML dashboard and JSON sidecar to `alea/tmp/`:
+`bun alea training:distributions` runs three local analyses in one pass and
+writes a paired HTML dashboard and JSON sidecar to `alea/tmp/`:
 
 1. **Candle size distributions** — body and wick percentiles per asset
    (described below).
@@ -75,8 +84,9 @@ Percentiles use the standard linear-interpolation convention (numpy `linear`):
 So `p99 body = 0.18%` reads as "99% of 5-minute bars have a body smaller than
 0.18% of their open price."
 
-The HTML page only renders totals across all years; per-year breakdowns live
-only in the JSON. To answer "what was BTC body p99 in 2024", read the JSON:
+Body/wick distributions are computed and persisted in the JSON sidecar, but
+the current HTML dashboard focuses on the survival surface and filter overlays.
+To answer "what was BTC body p99 in 2024", read the JSON:
 `assets[btc].byYear["2024"].body[99]`.
 
 ## Survival surface
@@ -198,13 +208,13 @@ Useful for spotting where in the window an edge concentrates.
 
 For each `(remaining, half)` cell, the dashboard shows:
 
-| Field | Unit | What it answers |
-|---|---|---|
-| `score` | pp·bp, signed | Sample-weighted signed area between the half's win-rate curve and the **filter-conditioned** baseline (kept-population's average), integrated across distance buckets. |
-| `meanDeltaPp` | pp, signed | Sample-weighted mean of the per-bucket pp deltas. Edge magnitude per bucket. |
-| `sharpe` | dimensionless | `meanDelta / stdev(delta)` across buckets. Edge consistency. |
-| `logLossImprovementNats` | nats/snapshot | Information gain vs the **conditioned** baseline (different from `calibrationScore`, which uses the global baseline). |
-| `coverageBp` | count of buckets | How many distance buckets cleared the sample-count floor for both halves. |
+| Field                    | Unit             | What it answers                                                                                                                                                        |
+| ------------------------ | ---------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `score`                  | pp·bp, signed    | Sample-weighted signed area between the half's win-rate curve and the **filter-conditioned** baseline (kept-population's average), integrated across distance buckets. |
+| `meanDeltaPp`            | pp, signed       | Sample-weighted mean of the per-bucket pp deltas. Edge magnitude per bucket.                                                                                           |
+| `sharpe`                 | dimensionless    | `meanDelta / stdev(delta)` across buckets. Edge consistency.                                                                                                           |
+| `logLossImprovementNats` | nats/snapshot    | Information gain vs the **conditioned** baseline (different from `calibrationScore`, which uses the global baseline).                                                  |
+| `coverageBp`             | count of buckets | How many distance buckets cleared the sample-count floor for both halves.                                                                                              |
 
 Sharpe values run higher in our system than financial-Sharpe convention
 suggests — median is around 1.9 because the conditioned baseline tightens
@@ -274,10 +284,10 @@ Two files per run, written next to each other in `alea/tmp/`:
 - `training-distributions_<UTC-iso>.html` — the dashboard.
 - `training-distributions_<UTC-iso>.json` — the raw payload.
 
-The HTML page renders totals across all years. Per-year breakdowns and
-the full per-asset survival/filter surfaces live in the JSON sidecar — to
-answer "what was BTC body p99 in 2024", read
-`assets[btc].byYear["2024"].body[99]`.
+The HTML dashboard focuses on point-of-no-return survival and filter overlays.
+The JSON sidecar is the full raw payload: body/wick distributions, per-year
+breakdowns, and the per-asset survival/filter surfaces. To answer "what was BTC
+body p99 in 2024", read `assets[btc].byYear["2024"].body[99]`.
 
 The dashboard contract (visual identity, layout, file naming) is in
 [DASHBOARDS.md](./DASHBOARDS.md).

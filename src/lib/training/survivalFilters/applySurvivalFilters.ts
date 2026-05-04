@@ -345,7 +345,9 @@ function computeSummary({
   >;
   for (const remaining of REMAINING_VALUES) {
     calibrationScoreByRemaining[remaining] =
-      snapshotsTotal === 0 ? 0 : natsSavedByRemaining[remaining] / snapshotsTotal;
+      snapshotsTotal === 0
+        ? 0
+        : natsSavedByRemaining[remaining] / snapshotsTotal;
   }
   return {
     snapshotsTotal,
@@ -373,17 +375,24 @@ function natsSavedVsGlobal({
   readonly globalBuckets: readonly SurvivalBucket[];
 }): number {
   const globalByDistance = new Map<number, SurvivalBucket>();
-  for (const b of globalBuckets) globalByDistance.set(b.distanceBp, b);
+  for (const b of globalBuckets) {
+    globalByDistance.set(b.distanceBp, b);
+  }
   let total = 0;
   for (const half of halfBuckets) {
-    if (half.total < SUMMARY_MIN_SAMPLES) continue;
+    if (half.total < SUMMARY_MIN_SAMPLES) {
+      continue;
+    }
     const global = globalByDistance.get(half.distanceBp);
-    if (global === undefined || global.total < SUMMARY_MIN_SAMPLES) continue;
+    if (global === undefined || global.total < SUMMARY_MIN_SAMPLES) {
+      continue;
+    }
     const halfP = clampProb(half.survived / half.total);
     const globalP = clampProb(global.survived / global.total);
     const survived = half.survived;
     const failed = half.total - half.survived;
-    const halfLogLoss = -survived * Math.log(halfP) - failed * Math.log(1 - halfP);
+    const halfLogLoss =
+      -survived * Math.log(halfP) - failed * Math.log(1 - halfP);
     const globalLogLoss =
       -survived * Math.log(globalP) - failed * Math.log(1 - globalP);
     total += globalLogLoss - halfLogLoss;

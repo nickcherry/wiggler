@@ -24,7 +24,9 @@ const market: TradableMarket = {
   acceptingOrders: false,
 };
 
-function activeSlot(orderId: string | null): Extract<AssetSlot, { kind: "active" }> {
+function activeSlot(
+  orderId: string | null,
+): Extract<AssetSlot, { kind: "active" }> {
   return {
     kind: "active",
     market,
@@ -54,7 +56,9 @@ function windowWith(records: readonly AssetWindowRecord[]): WindowRecord {
   return {
     windowStartMs: market.windowStartMs,
     windowEndMs: market.windowEndMs,
-    perAsset: new Map(records.map((assetRecord) => [assetRecord.asset, assetRecord])),
+    perAsset: new Map(
+      records.map((assetRecord) => [assetRecord.asset, assetRecord]),
+    ),
     summarySent: false,
     cancelTimer: null,
     wrapUpTimer: null,
@@ -88,7 +92,11 @@ function vendorReturning({
       seen.push(orderId);
       return { accepted, errorMessage };
     },
-    streamUserFills(_input: { readonly markets: readonly TradableMarket[] } & UserStreamCallbacks) {
+    streamUserFills(
+      _input: {
+        readonly markets: readonly TradableMarket[];
+      } & UserStreamCallbacks,
+    ) {
       return { stop: async () => {} };
     },
     async hydrateMarketState() {

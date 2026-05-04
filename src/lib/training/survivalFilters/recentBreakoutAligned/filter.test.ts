@@ -38,7 +38,10 @@ function emptyContext(): SurvivalSnapshotContext {
   };
 }
 
-function buildSnapshot(currentSide: SurvivalSide, ctx: SurvivalSnapshotContext): SurvivalSnapshot {
+function buildSnapshot(
+  currentSide: SurvivalSide,
+  ctx: SurvivalSnapshotContext,
+): SurvivalSnapshot {
   return {
     windowStartMs: 0,
     year: "2025",
@@ -70,7 +73,9 @@ describe("recentBreakoutAlignedFilter", () => {
       bars5mSinceDonchian50High: 2,
       bars5mSinceDonchian50Low: 30,
     });
-    expect(recentBreakoutAlignedFilter.classify(snap, snap.context)).toBe(false);
+    expect(recentBreakoutAlignedFilter.classify(snap, snap.context)).toBe(
+      false,
+    );
   });
 
   it("recent low + DOWN side = true", () => {
@@ -88,7 +93,9 @@ describe("recentBreakoutAlignedFilter", () => {
       bars5mSinceDonchian50High: 30,
       bars5mSinceDonchian50Low: 30,
     });
-    expect(recentBreakoutAlignedFilter.classify(snap, snap.context)).toBe("skip");
+    expect(recentBreakoutAlignedFilter.classify(snap, snap.context)).toBe(
+      "skip",
+    );
   });
 
   it("skips when both recent (degenerate)", () => {
@@ -97,6 +104,8 @@ describe("recentBreakoutAlignedFilter", () => {
       bars5mSinceDonchian50High: 1,
       bars5mSinceDonchian50Low: 2,
     });
-    expect(recentBreakoutAlignedFilter.classify(snap, snap.context)).toBe("skip");
+    expect(recentBreakoutAlignedFilter.classify(snap, snap.context)).toBe(
+      "skip",
+    );
   });
 });

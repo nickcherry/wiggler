@@ -31,7 +31,8 @@ export const distanceAtrWithEmaAlignedFilter: SurvivalFilter = {
       return "skip";
     }
     const decisive =
-      Math.abs(snapshot.snapshotPrice - snapshot.line) >= DISTANCE_THRESHOLD_ATR * atr;
+      Math.abs(snapshot.snapshotPrice - snapshot.line) >=
+      DISTANCE_THRESHOLD_ATR * atr;
     const emaBias: "up" | "down" = snapshot.line >= ema ? "up" : "down";
     const aligned = emaBias === snapshot.currentSide;
     return decisive && aligned;
