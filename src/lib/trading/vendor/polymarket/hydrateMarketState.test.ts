@@ -104,12 +104,14 @@ describe("hydratePolymarketMarketState", () => {
             size: "3",
             price: "0.4",
             fee_rate_bps: "20",
+            trader_side: "TAKER",
           }),
           trade({
             asset_id: "DOWN_TOKEN",
             size: "2",
             price: "0.5",
             fee_rate_bps: "40",
+            trader_side: "TAKER",
           }),
           trade({ asset_id: "OTHER", size: "99", price: "0.01" }),
         ],
@@ -133,6 +135,7 @@ describe("hydratePolymarketMarketState", () => {
       costUsd: 2.2,
       feeRateBpsAvg: 28,
     });
+    expect(result.feesUsd).toBeCloseTo(0.00344, 9);
   });
 
   it("hydrates partial fills even when no open order remains", async () => {
@@ -150,7 +153,8 @@ describe("hydratePolymarketMarketState", () => {
       outcomeRef: "UP_TOKEN",
       sharesFilled: 4,
       costUsd: 1,
-      feeRateBpsAvg: 10,
+      feesUsd: 0,
+      feeRateBpsAvg: 0,
     });
   });
 
@@ -169,6 +173,7 @@ describe("hydratePolymarketMarketState", () => {
       outcomeRef: null,
       sharesFilled: 0,
       costUsd: 0,
+      feesUsd: 0,
       feeRateBpsAvg: 0,
     });
   });

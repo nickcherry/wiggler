@@ -18,6 +18,7 @@ function active({
   side,
   sharesFilled,
   costUsd,
+  feesUsd = 0,
   feeRateBpsAvg,
   limitPrice,
   orderId = null,
@@ -26,6 +27,7 @@ function active({
   readonly side: "up" | "down";
   readonly sharesFilled: number;
   readonly costUsd: number;
+  readonly feesUsd?: number;
   readonly feeRateBpsAvg: number;
   readonly limitPrice: number;
   readonly orderId?: string | null;
@@ -41,6 +43,7 @@ function active({
     sharesIfFilled: sharesIfFilled ?? sharesFilled,
     sharesFilled,
     costUsd,
+    feesUsd,
     feeRateBpsAvg,
   };
 }
@@ -91,13 +94,14 @@ describe("settleFilled", () => {
     expect(settled.netPnlUsd).toBeCloseTo(-20, 9);
   });
 
-  it("subtracts maker fee from PnL on both win and loss outcomes", () => {
+  it("subtracts accumulated fill fees from PnL on both win and loss outcomes", () => {
     const winSettled = settleFilled({
       active: active({
         side: "up",
         sharesFilled: 100,
         costUsd: 30,
-        feeRateBpsAvg: 100, // 1% fee
+        feesUsd: 0.21,
+        feeRateBpsAvg: 100,
         limitPrice: 0.3,
       }),
       finalPrice: 80_500,
@@ -105,8 +109,8 @@ describe("settleFilled", () => {
     });
     expect(winSettled.kind).toBe("settled");
     if (winSettled.kind === "settled") {
-      expect(winSettled.feesUsd).toBeCloseTo(0.3, 9);
-      expect(winSettled.netPnlUsd).toBeCloseTo(69.7, 9);
+      expect(winSettled.feesUsd).toBeCloseTo(0.21, 9);
+      expect(winSettled.netPnlUsd).toBeCloseTo(69.79, 9);
     }
 
     const lossSettled = settleFilled({
@@ -114,6 +118,7 @@ describe("settleFilled", () => {
         side: "down",
         sharesFilled: 100,
         costUsd: 30,
+        feesUsd: 0.21,
         feeRateBpsAvg: 100,
         limitPrice: 0.3,
       }),
@@ -122,8 +127,8 @@ describe("settleFilled", () => {
     });
     expect(lossSettled.kind).toBe("settled");
     if (lossSettled.kind === "settled") {
-      expect(lossSettled.feesUsd).toBeCloseTo(0.3, 9);
-      expect(lossSettled.netPnlUsd).toBeCloseTo(-30.3, 9);
+      expect(lossSettled.feesUsd).toBeCloseTo(0.21, 9);
+      expect(lossSettled.netPnlUsd).toBeCloseTo(-30.21, 9);
     }
   });
 

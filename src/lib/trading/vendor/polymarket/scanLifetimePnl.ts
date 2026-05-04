@@ -3,6 +3,7 @@ import {
   type ScanMarketResolution,
   type ScanTrade,
 } from "@alea/lib/trading/state/computeLifetimePnl";
+import { computePolymarketFeeUsd } from "@alea/lib/trading/vendor/polymarket/computePolymarketFeeUsd";
 import type {
   LifetimePnlScanProgress,
   LifetimePnlScanResult,
@@ -51,6 +52,7 @@ type RawTrade = {
   readonly size: string;
   readonly price: string;
   readonly fee_rate_bps: string;
+  readonly trader_side?: string;
 };
 
 async function fetchAllTrades({
@@ -181,14 +183,19 @@ function uniqueConditionIds({
 function toScanTrade(trade: RawTrade): ScanTrade {
   const size = Number(trade.size);
   const price = Number(trade.price);
-  const feeRateBps = Number(trade.fee_rate_bps);
+  const feeRateBps =
+    trade.trader_side === "MAKER" ? 0 : Number(trade.fee_rate_bps);
   return {
     conditionId: trade.market,
     tokenId: trade.asset_id,
     side: trade.side === "BUY" ? "BUY" : "SELL",
     size: Number.isFinite(size) ? size : 0,
     price: Number.isFinite(price) ? price : 0,
-    feeRateBps: Number.isFinite(feeRateBps) ? feeRateBps : 0,
+    feeUsd: computePolymarketFeeUsd({
+      size,
+      price,
+      feeRateBps: Number.isFinite(feeRateBps) ? feeRateBps : 0,
+    }),
   };
 }
 

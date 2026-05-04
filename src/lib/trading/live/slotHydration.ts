@@ -34,6 +34,7 @@ export function activeSlotFromHydration({
     sharesIfFilled: order?.sharesIfFilled ?? hydration.sharesFilled,
     sharesFilled: hydration.sharesFilled,
     costUsd: hydration.costUsd,
+    feesUsd: hydration.feesUsd,
     feeRateBpsAvg: hydration.feeRateBpsAvg,
   };
 }

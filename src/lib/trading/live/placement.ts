@@ -126,6 +126,7 @@ export async function placeWithRetry({
       sharesIfFilled: 0,
       sharesFilled: 0,
       costUsd: 0,
+      feesUsd: 0,
       feeRateBpsAvg: 0,
     };
 
@@ -155,6 +156,7 @@ export async function placeWithRetry({
         sharesIfFilled: attempt.placed.sharesIfFilled,
         sharesFilled,
         costUsd: observed?.costUsd ?? 0,
+        feesUsd: observed?.feesUsd ?? 0,
         feeRateBpsAvg: observed?.feeRateBpsAvg ?? attempt.placed.feeRateBps,
       };
       if (postOnlyRetries > 0) {

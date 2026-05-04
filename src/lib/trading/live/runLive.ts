@@ -562,6 +562,7 @@ function stepAsset({
       sharesIfFilled: 0,
       sharesFilled: 0,
       costUsd: 0,
+      feesUsd: 0,
       feeRateBpsAvg: 0,
     };
     void placeWithRetry({

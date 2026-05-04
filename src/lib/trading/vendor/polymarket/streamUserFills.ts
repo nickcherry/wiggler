@@ -206,7 +206,8 @@ function mapTradeFrame({
 }): FillEvent | null {
   const price = Number(frame.price);
   const size = Number(frame.size);
-  const feeRateBps = Number(frame.fee_rate_bps);
+  const feeRateBps =
+    frame.trader_side === "MAKER" ? 0 : Number(frame.fee_rate_bps);
   if (
     !Number.isFinite(price) ||
     !Number.isFinite(size) ||

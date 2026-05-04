@@ -1,4 +1,5 @@
 import type { LeadingSide } from "@alea/lib/trading/types";
+import { computePolymarketFeeUsd } from "@alea/lib/trading/vendor/polymarket/computePolymarketFeeUsd";
 import type {
   MarketHydration,
   PlacedOrder,
@@ -43,6 +44,7 @@ export async function hydratePolymarketMarketState({
     outcomeRef: fills.outcomeRef ?? openOrder?.outcomeRef ?? null,
     sharesFilled: fills.sharesFilled,
     costUsd: fills.costUsd,
+    feesUsd: fills.feesUsd,
     feeRateBpsAvg: fills.feeRateBpsAvg,
   };
 }
@@ -98,6 +100,7 @@ type FillAggregate = {
   readonly outcomeRef: string | null;
   readonly sharesFilled: number;
   readonly costUsd: number;
+  readonly feesUsd: number;
   readonly feeRateBpsAvg: number;
 };
 
@@ -112,6 +115,7 @@ function aggregateFills({
 }): FillAggregate {
   let totalShares = 0;
   let totalCost = 0;
+  let totalFeesUsd = 0;
   let observedSide: LeadingSide | null = null;
   let observedTokenId: string | null = null;
   let weightedFeeBpsNumerator = 0;
@@ -127,7 +131,17 @@ function aggregateFills({
     }
     totalShares += shares;
     totalCost += shares * price;
-    weightedFeeBpsNumerator += shares * Number(trade.fee_rate_bps);
+    const feeRateBps = Number(trade.fee_rate_bps);
+    const safeFeeRateBps =
+      trade.trader_side === "MAKER" || !Number.isFinite(feeRateBps)
+        ? 0
+        : feeRateBps;
+    totalFeesUsd += computePolymarketFeeUsd({
+      size: shares,
+      price,
+      feeRateBps: safeFeeRateBps,
+    });
+    weightedFeeBpsNumerator += shares * safeFeeRateBps;
     observedSide = side;
     observedTokenId = trade.asset_id;
   }
@@ -137,6 +151,7 @@ function aggregateFills({
       outcomeRef: null,
       sharesFilled: 0,
       costUsd: 0,
+      feesUsd: 0,
       feeRateBpsAvg: 0,
     };
   }
@@ -145,6 +160,7 @@ function aggregateFills({
     outcomeRef: observedTokenId,
     sharesFilled: totalShares,
     costUsd: totalCost,
+    feesUsd: totalFeesUsd,
     feeRateBpsAvg: weightedFeeBpsNumerator / totalShares,
   };
 }

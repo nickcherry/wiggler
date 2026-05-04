@@ -3,6 +3,7 @@ import type {
   LiveEvent,
 } from "@alea/lib/trading/live/types";
 import type { AssetSlot } from "@alea/lib/trading/state/types";
+import { computePolymarketFeeUsd } from "@alea/lib/trading/vendor/polymarket/computePolymarketFeeUsd";
 import type { Asset } from "@alea/types/assets";
 
 /**
@@ -41,6 +42,12 @@ export function applyFill({
     return;
   }
   const newCost = record.slot.costUsd + fill.size * fill.price;
+  const fillFeeUsd = computePolymarketFeeUsd({
+    size: fill.size,
+    price: fill.price,
+    feeRateBps: fill.feeRateBps,
+  });
+  const newFeesUsd = record.slot.feesUsd + fillFeeUsd;
   const weightedFee =
     (record.slot.feeRateBpsAvg * record.slot.sharesFilled +
       fill.feeRateBps * fill.size) /
@@ -60,6 +67,7 @@ export function applyFill({
     sharesIfFilled: record.slot.sharesIfFilled,
     sharesFilled: newShares,
     costUsd: newCost,
+    feesUsd: newFeesUsd,
     feeRateBpsAvg: weightedFee,
   };
   record.slot = updated;

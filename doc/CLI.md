@@ -43,6 +43,7 @@ Everything that matters is reachable through one non-interactive entrypoint:
   `trading:dry-run`
   `trading:live`
   `trading:hydrate-lifetime-pnl`
+  `trading:performance`
 - `help`
   Built-in. `alea help <command>` prints detailed help; `alea help` is equivalent to `alea` with no arguments.
 

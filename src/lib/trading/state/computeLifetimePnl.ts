@@ -14,8 +14,8 @@ export type ScanTrade = {
   readonly side: "BUY" | "SELL";
   readonly size: number;
   readonly price: number;
-  /** Per-fill fee rate in basis points (1bp = 0.01%). */
-  readonly feeRateBps: number;
+  /** Per-fill fee amount normalized by the vendor boundary. */
+  readonly feeUsd: number;
 };
 
 export type ScanMarketResolution = {
@@ -43,7 +43,7 @@ export type LifetimePnlBreakdown = {
  *   For each (conditionId, tokenId) pair:
  *     shares     = Σ buy.size − Σ sell.size
  *     cashFlow   = − Σ buy.size × buy.price + Σ sell.size × sell.price
- *     fees       = Σ size × price × (feeRateBps / 10_000)   (both sides)
+ *     fees       = Σ feeUsd
  *     payout     = shares × outcomePrice[tokenId]            (only if resolved)
  *     marketPnl  = cashFlow + payout − fees
  *
@@ -102,7 +102,6 @@ export function computeLifetimePnl({
         fees: 0,
       };
       const cost = trade.size * trade.price;
-      const fee = cost * (trade.feeRateBps / 10_000);
       if (trade.side === "BUY") {
         agg.shares += trade.size;
         agg.cashFlow -= cost;
@@ -110,7 +109,7 @@ export function computeLifetimePnl({
         agg.shares -= trade.size;
         agg.cashFlow += cost;
       }
-      agg.fees += fee;
+      agg.fees += trade.feeUsd;
       tokenAgg.set(trade.tokenId, agg);
     }
 

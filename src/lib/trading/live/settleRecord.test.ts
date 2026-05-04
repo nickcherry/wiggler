@@ -21,10 +21,12 @@ function activeSlot({
   side = "up",
   sharesFilled = 100,
   costUsd = 40,
+  feesUsd = 0,
 }: {
   readonly side?: "up" | "down";
   readonly sharesFilled?: number;
   readonly costUsd?: number;
+  readonly feesUsd?: number;
 } = {}): Extract<AssetSlot, { kind: "active" }> {
   return {
     kind: "active",
@@ -36,6 +38,7 @@ function activeSlot({
     sharesIfFilled: 100,
     sharesFilled,
     costUsd,
+    feesUsd,
     feeRateBpsAvg: 0,
   };
 }
