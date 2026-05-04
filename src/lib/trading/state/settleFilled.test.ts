@@ -7,12 +7,11 @@ const baseMarket = {
   windowStartUnixSeconds: 1_777_867_200,
   windowStartMs: 1_777_867_200_000,
   windowEndMs: 1_777_867_500_000,
-  slug: "btc-updown-5m-1777867200",
-  conditionId: "0xabc",
-  upYesTokenId: "TOKEN_UP",
-  downYesTokenId: "TOKEN_DOWN",
-  negRisk: false,
+  vendorRef: "0xabc",
+  upRef: "TOKEN_UP",
+  downRef: "TOKEN_DOWN",
   acceptingOrders: false,
+  displayLabel: "btc-updown-5m-1777867200",
 };
 
 function active({
@@ -22,6 +21,7 @@ function active({
   feeRateBpsAvg,
   limitPrice,
   orderId = null,
+  sharesIfFilled,
 }: {
   readonly side: "up" | "down";
   readonly sharesFilled: number;
@@ -29,14 +29,16 @@ function active({
   readonly feeRateBpsAvg: number;
   readonly limitPrice: number;
   readonly orderId?: string | null;
+  readonly sharesIfFilled?: number;
 }): Extract<AssetSlot, { kind: "active" }> {
   return {
     kind: "active",
     market: baseMarket,
     side,
-    tokenId: side === "up" ? "TOKEN_UP" : "TOKEN_DOWN",
+    outcomeRef: side === "up" ? "TOKEN_UP" : "TOKEN_DOWN",
     orderId,
     limitPrice,
+    sharesIfFilled: sharesIfFilled ?? sharesFilled,
     sharesFilled,
     costUsd,
     feeRateBpsAvg,

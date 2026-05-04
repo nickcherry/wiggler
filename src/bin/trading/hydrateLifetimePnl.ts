@@ -1,24 +1,21 @@
 import { env } from "@alea/constants/env";
 import { CliUsageError } from "@alea/lib/cli/CliUsageError";
 import { defineCommand } from "@alea/lib/cli/defineCommand";
-import { getPolymarketAuthState } from "@alea/lib/polymarket/getPolymarketClobClient";
 import {
   DEFAULT_LIFETIME_PNL_PATH,
   persistLifetimePnl,
 } from "@alea/lib/trading/state/lifetimePnlStore";
-import { scanLifetimePnlFromPolymarket } from "@alea/lib/trading/state/scanLifetimePnl";
+import { createPolymarketVendor } from "@alea/lib/trading/vendor/polymarket/createPolymarketVendor";
 import pc from "picocolors";
 
 /**
- * Manually rescans the wallet's full Polymarket trade history,
- * computes lifetime PnL from scratch, and overwrites
- * `tmp/lifetime-pnl.json`. The live runner does this automatically
- * on cold start; this command is the operator's escape hatch when
- * the checkpoint feels stale or after manual trades on the wallet
- * outside the bot.
+ * Manually rescans the wallet's full vendor trade history, computes
+ * lifetime PnL from scratch, and overwrites the on-disk checkpoint.
+ * The live runner does this automatically on cold start; this command
+ * is the operator's escape hatch when the checkpoint feels stale or
+ * after manual trades on the wallet outside the bot.
  *
- * Read-only against Polymarket (paginated `getTradesPaginated` +
- * per-market `getMarket`). Does not place or cancel any orders.
+ * Read-only against the venue. Does not place or cancel any orders.
  */
 export const tradingHydrateLifetimePnlCommand = defineCommand({
   name: "trading:hydrate-lifetime-pnl",
@@ -41,12 +38,11 @@ export const tradingHydrateLifetimePnlCommand = defineCommand({
         "POLYMARKET_PRIVATE_KEY and POLYMARKET_FUNDER_ADDRESS must be set.",
       );
     }
-    const auth = await getPolymarketAuthState();
+    const vendor = await createPolymarketVendor();
     io.writeStdout(
-      `${pc.bold("trading:hydrate-lifetime-pnl")} ${pc.dim("(wallet=")}${auth.walletAddress.slice(0, 10)}…${pc.dim(")")}\n`,
+      `${pc.bold("trading:hydrate-lifetime-pnl")} ${pc.dim(`(vendor=${vendor.id} wallet=`)}${vendor.walletAddress.slice(0, 10)}…${pc.dim(")")}\n`,
     );
-    const scan = await scanLifetimePnlFromPolymarket({
-      client: auth.client,
+    const scan = await vendor.scanLifetimePnl({
       onProgress: (event) => {
         if (event.kind === "trades-page") {
           io.writeStdout(
@@ -60,7 +56,7 @@ export const tradingHydrateLifetimePnlCommand = defineCommand({
       },
     });
     await persistLifetimePnl({
-      walletAddress: auth.walletAddress,
+      walletAddress: vendor.walletAddress,
       lifetimePnlUsd: scan.lifetimePnlUsd,
     });
     io.writeStdout(

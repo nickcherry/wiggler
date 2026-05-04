@@ -1,3 +1,4 @@
+import { EMA50_BOOTSTRAP_BARS } from "@alea/constants/trading";
 import { fetchRecentFiveMinuteBars } from "@alea/lib/livePrices/binancePerp/fetchRecentFiveMinuteBars";
 import { streamBinancePerpLive } from "@alea/lib/livePrices/binancePerp/streamBinancePerpLive";
 import {
@@ -13,12 +14,6 @@ import type {
   ClosedFiveMinuteBar,
   LivePriceTick,
 } from "@alea/lib/livePrices/types";
-import { fetchUpDownBook } from "@alea/lib/polymarket/markets/fetchUpDownBook";
-import { findUpDownMarket } from "@alea/lib/polymarket/markets/findUpDownMarket";
-import type {
-  UpDownBookSnapshot,
-  UpDownMarket,
-} from "@alea/lib/polymarket/markets/types";
 import { evaluateDecision } from "@alea/lib/trading/decision/evaluateDecision";
 import type {
   DecisionSkipReason,
@@ -29,37 +24,50 @@ import type {
   ProbabilityTable,
   RemainingMinutes,
 } from "@alea/lib/trading/types";
+import type {
+  TradableMarket,
+  UpDownBook,
+  Vendor,
+} from "@alea/lib/trading/vendor/types";
 import type { Asset } from "@alea/types/assets";
 
-const EMA50_BOOTSTRAP_BARS = 60;
 const BOOK_POLL_INTERVAL_MS = 2_000;
 const TICK_INTERVAL_MS = 250;
 
 export type DryRunParams = {
+  /**
+   * Vendor used only for read-only operations (`discoverMarket`,
+   * `fetchBook`). The dry-run never places orders, never opens the
+   * user fill stream, and never touches lifetime PnL — anything that
+   * would touch the wallet.
+   */
+  readonly vendor: Vendor;
   readonly assets: readonly Asset[];
   readonly table: ProbabilityTable;
   readonly minEdge: number;
   readonly emit: (event: DryRunEvent) => void;
-  /** Stop the runner; resolves once all background work has wound down. */
   readonly signal: AbortSignal;
 };
 
 /**
- * Long-running orchestrator for the dry-run trader. Wires together:
+ * Long-running dry-run trader. Same decision pipeline as the live
+ * runner but exercises only the read-side of the `Vendor` interface
+ * (`discoverMarket` + `fetchBook`); no auth use, no order placement,
+ * no fills, no Telegram. This is the right command to inspect signals
+ * for hours without risking a single dollar.
  *
- *   - the Binance perp live feed (BBO + 5m kline closes, auto-reconnect);
- *   - REST hydration of recent closed 5m bars per asset for the EMA-50 seed;
- *   - per-asset 5m window state: the line price, the discovered Polymarket
- *     market, and a polled top-of-book snapshot for both YES tokens;
- *   - the pure decision evaluator firing once per minute boundary inside
- *     each window, per asset, plus on the first book/tick after a new
- *     window opens.
+ * Wiring:
+ *   - Binance perp live feed (BBO + 5m kline closes, auto-reconnect)
+ *     for current price and EMA-50 maintenance.
+ *   - REST hydration of recent closed 5m bars per asset for the EMA
+ *     seed.
+ *   - Per-asset window state: line, discovered market, polled book.
+ *   - Decision evaluator firing once per minute-boundary crossing.
  *
- * Emits structured `DryRunEvent`s through `emit`; the CLI is the only
- * consumer that formats them for the terminal. Returns when `signal`
- * fires; cleanup is best-effort but always runs.
+ * Returns when `signal` aborts; cleanup is best-effort but always runs.
  */
 export async function runDryRun({
+  vendor,
   assets,
   table,
   minEdge,
@@ -69,7 +77,7 @@ export async function runDryRun({
   const emas = new Map<Asset, FiveMinuteEmaTracker>();
   const lastTick = new Map<Asset, LivePriceTick>();
   const windows = new Map<Asset, AssetWindowState>();
-  const books = new Map<Asset, UpDownBookSnapshot>();
+  const books = new Map<Asset, UpDownBook>();
 
   for (const asset of assets) {
     emas.set(asset, createFiveMinuteEmaTracker());
@@ -78,11 +86,9 @@ export async function runDryRun({
   emit({
     kind: "info",
     atMs: Date.now(),
-    message: `dry-run starting: assets=${assets.join(",")} minEdge=${minEdge.toFixed(3)} table.range=${formatTableRange({ table })}`,
+    message: `dry-run starting: vendor=${vendor.id} assets=${assets.join(",")} minEdge=${minEdge.toFixed(3)} table.range=${formatTableRange({ table })}`,
   });
 
-  // 1) Seed each asset's EMA-50 from REST. Sequential to keep the
-  //    output legible — boot is one-time.
   for (const asset of assets) {
     if (signal.aborted) {
       return;
@@ -118,7 +124,6 @@ export async function runDryRun({
     return;
   }
 
-  // 2) Connect the live WS feed.
   const feedHandle = streamBinancePerpLive({
     assets,
     onTick: (tick) => {
@@ -158,7 +163,6 @@ export async function runDryRun({
       }),
   });
 
-  // 3) Polymarket book poll loop.
   const bookPollTimer = setInterval(() => {
     if (signal.aborted) {
       return;
@@ -169,6 +173,7 @@ export async function runDryRun({
         continue;
       }
       void refreshBook({
+        vendor,
         asset,
         market: ws.market,
         books,
@@ -178,7 +183,6 @@ export async function runDryRun({
     }
   }, BOOK_POLL_INTERVAL_MS);
 
-  // 4) Tick loop: window rollover detection + per-minute decisions.
   const tickTimer = setInterval(() => {
     if (signal.aborted) {
       return;
@@ -189,8 +193,6 @@ export async function runDryRun({
     for (const asset of assets) {
       let ws = windows.get(asset);
       if (ws === undefined || ws.windowStartMs !== windowStartMs) {
-        // Window rollover: flush summary for the old window if any,
-        // then bootstrap state for the new one.
         if (ws !== undefined) {
           emit({
             kind: "info",
@@ -211,10 +213,15 @@ export async function runDryRun({
         };
         windows.set(asset, newState);
         ws = newState;
-        void hydrateMarket({ asset, windowState: ws, signal, emit });
+        void hydrateMarket({
+          asset,
+          vendor,
+          windowState: ws,
+          signal,
+          emit,
+        });
       }
 
-      // Capture the line on the first tick we see after window open.
       if (ws.line === null) {
         const tick = lastTick.get(asset);
         if (tick !== undefined) {
@@ -232,9 +239,6 @@ export async function runDryRun({
         windowStartMs: ws.windowStartMs,
         nowMs,
       });
-      // Only fire a decision when we cross a minute boundary into a
-      // new bucket — eliminates per-tick log spam without hiding
-      // material state changes.
       if (remaining === null || remaining === ws.lastDecisionRemaining) {
         continue;
       }
@@ -246,11 +250,8 @@ export async function runDryRun({
         tick === undefined ||
         tracker === undefined ||
         market === null ||
-        market === undefined ||
         ws.line === null
       ) {
-        // Insufficient inputs to evaluate yet — leave
-        // `lastDecisionRemaining` alone so we re-try next tick.
         continue;
       }
 
@@ -263,24 +264,18 @@ export async function runDryRun({
         ema50: tracker.currentValue(),
         upBestBid: book?.up.bestBid ?? null,
         downBestBid: book?.down.bestBid ?? null,
-        upTokenId: market.upYesTokenId,
-        downTokenId: market.downYesTokenId,
+        upTokenId: market.upRef,
+        downTokenId: market.downRef,
         table,
         minEdge,
       });
 
       ws.lastDecisionRemaining = remaining;
       ws.decisionsByRemaining.set(remaining, decision);
-
-      emit({
-        kind: "decision",
-        atMs: nowMs,
-        decision,
-      });
+      emit({ kind: "decision", atMs: nowMs, decision });
     }
   }, TICK_INTERVAL_MS);
 
-  // 5) Wait for the abort signal.
   await new Promise<void>((resolve) => {
     if (signal.aborted) {
       resolve();
@@ -305,7 +300,7 @@ type AssetWindowState = {
   readonly windowEndMs: number;
   line: number | null;
   lineCapturedAtMs: number | null;
-  market: UpDownMarket | null;
+  market: TradableMarket | null;
   marketStatus: "pending" | "ready" | "missing" | "error";
   lastDecisionRemaining: RemainingMinutes | null;
   readonly decisionsByRemaining: Map<RemainingMinutes, TradeDecision>;
@@ -313,18 +308,20 @@ type AssetWindowState = {
 
 async function hydrateMarket({
   asset,
+  vendor,
   windowState,
   signal,
   emit,
 }: {
   readonly asset: Asset;
+  readonly vendor: Vendor;
   readonly windowState: AssetWindowState;
   readonly signal: AbortSignal;
   readonly emit: (event: DryRunEvent) => void;
 }): Promise<void> {
   const windowStartUnixSeconds = Math.floor(windowState.windowStartMs / 1000);
   try {
-    const market = await findUpDownMarket({
+    const market = await vendor.discoverMarket({
       asset,
       windowStartUnixSeconds,
       signal,
@@ -334,7 +331,7 @@ async function hydrateMarket({
       emit({
         kind: "warn",
         atMs: Date.now(),
-        message: `${labelAsset(asset)} no Polymarket market for window ${new Date(windowState.windowStartMs).toISOString().slice(11, 16)}`,
+        message: `${labelAsset(asset)} no ${vendor.id} market for window ${new Date(windowState.windowStartMs).toISOString().slice(11, 16)}`,
       });
       return;
     }
@@ -343,7 +340,7 @@ async function hydrateMarket({
     emit({
       kind: "info",
       atMs: Date.now(),
-      message: `${labelAsset(asset)} discovered ${market.slug}, accepting=${market.acceptingOrders}`,
+      message: `${labelAsset(asset)} discovered ${market.displayLabel ?? market.vendorRef}, accepting=${market.acceptingOrders}`,
     });
   } catch (error) {
     windowState.marketStatus = "error";
@@ -356,20 +353,22 @@ async function hydrateMarket({
 }
 
 async function refreshBook({
+  vendor,
   asset,
   market,
   books,
   signal,
   emit,
 }: {
+  readonly vendor: Vendor;
   readonly asset: Asset;
-  readonly market: UpDownMarket;
-  readonly books: Map<Asset, UpDownBookSnapshot>;
+  readonly market: TradableMarket;
+  readonly books: Map<Asset, UpDownBook>;
   readonly signal: AbortSignal;
   readonly emit: (event: DryRunEvent) => void;
 }): Promise<void> {
   try {
-    const book = await fetchUpDownBook({ market, signal });
+    const book = await vendor.fetchBook({ market, signal });
     books.set(asset, book);
   } catch (error) {
     emit({

@@ -1,38 +1,34 @@
 import { polymarket } from "@alea/constants/polymarket";
 import type {
   TopOfBook,
-  UpDownBookSnapshot,
-  UpDownMarket,
-} from "@alea/lib/polymarket/markets/types";
+  TradableMarket,
+  UpDownBook,
+} from "@alea/lib/trading/vendor/types";
 import { z } from "zod";
 
 /**
  * Fetches the top of book for both YES tokens of an up/down market via
- * the public CLOB REST endpoint. Used by the dry-run loop to compute
- * Polymarket's implied probability for each side at low cadence (no
- * auth, no order placement). Chunk 2 swaps this for the market WS
- * subscription so the live trader can react to book moves between
- * polls.
+ * the public CLOB REST endpoint. Two parallel calls per market — no
+ * auth needed.
  *
  * Returns `null` for `bestBid`/`bestAsk` when there are no resting
- * orders on that side — common in the first minute of a fresh
- * market.
+ * orders on that side (common in the first minute of a fresh market).
  */
-export async function fetchUpDownBook({
+export async function fetchPolymarketBook({
   market,
   signal,
 }: {
-  readonly market: UpDownMarket;
+  readonly market: TradableMarket;
   readonly signal?: AbortSignal;
-}): Promise<UpDownBookSnapshot> {
+}): Promise<UpDownBook> {
   const [up, down] = await Promise.all([
-    fetchTopOfBook({ tokenId: market.upYesTokenId, signal }),
-    fetchTopOfBook({ tokenId: market.downYesTokenId, signal }),
+    fetchTokenBook({ tokenId: market.upRef, signal }),
+    fetchTokenBook({ tokenId: market.downRef, signal }),
   ]);
-  return { market, up, down };
+  return { market, up, down, fetchedAtMs: Date.now() };
 }
 
-async function fetchTopOfBook({
+async function fetchTokenBook({
   tokenId,
   signal,
 }: {
@@ -51,18 +47,15 @@ async function fetchTopOfBook({
   }
   const parsed = bookSchema.parse(await response.json());
   return {
-    tokenId,
     bestBid: pickBest({ levels: parsed.bids, side: "bid" }),
     bestAsk: pickBest({ levels: parsed.asks, side: "ask" }),
-    fetchedAtMs: Date.now(),
   };
 }
 
 /**
  * Polymarket returns book levels as `{ price: "0.55", size: "..." }`
- * arrays, conventionally sorted ascending by price for both sides. We
- * pick the top of book ourselves rather than trusting any particular
- * ordering — the cost is `O(n)` over a handful of levels.
+ * arrays. Conventional ordering varies by side so we scan and pick
+ * the top — the cost is `O(n)` over a handful of levels.
  */
 function pickBest({
   levels,
@@ -89,10 +82,7 @@ function pickBest({
   return best;
 }
 
-const levelSchema = z.object({
-  price: z.string(),
-  size: z.string(),
-});
+const levelSchema = z.object({ price: z.string(), size: z.string() });
 
 const bookSchema = z
   .object({
