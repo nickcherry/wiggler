@@ -415,14 +415,24 @@ export function renderTrainingDistributionsHtml({
     details.filter-section[open] {
       border-color: var(--alea-border);
     }
+    /* Two-row grid summary at every viewport: row 1 holds the
+       filter title and the expand/collapse chevron, row 2 holds
+       the score pills full-width. We deliberately don't try to
+       fit everything on one row at desktop — tablet widths produce
+       inconsistent layouts (chevron drops to row 2 only when the
+       title is too long), and the grid form reads cleanly at all
+       sizes: row 1 is "what is this filter and how do I open it",
+       row 2 is "what's its current performance". */
     details.filter-section > summary {
       list-style: none;
       cursor: pointer;
       padding: 16px 20px;
-      display: flex;
+      display: grid;
+      grid-template-columns: 1fr auto;
+      grid-template-rows: auto auto;
+      column-gap: 18px;
+      row-gap: 12px;
       align-items: center;
-      gap: 18px;
-      flex-wrap: wrap;
       user-select: none;
       transition: background-color 120ms ease;
     }
@@ -431,35 +441,39 @@ export function renderTrainingDistributionsHtml({
       background: rgba(215, 170, 69, 0.04);
     }
     details.filter-section > summary > .filter-summary-title {
+      grid-column: 1;
+      grid-row: 1;
       font-family: var(--alea-font-display);
       font-weight: 600;
       font-size: 17px;
       letter-spacing: 0.04em;
       color: var(--alea-text);
       margin: 0;
-      flex: 0 0 auto;
+      min-width: 0;
     }
     details.filter-section > summary > .filter-summary-chevron {
-      flex: 0 0 auto;
+      grid-column: 2;
+      grid-row: 1;
       color: var(--alea-text-subtle);
       font-size: 11px;
       letter-spacing: 0.16em;
       text-transform: uppercase;
+      white-space: nowrap;
       transition: transform 160ms ease, color 120ms ease;
     }
     details.filter-section[open] > summary > .filter-summary-chevron {
       color: var(--alea-gold);
     }
-    /* Push the score-row to the right edge of the summary so pills
-       across multiple filter sections line up vertically — the filter
-       title widths vary, so left-aligning misaligned the columns. */
+    /* Score pills span the full width on their own row. Pills are
+       fixed 140px so columns line up across filter sections. */
     details.filter-section > summary > .filter-summary-scores {
+      grid-column: 1 / -1;
+      grid-row: 2;
       display: flex;
       gap: 6px;
       flex-wrap: wrap;
       align-items: center;
-      justify-content: flex-end;
-      margin-left: auto;
+      justify-content: flex-start;
     }
     /* Score pills shown in the collapsed header — non-interactive
        summary of the per-config scores. Fixed-width so pills line up
@@ -559,39 +573,19 @@ export function renderTrainingDistributionsHtml({
         letter-spacing: 0.12em;
       }
 
-      /* Use grid for the summary so title + chevron stay locked on
-         row 1 even when the title text is long enough to take all
-         the available width — flex-wrap was pushing the chevron
-         down to row 2 for long titles. Score pills sit in row 2,
-         spanning both columns. */
+      /* The base summary already uses the 2-row grid; mobile only
+         needs to tighten padding + typography. */
       details.filter-section > summary {
-        display: grid;
-        grid-template-columns: 1fr auto;
-        grid-template-rows: auto auto;
         column-gap: 10px;
         row-gap: 10px;
         padding: 14px 16px;
       }
       details.filter-section > summary > .filter-summary-title {
-        grid-column: 1;
-        grid-row: 1;
         font-size: 15.5px;
         line-height: 1.25;
-        flex: initial;
-        min-width: 0;
       }
       details.filter-section > summary > .filter-summary-chevron {
-        grid-column: 2;
-        grid-row: 1;
         align-self: start;
-        margin-left: 0;
-        white-space: nowrap;
-      }
-      details.filter-section > summary > .filter-summary-scores {
-        grid-column: 1 / -1;
-        grid-row: 2;
-        margin-left: 0;
-        gap: 6px;
       }
       .filter-summary-score {
         flex: 1 1 calc(50% - 3px);
