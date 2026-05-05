@@ -101,6 +101,24 @@ Records are append-only JSONL:
 This means an interrupted run still leaves the completed session data usable
 for reporting.
 
+Each `virtual_order` and finalized order snapshot also carries diagnostic
+telemetry for post-run analysis:
+
+- `entryPriceTelemetry`: Binance-price tick age, side/distance from the
+  line, and 1s/5s/15s/30s/60s pre-entry price deltas.
+- `entryBookTelemetry`: chosen-side bid/ask/spread, queue at the posted
+  limit, top-level sizes, opposite-side top of book, and venue fee/size
+  constraints.
+- `preEntryMarketTelemetry`: recent Polymarket trade counts, sizes, price
+  deltas, and at/below-limit prints before entry.
+- `leadTimeCounterfactuals`: whether placing 1s/5s/10s/20s/30s earlier
+  would have observed a touch or through-limit trade before expiry. These
+  are touch/cross diagnostics only; they do not claim queue-aware exact-price
+  fills for hypothetical earlier placement.
+- `takerCounterfactual`: best-ask fill size and estimated fee at entry, used
+  by the report JSON to compute a taker-at-ask PnL counterfactual once the
+  official outcome is known.
+
 ## Report
 
 `trading:dry-run-report` writes a standalone HTML report plus a JSON sidecar

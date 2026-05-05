@@ -1,3 +1,10 @@
+import type {
+  DryEntryBookTelemetry,
+  DryEntryPriceTelemetry,
+  DryLeadTimeCounterfactual,
+  DryPreEntryMarketTelemetry,
+  DryTakerCounterfactual,
+} from "@alea/lib/trading/dryRun/telemetry";
 import type { LeadingSide } from "@alea/lib/trading/types";
 import type { Asset } from "@alea/types/assets";
 
@@ -37,6 +44,9 @@ export type DryRunReportSummary = {
   readonly unfilledWouldWinRate: number | null;
   readonly canonicalPnlUsd: number;
   readonly touchPnlUsd: number;
+  readonly takerCounterfactualCount: number;
+  readonly takerCounterfactualWinRate: number | null;
+  readonly takerCounterfactualPnlUsd: number;
   readonly allOrdersFilledPnlUsd: number;
   readonly unfilledCounterfactualPnlUsd: number;
   readonly fillSelectionDeltaUsd: number;
@@ -92,17 +102,31 @@ export type DryRunReportOrder = {
   readonly spread: number | null;
   readonly remaining: number | null;
   readonly distanceBp: number | null;
+  readonly currentSide: LeadingSide | null;
+  readonly regime: LeadingSide | null;
+  readonly decisivelyAway: boolean | null;
+  readonly ema50: number | null;
   readonly samples: number | null;
   readonly modelProbability: number | null;
   readonly edge: number | null;
   readonly officialOutcome: LeadingSide | null;
   readonly proxyOutcome: LeadingSide | null;
+  readonly proxyLine: number | null;
+  readonly proxyClose: number | null;
+  readonly proxyMarginBp: number | null;
+  readonly proxyAbsMarginBp: number | null;
   readonly officialResolvedAtMs: number | null;
   readonly officialPendingReason: string | null;
   readonly canonicalPnlUsd: number | null;
   readonly touchPnlUsd: number | null;
   readonly allOrdersFilledPnlUsd: number | null;
   readonly unfilledCounterfactualPnlUsd: number | null;
+  readonly takerCounterfactual: DryTakerCounterfactual | null;
+  readonly takerCounterfactualPnlUsd: number | null;
+  readonly entryPriceTelemetry: DryEntryPriceTelemetry | null;
+  readonly entryBookTelemetry: DryEntryBookTelemetry | null;
+  readonly preEntryMarketTelemetry: DryPreEntryMarketTelemetry | null;
+  readonly leadTimeCounterfactuals: readonly DryLeadTimeCounterfactual[];
   readonly canonicalFillLatencyMs: number | null;
   readonly touchFillLatencyMs: number | null;
   readonly status: "pending" | "filled" | "partial" | "unfilled";

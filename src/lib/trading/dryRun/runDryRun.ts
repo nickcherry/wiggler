@@ -46,6 +46,21 @@ import {
   computeDryAggregateMetrics,
   type DryOrderResolution,
 } from "@alea/lib/trading/dryRun/metrics";
+import {
+  appendMarketTrade,
+  appendPriceTick,
+  buildEntryBookTelemetry,
+  buildEntryPriceTelemetry,
+  buildLeadTimeCounterfactuals,
+  buildPreEntryMarketTelemetry,
+  buildTakerCounterfactual,
+  type DryEntryBookTelemetry,
+  type DryEntryPriceTelemetry,
+  type DryMarketTradeHistory,
+  type DryPreEntryMarketTelemetry,
+  type DryPriceHistory,
+  type DryTakerCounterfactual,
+} from "@alea/lib/trading/dryRun/telemetry";
 import type { DryRunEvent } from "@alea/lib/trading/dryRun/types";
 import { evaluateRecordDecision } from "@alea/lib/trading/live/evaluateRecordDecision";
 import { tickCanCaptureLine } from "@alea/lib/trading/live/freshness";
@@ -116,6 +131,7 @@ export async function runDryRun({
   const emas = new Map<Asset, FiveMinuteEmaTracker>();
   const atrs = new Map<Asset, FiveMinuteAtrTracker>();
   const lastTick = new Map<Asset, LivePriceTick>();
+  const priceHistory: DryPriceHistory = new Map();
   const lastClosedBars = new Map<Asset, ClosedFiveMinuteBar>();
   const trackerHydrationState = createTrackerHydrationState();
   const books: BookCache = new Map();
@@ -167,6 +183,7 @@ export async function runDryRun({
     assets,
     onTick: (tick) => {
       lastTick.set(tick.asset, tick);
+      appendPriceTick({ history: priceHistory, tick });
     },
     onBarClose: (bar) => {
       lastClosedBars.set(bar.asset, bar);
@@ -335,6 +352,7 @@ export async function runDryRun({
         assetState,
         vendor,
         lastTick,
+        priceHistory,
         emas,
         atrs,
         books,
@@ -398,6 +416,7 @@ type DryTelegramNotifier = (params: {
 type DryWindowState = {
   readonly window: WindowRecord;
   readonly perAsset: Map<Asset, DryAssetState>;
+  readonly marketTradesByOutcome: DryMarketTradeHistory;
   checkpointTimer: ReturnType<typeof setTimeout> | null;
   finalizeRetryTimer: ReturnType<typeof setTimeout> | null;
   checkpointAppended: boolean;
@@ -432,6 +451,10 @@ type DryOrderEnvelope = {
   readonly downBestBid: number | null;
   readonly downBestAsk: number | null;
   readonly spread: number | null;
+  readonly entryPriceTelemetry: DryEntryPriceTelemetry | null;
+  readonly entryBookTelemetry: DryEntryBookTelemetry;
+  readonly preEntryMarketTelemetry: DryPreEntryMarketTelemetry;
+  readonly takerCounterfactual: DryTakerCounterfactual | null;
 };
 
 type DryProxyOutcome = {
@@ -578,6 +601,7 @@ function openDryWindow({
   return {
     window,
     perAsset,
+    marketTradesByOutcome: new Map(),
     checkpointTimer: null,
     finalizeRetryTimer: null,
     checkpointAppended: false,
@@ -658,6 +682,7 @@ function stepDryAsset({
   assetState,
   vendor,
   lastTick,
+  priceHistory,
   emas,
   atrs,
   books,
@@ -673,6 +698,7 @@ function stepDryAsset({
   readonly assetState: DryAssetState;
   readonly vendor: Vendor;
   readonly lastTick: ReadonlyMap<Asset, LivePriceTick>;
+  readonly priceHistory: ReadonlyMap<Asset, readonly LivePriceTick[]>;
   readonly emas: ReadonlyMap<Asset, FiveMinuteEmaTracker>;
   readonly atrs: ReadonlyMap<Asset, FiveMinuteAtrTracker>;
   readonly books: BookCache;
@@ -765,6 +791,7 @@ function stepDryAsset({
       assetState,
       vendor,
       lastTick,
+      priceHistory,
       emas,
       atrs,
       books,
@@ -784,6 +811,7 @@ async function prepareDryOrder({
   assetState,
   vendor,
   lastTick,
+  priceHistory,
   emas,
   atrs,
   books,
@@ -799,6 +827,7 @@ async function prepareDryOrder({
   readonly assetState: DryAssetState;
   readonly vendor: Vendor;
   readonly lastTick: ReadonlyMap<Asset, LivePriceTick>;
+  readonly priceHistory: ReadonlyMap<Asset, readonly LivePriceTick[]>;
   readonly emas: ReadonlyMap<Asset, FiveMinuteEmaTracker>;
   readonly atrs: ReadonlyMap<Asset, FiveMinuteAtrTracker>;
   readonly books: BookCache;
@@ -890,6 +919,8 @@ async function prepareDryOrder({
     queueAheadShares,
   });
   const top = topForSide({ book: fresh, side: prepared.side });
+  const outcomeTrades =
+    state.marketTradesByOutcome.get(prepared.outcomeRef) ?? [];
   assetState.order = {
     order,
     prepared,
@@ -904,6 +935,28 @@ async function prepareDryOrder({
       top.bestBid === null || top.bestAsk === null
         ? null
         : top.bestAsk - top.bestBid,
+    entryPriceTelemetry: buildEntryPriceTelemetry({
+      ticks: priceHistory.get(asset) ?? [],
+      placedAtMs: prepared.preparedAtMs,
+      line,
+    }),
+    entryBookTelemetry: buildEntryBookTelemetry({
+      book: fresh,
+      side: prepared.side,
+      limitPrice: prepared.limitPrice,
+      queueAheadShares,
+      placedAtMs: prepared.preparedAtMs,
+    }),
+    preEntryMarketTelemetry: buildPreEntryMarketTelemetry({
+      trades: outcomeTrades,
+      placedAtMs: prepared.preparedAtMs,
+      limitPrice: prepared.limitPrice,
+    }),
+    takerCounterfactual: buildTakerCounterfactual({
+      book: fresh,
+      side: prepared.side,
+      stakeUsd: STAKE_USD,
+    }),
   };
   record.slot = {
     kind: "active",
@@ -951,7 +1004,7 @@ async function prepareDryOrder({
   await writer.append({
     type: "virtual_order",
     atMs: Date.now(),
-    order: serializeDryOrder({ envelope: assetState.order }),
+    order: serializeDryOrder({ envelope: assetState.order, state }),
   });
 }
 
@@ -1021,6 +1074,13 @@ function handleMarketDataEvent({
     return;
   }
   const state = windows.get(indexed.windowStartMs);
+  if (state !== undefined) {
+    appendMarketTrade({
+      history: state.marketTradesByOutcome,
+      trade: event,
+      nowMs: Date.now(),
+    });
+  }
   const assetState = state?.perAsset.get(indexed.asset);
   const envelope = assetState?.order;
   if (
@@ -1553,7 +1613,7 @@ function serializeWindowOrders({
       ? []
       : [
           {
-            ...serializeDryOrder({ envelope: assetState.order }),
+            ...serializeDryOrder({ envelope: assetState.order, state }),
             proxyOutcome: assetState.proxyOutcome,
             officialOutcome: assetState.officialOutcome,
             officialResolvedAtMs: assetState.officialResolvedAtMs,
@@ -1565,10 +1625,13 @@ function serializeWindowOrders({
 
 function serializeDryOrder({
   envelope,
+  state,
 }: {
   readonly envelope: DryOrderEnvelope;
+  readonly state: DryWindowState;
 }): Record<string, unknown> {
   const { order, decision } = envelope;
+  const outcomeTrades = state.marketTradesByOutcome.get(order.outcomeRef) ?? [];
   return {
     id: order.id,
     asset: order.asset,
@@ -1598,9 +1661,21 @@ function serializeDryOrder({
     spread: envelope.spread,
     remaining: decision.snapshot.remaining,
     distanceBp: decision.snapshot.distanceBp,
+    currentSide: decision.snapshot.currentSide,
+    regime: decision.snapshot.regime,
+    decisivelyAway: decision.snapshot.aligned,
+    ema50: decision.snapshot.ema50,
     samples: decision.samples,
     modelProbability: decision.chosen.ourProbability,
     edge: decision.chosen.edge,
+    entryPriceTelemetry: envelope.entryPriceTelemetry,
+    entryBookTelemetry: envelope.entryBookTelemetry,
+    preEntryMarketTelemetry: envelope.preEntryMarketTelemetry,
+    takerCounterfactual: envelope.takerCounterfactual,
+    leadTimeCounterfactuals: buildLeadTimeCounterfactuals({
+      trades: outcomeTrades,
+      order,
+    }),
   };
 }
 

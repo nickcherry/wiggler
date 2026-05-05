@@ -7,6 +7,15 @@ import type {
   DryRunReportSummary,
   DryRunWindowSummary,
 } from "@alea/lib/trading/dryRun/report/types";
+import type {
+  DryEntryBookTelemetry,
+  DryEntryPriceLookback,
+  DryEntryPriceTelemetry,
+  DryLeadTimeCounterfactual,
+  DryPreEntryMarketLookback,
+  DryPreEntryMarketTelemetry,
+  DryTakerCounterfactual,
+} from "@alea/lib/trading/dryRun/telemetry";
 import type { LeadingSide } from "@alea/lib/trading/types";
 import { type Asset, assetSchema } from "@alea/types/assets";
 
@@ -167,7 +176,20 @@ function parseOrder({
   const officialOutcome = leadingSideNullable({
     value: object["officialOutcome"],
   });
+  const proxyOutcomeObject = asRecord(object["proxyOutcome"]);
   const proxyOutcome = proxyOutcomeField({ object });
+  const proxyLine =
+    proxyOutcomeObject === null
+      ? null
+      : numberField({ object: proxyOutcomeObject, key: "line" });
+  const proxyClose =
+    proxyOutcomeObject === null
+      ? null
+      : numberField({ object: proxyOutcomeObject, key: "close" });
+  const proxyMarginBp =
+    proxyLine === null || proxyClose === null
+      ? null
+      : ((proxyClose - proxyLine) / proxyLine) * 10_000;
   const canonicalFilledShares =
     numberField({ object, key: "canonicalFilledShares" }) ?? 0;
   const canonicalFirstFillAtMs = numberField({
@@ -203,6 +225,17 @@ function parseOrder({
         });
   const unfilledCounterfactualPnlUsd =
     canonicalFilledShares > 0 ? null : allOrdersFilledPnlUsd;
+  const takerCounterfactual = parseTakerCounterfactual({
+    value: object["takerCounterfactual"],
+  });
+  const takerCounterfactualPnlUsd =
+    officialOutcome === null || takerCounterfactual === null
+      ? null
+      : computeDryPnlUsd({
+          shares: takerCounterfactual.sharesIfFilled,
+          price: takerCounterfactual.askPrice,
+          won: side === officialOutcome,
+        }) - (takerCounterfactual.estimatedFeeUsd ?? 0);
 
   return {
     id,
@@ -233,11 +266,19 @@ function parseOrder({
     spread: numberField({ object, key: "spread" }),
     remaining: numberField({ object, key: "remaining" }),
     distanceBp: numberField({ object, key: "distanceBp" }),
+    currentSide: leadingSideNullable({ value: object["currentSide"] }),
+    regime: leadingSideNullable({ value: object["regime"] }),
+    decisivelyAway: booleanField({ object, key: "decisivelyAway" }),
+    ema50: numberField({ object, key: "ema50" }),
     samples: numberField({ object, key: "samples" }),
     modelProbability: numberField({ object, key: "modelProbability" }),
     edge: numberField({ object, key: "edge" }),
     officialOutcome,
     proxyOutcome,
+    proxyLine,
+    proxyClose,
+    proxyMarginBp,
+    proxyAbsMarginBp: proxyMarginBp === null ? null : Math.abs(proxyMarginBp),
     officialResolvedAtMs: numberField({ object, key: "officialResolvedAtMs" }),
     officialPendingReason: stringField({
       object,
@@ -247,6 +288,23 @@ function parseOrder({
     touchPnlUsd,
     allOrdersFilledPnlUsd,
     unfilledCounterfactualPnlUsd,
+    takerCounterfactual,
+    takerCounterfactualPnlUsd,
+    entryPriceTelemetry: parseEntryPriceTelemetry({
+      value: object["entryPriceTelemetry"],
+    }),
+    entryBookTelemetry: parseEntryBookTelemetry({
+      value: object["entryBookTelemetry"],
+    }),
+    preEntryMarketTelemetry: parsePreEntryMarketTelemetry({
+      value: object["preEntryMarketTelemetry"],
+    }),
+    leadTimeCounterfactuals: arrayField({
+      object,
+      key: "leadTimeCounterfactuals",
+    })
+      .map((value) => parseLeadTimeCounterfactual({ value }))
+      .filter((value): value is DryLeadTimeCounterfactual => value !== null),
     canonicalFillLatencyMs:
       canonicalFirstFillAtMs === null
         ? null
@@ -263,6 +321,294 @@ function parseOrder({
       officialOutcome !== null &&
       proxyOutcome !== null &&
       officialOutcome !== proxyOutcome,
+  };
+}
+
+function parseEntryPriceTelemetry({
+  value,
+}: {
+  readonly value: unknown;
+}): DryEntryPriceTelemetry | null {
+  const object = asRecord(value);
+  if (object === null) {
+    return null;
+  }
+  const tickReceivedAtMs = numberField({ object, key: "tickReceivedAtMs" });
+  const tickAgeMs = numberField({ object, key: "tickAgeMs" });
+  const bid = numberField({ object, key: "bid" });
+  const ask = numberField({ object, key: "ask" });
+  const mid = numberField({ object, key: "mid" });
+  const side = leadingSideField({ object, key: "side" });
+  const signedDistanceBp = numberField({
+    object,
+    key: "signedDistanceBp",
+  });
+  if (
+    tickReceivedAtMs === null ||
+    tickAgeMs === null ||
+    bid === null ||
+    ask === null ||
+    mid === null ||
+    side === null ||
+    signedDistanceBp === null
+  ) {
+    return null;
+  }
+  return {
+    tickReceivedAtMs,
+    tickExchangeTimeMs: numberField({ object, key: "tickExchangeTimeMs" }),
+    tickAgeMs,
+    exchangeAgeMs: numberField({ object, key: "exchangeAgeMs" }),
+    bid,
+    ask,
+    mid,
+    side,
+    signedDistanceBp,
+    lookbacks: arrayField({ object, key: "lookbacks" })
+      .map((entry) => parseEntryPriceLookback({ value: entry }))
+      .filter((entry): entry is DryEntryPriceLookback => entry !== null),
+  };
+}
+
+function parseEntryPriceLookback({
+  value,
+}: {
+  readonly value: unknown;
+}): DryEntryPriceLookback | null {
+  const object = asRecord(value);
+  if (object === null) {
+    return null;
+  }
+  const lookbackMs = numberField({ object, key: "lookbackMs" });
+  const tickReceivedAtMs = numberField({ object, key: "tickReceivedAtMs" });
+  const tickAgeMs = numberField({ object, key: "tickAgeMs" });
+  const mid = numberField({ object, key: "mid" });
+  const side = leadingSideField({ object, key: "side" });
+  const signedDistanceBp = numberField({
+    object,
+    key: "signedDistanceBp",
+  });
+  const delta = numberField({ object, key: "delta" });
+  const deltaBp = numberField({ object, key: "deltaBp" });
+  if (
+    lookbackMs === null ||
+    tickReceivedAtMs === null ||
+    tickAgeMs === null ||
+    mid === null ||
+    side === null ||
+    signedDistanceBp === null ||
+    delta === null ||
+    deltaBp === null
+  ) {
+    return null;
+  }
+  return {
+    lookbackMs,
+    tickReceivedAtMs,
+    tickExchangeTimeMs: numberField({ object, key: "tickExchangeTimeMs" }),
+    tickAgeMs,
+    mid,
+    side,
+    signedDistanceBp,
+    delta,
+    deltaBp,
+  };
+}
+
+function parseEntryBookTelemetry({
+  value,
+}: {
+  readonly value: unknown;
+}): DryEntryBookTelemetry | null {
+  const object = asRecord(value);
+  if (object === null) {
+    return null;
+  }
+  const fetchedAtMs = numberField({ object, key: "fetchedAtMs" });
+  const ageMs = numberField({ object, key: "ageMs" });
+  const chosenSide = leadingSideField({ object, key: "chosenSide" });
+  if (fetchedAtMs === null || ageMs === null || chosenSide === null) {
+    return null;
+  }
+  return {
+    fetchedAtMs,
+    ageMs,
+    chosenSide,
+    chosenBestBid: numberField({ object, key: "chosenBestBid" }),
+    chosenBestAsk: numberField({ object, key: "chosenBestAsk" }),
+    chosenSpread: numberField({ object, key: "chosenSpread" }),
+    queueAheadShares: numberField({ object, key: "queueAheadShares" }),
+    chosenBidSizeAtLimit: numberField({
+      object,
+      key: "chosenBidSizeAtLimit",
+    }),
+    chosenAskSizeAtBestAsk: numberField({
+      object,
+      key: "chosenAskSizeAtBestAsk",
+    }),
+    oppositeBestBid: numberField({ object, key: "oppositeBestBid" }),
+    oppositeBestAsk: numberField({ object, key: "oppositeBestAsk" }),
+    oppositeSpread: numberField({ object, key: "oppositeSpread" }),
+    priceTickSize: numberField({ object, key: "priceTickSize" }),
+    minOrderSize: numberField({ object, key: "minOrderSize" }),
+    makerBaseFeeBps: numberField({ object, key: "makerBaseFeeBps" }),
+    takerBaseFeeBps: numberField({ object, key: "takerBaseFeeBps" }),
+    feesTakerOnly: booleanField({ object, key: "feesTakerOnly" }),
+  };
+}
+
+function parsePreEntryMarketTelemetry({
+  value,
+}: {
+  readonly value: unknown;
+}): DryPreEntryMarketTelemetry | null {
+  const object = asRecord(value);
+  if (object === null) {
+    return null;
+  }
+  const tradeCountSeen = numberField({ object, key: "tradeCountSeen" });
+  if (tradeCountSeen === null) {
+    return null;
+  }
+  return {
+    tradeCountSeen,
+    firstTradeAtMs: numberField({ object, key: "firstTradeAtMs" }),
+    lastTradeAtMs: numberField({ object, key: "lastTradeAtMs" }),
+    lastTradeAgeMs: numberField({ object, key: "lastTradeAgeMs" }),
+    lastPrice: numberField({ object, key: "lastPrice" }),
+    lookbacks: arrayField({ object, key: "lookbacks" })
+      .map((entry) => parsePreEntryMarketLookback({ value: entry }))
+      .filter((entry): entry is DryPreEntryMarketLookback => entry !== null),
+  };
+}
+
+function parsePreEntryMarketLookback({
+  value,
+}: {
+  readonly value: unknown;
+}): DryPreEntryMarketLookback | null {
+  const object = asRecord(value);
+  if (object === null) {
+    return null;
+  }
+  const lookbackMs = numberField({ object, key: "lookbackMs" });
+  const tradeCount = numberField({ object, key: "tradeCount" });
+  const knownSizeTradeCount = numberField({
+    object,
+    key: "knownSizeTradeCount",
+  });
+  const totalKnownSize = numberField({ object, key: "totalKnownSize" });
+  const atOrBelowLimitTradeCount = numberField({
+    object,
+    key: "atOrBelowLimitTradeCount",
+  });
+  const belowLimitTradeCount = numberField({
+    object,
+    key: "belowLimitTradeCount",
+  });
+  if (
+    lookbackMs === null ||
+    tradeCount === null ||
+    knownSizeTradeCount === null ||
+    totalKnownSize === null ||
+    atOrBelowLimitTradeCount === null ||
+    belowLimitTradeCount === null
+  ) {
+    return null;
+  }
+  return {
+    lookbackMs,
+    tradeCount,
+    knownSizeTradeCount,
+    totalKnownSize,
+    firstTradeAtMs: numberField({ object, key: "firstTradeAtMs" }),
+    lastTradeAtMs: numberField({ object, key: "lastTradeAtMs" }),
+    lastTradeAgeMs: numberField({ object, key: "lastTradeAgeMs" }),
+    firstPrice: numberField({ object, key: "firstPrice" }),
+    lastPrice: numberField({ object, key: "lastPrice" }),
+    minPrice: numberField({ object, key: "minPrice" }),
+    maxPrice: numberField({ object, key: "maxPrice" }),
+    priceDelta: numberField({ object, key: "priceDelta" }),
+    atOrBelowLimitTradeCount,
+    belowLimitTradeCount,
+  };
+}
+
+function parseTakerCounterfactual({
+  value,
+}: {
+  readonly value: unknown;
+}): DryTakerCounterfactual | null {
+  const object = asRecord(value);
+  if (object === null) {
+    return null;
+  }
+  const askPrice = numberField({ object, key: "askPrice" });
+  const sharesIfFilled = numberField({ object, key: "sharesIfFilled" });
+  const costUsd = numberField({ object, key: "costUsd" });
+  if (askPrice === null || sharesIfFilled === null || costUsd === null) {
+    return null;
+  }
+  return {
+    askPrice,
+    sharesIfFilled,
+    costUsd,
+    estimatedFeeRateBps: numberField({
+      object,
+      key: "estimatedFeeRateBps",
+    }),
+    estimatedFeeUsd: numberField({ object, key: "estimatedFeeUsd" }),
+  };
+}
+
+function parseLeadTimeCounterfactual({
+  value,
+}: {
+  readonly value: unknown;
+}): DryLeadTimeCounterfactual | null {
+  const object = asRecord(value);
+  if (object === null) {
+    return null;
+  }
+  const leadMs = numberField({ object, key: "leadMs" });
+  const hypotheticalPlacedAtMs = numberField({
+    object,
+    key: "hypotheticalPlacedAtMs",
+  });
+  const tradeSamples = numberField({ object, key: "tradeSamples" });
+  const touchedBeforeActualPlacement = booleanField({
+    object,
+    key: "touchedBeforeActualPlacement",
+  });
+  const crossedBeforeActualPlacement = booleanField({
+    object,
+    key: "crossedBeforeActualPlacement",
+  });
+  if (
+    leadMs === null ||
+    hypotheticalPlacedAtMs === null ||
+    tradeSamples === null ||
+    touchedBeforeActualPlacement === null ||
+    crossedBeforeActualPlacement === null
+  ) {
+    return null;
+  }
+  return {
+    leadMs,
+    hypotheticalPlacedAtMs,
+    tradeSamples,
+    firstTouchAtMs: numberField({ object, key: "firstTouchAtMs" }),
+    firstTouchLatencyMs: numberField({
+      object,
+      key: "firstTouchLatencyMs",
+    }),
+    touchedBeforeActualPlacement,
+    firstCrossAtMs: numberField({ object, key: "firstCrossAtMs" }),
+    firstCrossLatencyMs: numberField({
+      object,
+      key: "firstCrossLatencyMs",
+    }),
+    crossedBeforeActualPlacement,
   };
 }
 
@@ -298,10 +644,14 @@ function summarizeOrders({
   const touchFilled = finalized.filter(
     (order) => order.touchFilledAtMs !== null,
   );
+  const takerCounterfactual = finalized.filter(
+    (order) => order.takerCounterfactualPnlUsd !== null,
+  );
   const unfilled = finalized.filter(
     (order) => order.canonicalFilledShares <= 0,
   );
   const filledWins = canonicalFilled.filter((order) => order.wonIfFilled);
+  const takerWins = takerCounterfactual.filter((order) => order.wonIfFilled);
   const allWins = finalized.filter((order) => order.wonIfFilled);
   const unfilledWins = unfilled.filter((order) => order.wonIfFilled);
   const latencies = canonicalFilled
@@ -331,6 +681,14 @@ function summarizeOrders({
       unfilled.length === 0 ? null : unfilledWins.length / unfilled.length,
     canonicalPnlUsd,
     touchPnlUsd: sum(finalized.map((order) => order.touchPnlUsd)),
+    takerCounterfactualCount: takerCounterfactual.length,
+    takerCounterfactualWinRate:
+      takerCounterfactual.length === 0
+        ? null
+        : takerWins.length / takerCounterfactual.length,
+    takerCounterfactualPnlUsd: sum(
+      finalized.map((order) => order.takerCounterfactualPnlUsd),
+    ),
     allOrdersFilledPnlUsd,
     unfilledCounterfactualPnlUsd: sum(
       finalized.map((order) => order.unfilledCounterfactualPnlUsd),

@@ -248,7 +248,9 @@ function renderSessionContext({
         })}
         ${contextItem({
           label: "Assets",
-          value: config?.assets.map((asset) => asset.toUpperCase()).join(", ") ?? "--",
+          value:
+            config?.assets.map((asset) => asset.toUpperCase()).join(", ") ??
+            "--",
         })}
         ${contextItem({
           label: "Model Table",
@@ -349,9 +351,11 @@ function renderActualFilledSection({
                 ${metricRow({
                   label: "Filled orders",
                   value: `${orders.length} observed`,
-                  note: `${summary.canonicalFilledCount}/${summary.finalizedOrderCount} finalized orders filled (${formatPercent({
-                    value: summary.canonicalFillRate,
-                  })})`,
+                  note: `${summary.canonicalFilledCount}/${summary.finalizedOrderCount} finalized orders filled (${formatPercent(
+                    {
+                      value: summary.canonicalFillRate,
+                    },
+                  )})`,
                 })}
                 ${metricRow({
                   label: "PnL",
@@ -455,6 +459,14 @@ function renderPlacedCounterfactualSection({
                   orders: `${summary.touchFilledCount}/${summary.finalizedOrderCount}`,
                   winRate: formatPercent({ value: touch.winRate }),
                   pnl: summary.touchPnlUsd,
+                })}
+                ${scenarioRow({
+                  label: "Taker at ask",
+                  orders: `${summary.takerCounterfactualCount}/${summary.finalizedOrderCount}`,
+                  winRate: formatPercent({
+                    value: summary.takerCounterfactualWinRate,
+                  }),
+                  pnl: summary.takerCounterfactualPnlUsd,
                 })}
                 ${scenarioRow({
                   label: "Actual - all-filled",
@@ -615,7 +627,9 @@ function renderUnfilledOrdersTable({
                   colspan: 10,
                   label: "No unfilled finalized orders recorded.",
                 })
-              : orders.map((order) => renderUnfilledOrderRow({ order })).join("")
+              : orders
+                  .map((order) => renderUnfilledOrderRow({ order }))
+                  .join("")
           }
         </tbody>
       </table>
@@ -721,7 +735,8 @@ function renderPlacementStatsTable({
 }: {
   readonly rows: readonly PlacementStatsRow[];
 }): string {
-  const filledOnly = rows[0] ?? emptyPlacementStatsRow({ label: "Filled only" });
+  const filledOnly =
+    rows[0] ?? emptyPlacementStatsRow({ label: "Filled only" });
   const filledAndUnfilled =
     rows[1] ?? emptyPlacementStatsRow({ label: "Filled + unfilled" });
   const unfilledOnly =
