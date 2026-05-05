@@ -70,28 +70,32 @@ describe("createCaptureJsonlWriter", () => {
     expect(parseRecord(lines[1]!).payload.bid).toBe(2);
   });
 
-  it("rotates files at the 5-minute boundary using the record's tsMs", async () => {
+  it("rotates files at the 5-minute boundary using wall-clock at write time", async () => {
     const rolledOver: { closedSession: { windowKey: string }; closedPath: string }[] = [];
+    let now = Date.parse("2026-05-05T12:32:00.000Z");
     const writer = await createCaptureJsonlWriter({
       dir,
-      nowMs: () => Date.parse("2026-05-05T12:32:00.000Z"),
+      nowMs: () => now,
       onRollover: async ({ closedSession, closedPath }) => {
         rolledOver.push({ closedSession, closedPath });
       },
     });
 
-    // Both events fall in 12:30 window
+    // Wall-clock is firmly inside the 12:30 window for the first two
+    // writes — even though one record carries an out-of-window tsMs
+    // we expect the writer to ignore it and route by wall-clock.
+    await writer.write(recordAt());
+    now = Date.parse("2026-05-05T12:34:30.000Z");
     await writer.write(
-      recordAt({ tsMs: Date.parse("2026-05-05T12:32:30.000Z") }),
-    );
-    await writer.write(
-      recordAt({ tsMs: Date.parse("2026-05-05T12:34:30.000Z") }),
+      recordAt({ tsMs: Date.parse("2026-05-05T12:36:00.000Z") }),
     );
     expect(writer.currentSession()?.windowKey).toBe("2026-05-05T12-30");
 
-    // This crosses into 12:35 → triggers a rollover.
+    // Now wall-clock crosses into 12:35 — rotation triggers regardless
+    // of the record's tsMs.
+    now = Date.parse("2026-05-05T12:35:01.000Z");
     await writer.write(
-      recordAt({ tsMs: Date.parse("2026-05-05T12:36:00.000Z") }),
+      recordAt({ tsMs: Date.parse("2026-05-05T12:34:55.000Z") }),
     );
     expect(writer.currentSession()?.windowKey).toBe("2026-05-05T12-35");
     expect(rolledOver.map((entry) => entry.closedSession.windowKey)).toEqual([
@@ -125,6 +129,37 @@ describe("createCaptureJsonlWriter", () => {
     expect(opened.split("\n").filter((line) => line.length > 0)).toHaveLength(
       1,
     );
+  });
+
+  it("does NOT flip-flop windows when out-of-order tsMs arrive (boundary-skew bug)", async () => {
+    const rolledOver: { closedSession: { windowKey: string } }[] = [];
+    const now = Date.parse("2026-05-05T12:35:00.001Z");
+    const writer = await createCaptureJsonlWriter({
+      dir,
+      nowMs: () => now,
+      onRollover: async ({ closedSession }) => {
+        rolledOver.push({ closedSession });
+      },
+    });
+
+    // Simulate the live boundary scenario: wall-clock just rolled to
+    // 12:35, but events from BEFORE the boundary keep arriving for
+    // a couple seconds (cross-venue clock skew). Each event's tsMs
+    // is firmly in the 12:30 window — but we want them all in the
+    // 12:35 window because that's when we OBSERVED them.
+    for (let i = 0; i < 5; i += 1) {
+      await writer.write(
+        recordAt({
+          tsMs: Date.parse("2026-05-05T12:34:59.500Z") + i,
+        }),
+      );
+    }
+
+    // Critical: NO rotation should have happened. Wall-clock has not
+    // moved out of 12:35.
+    expect(rolledOver).toHaveLength(0);
+    expect(writer.currentSession()?.windowKey).toBe("2026-05-05T12-35");
+    await writer.close();
   });
 
   it("preserves write order under interleaved fire-and-forget calls", async () => {

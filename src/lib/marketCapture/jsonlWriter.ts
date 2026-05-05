@@ -149,15 +149,22 @@ export async function createCaptureJsonlWriter({
         if (closed) {
           throw new Error("capture jsonl writer is closed");
         }
-        // Use the record's tsMs (event time) for the rollover decision,
-        // not Date.now(). Otherwise late-arriving events at exactly
-        // the boundary would pile up in the wrong window.
-        // Fall back to the writer's clock when the caller didn't
-        // provide a useful tsMs (shouldn't happen in practice).
-        const tsForRouting = Number.isFinite(record.tsMs)
-          ? record.tsMs
-          : nowMs();
-        await ensureCurrentSession(tsForRouting);
+        // Route by WALL-CLOCK at write time, not by `record.tsMs`.
+        //
+        // We tried event-time routing first and it blew up at every
+        // 5-minute boundary: cross-venue clock skew puts simultaneous
+        // events on opposite sides of the wall-clock boundary (Binance
+        // says 14:59:59.97, Coinbase says 15:00:00.05). Routing by each
+        // event's clock causes the writer to flip-flop between two
+        // windows for several seconds, triggering O(n) redundant
+        // rotations and re-ingestions per boundary.
+        //
+        // The window a record lands in is now defined by "the wall-
+        // clock window during which we observed it." `record.tsMs` is
+        // still preserved verbatim in the JSONL line, so any analysis
+        // that wants venue-time bucketing can re-bin from there. The
+        // file's window key is operational, not analytical.
+        await ensureCurrentSession(nowMs());
         if (handle === null) {
           // Defensive — `ensureCurrentSession` always sets handle.
           throw new Error("capture jsonl writer has no open handle");
