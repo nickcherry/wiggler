@@ -5,6 +5,7 @@ import { describe, expect, it } from "bun:test";
 function tick(tsReceivedMs: number, mid: number): QuoteTick {
   return {
     exchange: "coinbase-spot",
+    asset: "btc",
     tsReceivedMs,
     tsExchangeMs: null,
     bid: mid - 0.5,

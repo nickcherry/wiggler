@@ -56,6 +56,7 @@ All four primary candidates (Binance spot+perp, Coinbase spot+perp) reliably sho
 
 - CLI: [src/bin/latency/capture.ts](../src/bin/latency/capture.ts), [src/bin/latency/chart.ts](../src/bin/latency/chart.ts)
 - Orchestration: [src/lib/exchangePrices/captureAllQuoteStreams.ts](../src/lib/exchangePrices/captureAllQuoteStreams.ts), [streamStartersByExchange.ts](../src/lib/exchangePrices/streamStartersByExchange.ts)
-- Per-venue stream functions: [src/lib/exchangePrices/sources/](../src/lib/exchangePrices/sources/) — one folder per venue
+- Per-venue stream functions: [src/lib/exchangePrices/sources/](../src/lib/exchangePrices/sources/) — one folder per venue. Each starter accepts an optional `assets` list and (where the venue's WS supports it — Binance, Coinbase, Polymarket-RTDS) subscribes them all on a single socket. Defaults to `["btc"]` so legacy single-asset latency captures keep working without code changes.
+- Reconnect logic for the long-running `data:capture` use case is shared via [src/lib/wsClient/createReconnectingWebSocket.ts](../src/lib/wsClient/createReconnectingWebSocket.ts); the experiment-only single-asset venues (`bybit-*`, `bitstamp-spot`, `gemini-spot`, `okx-*`) still use plain `WebSocket` because a 60s capture run doesn't need it.
 - Chart renderer: [renderPriceChartHtml.ts](../src/lib/exchangePrices/renderPriceChartHtml.ts)
 - Volume weights for the exhaustive-mode VWAP overlays: [exchangeSpotVolumeWeights.ts](../src/lib/exchangePrices/exchangeSpotVolumeWeights.ts), [exchangePerpVolumeWeights.ts](../src/lib/exchangePrices/exchangePerpVolumeWeights.ts)

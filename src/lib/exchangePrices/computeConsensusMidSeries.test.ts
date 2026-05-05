@@ -13,6 +13,7 @@ function tick({
 }): QuoteTick {
   return {
     exchange,
+    asset: "btc",
     tsReceivedMs,
     tsExchangeMs: null,
     bid: mid - 0.5,

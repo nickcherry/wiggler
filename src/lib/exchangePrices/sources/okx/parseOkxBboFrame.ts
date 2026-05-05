@@ -39,6 +39,7 @@ export function parseOkxBboFrame({
   const tsExchangeMs = row.ts ? Number(row.ts) : null;
   return {
     exchange,
+    asset: "btc",
     tsReceivedMs: Date.now(),
     tsExchangeMs:
       tsExchangeMs && Number.isFinite(tsExchangeMs) ? tsExchangeMs : null,

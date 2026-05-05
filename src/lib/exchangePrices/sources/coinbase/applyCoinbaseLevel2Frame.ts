@@ -1,3 +1,4 @@
+import type { Asset } from "@alea/types/assets";
 import type { ExchangeId, QuoteTick } from "@alea/types/exchanges";
 
 type Level2Update = {
@@ -19,18 +20,39 @@ type Level2Frame = {
 };
 
 /**
- * Mutable per-stream state. Holds the full bid/ask depth so the top of
- * book can be recomputed when a level is consumed, plus cached top
+ * Mutable per-product state. Holds the full bid/ask depth so the top
+ * of book can be recomputed when a level is consumed, plus cached top
  * pointers so most updates can detect a top change in O(1).
  */
-export type CoinbaseLevel2State = {
+export type CoinbaseLevel2ProductState = {
   readonly bids: Map<number, number>;
   readonly asks: Map<number, number>;
   bestBid: number | null;
   bestAsk: number | null;
 };
 
-export function createCoinbaseLevel2State(): CoinbaseLevel2State {
+/**
+ * Per-stream state — one product (asset) → one book. Keys are
+ * Coinbase `product_id` strings (e.g. `"BTC-USD"`, `"ETH-PERP-INTX"`).
+ */
+export type CoinbaseLevel2State = {
+  readonly byProductId: Map<string, CoinbaseLevel2ProductState>;
+  readonly productIdToAsset: ReadonlyMap<string, Asset>;
+};
+
+export function createCoinbaseLevel2State({
+  productIdToAsset,
+}: {
+  readonly productIdToAsset: ReadonlyMap<string, Asset>;
+}): CoinbaseLevel2State {
+  const byProductId = new Map<string, CoinbaseLevel2ProductState>();
+  for (const productId of productIdToAsset.keys()) {
+    byProductId.set(productId, createProductState());
+  }
+  return { byProductId, productIdToAsset };
+}
+
+function createProductState(): CoinbaseLevel2ProductState {
   return {
     bids: new Map(),
     asks: new Map(),
@@ -40,33 +62,44 @@ export function createCoinbaseLevel2State(): CoinbaseLevel2State {
 }
 
 /**
- * Applies one Coinbase Advanced Trade `level2` frame to `state`. Snapshots
- * and incremental updates use the same shape; we treat both identically.
+ * Applies one Coinbase Advanced Trade `level2` frame to `state`.
+ * Snapshots and incremental updates use the same shape; we treat
+ * both identically.
  *
- * Returns a `QuoteTick` only when the best bid or best ask actually moved
- * — that's the signal callers care about. Pure level changes deeper in
- * the book are silently absorbed.
+ * Returns one `QuoteTick` per *product whose top of book actually
+ * moved* in this frame. A frame can carry events for multiple
+ * products at once on the L2 channel, so we emit a tick per affected
+ * product (in event order). Pure deeper-book updates are silently
+ * absorbed.
+ *
+ * `exchange` is the venue label that goes on every emitted tick
+ * (`"coinbase-spot"` or `"coinbase-perp"`).
  */
 export function applyCoinbaseLevel2Frame({
   raw,
-  productId,
   exchange,
   state,
 }: {
   readonly raw: string;
-  readonly productId: string;
   readonly exchange: ExchangeId;
   readonly state: CoinbaseLevel2State;
-}): QuoteTick | null {
+}): readonly QuoteTick[] {
   const frame = JSON.parse(raw) as Level2Frame;
   if (frame.channel !== "l2_data") {
-    return null;
+    return [];
   }
-  let topChanged = false;
+  const out: QuoteTick[] = [];
+  const tsExchangeMs = frame.timestamp ? Date.parse(frame.timestamp) : null;
   for (const ev of frame.events ?? []) {
-    if (ev.product_id !== productId) {
+    if (ev.product_id === undefined) {
       continue;
     }
+    const product = state.byProductId.get(ev.product_id);
+    const asset = state.productIdToAsset.get(ev.product_id);
+    if (product === undefined || asset === undefined) {
+      continue;
+    }
+    let topChanged = false;
     for (const update of ev.updates ?? []) {
       const price = Number(update.price_level);
       const qty = Number(update.new_quantity);
@@ -79,54 +112,59 @@ export function applyCoinbaseLevel2Frame({
       if (!isBid && !isAsk) {
         continue;
       }
-      const book = isBid ? state.bids : state.asks;
+      const book = isBid ? product.bids : product.asks;
       const removed = !Number.isFinite(qty) || qty <= 0;
       if (removed) {
         if (!book.has(price)) {
           continue;
         }
         book.delete(price);
-        if (isBid && state.bestBid === price) {
-          state.bestBid = findBest({ book: state.bids, side: "bid" });
+        if (isBid && product.bestBid === price) {
+          product.bestBid = findBest({ book: product.bids, side: "bid" });
           topChanged = true;
-        } else if (isAsk && state.bestAsk === price) {
-          state.bestAsk = findBest({ book: state.asks, side: "ask" });
+        } else if (isAsk && product.bestAsk === price) {
+          product.bestAsk = findBest({ book: product.asks, side: "ask" });
           topChanged = true;
         }
       } else {
         const previousQty = book.get(price);
         book.set(price, qty);
         if (isBid) {
-          if (state.bestBid === null || price > state.bestBid) {
-            state.bestBid = price;
+          if (product.bestBid === null || price > product.bestBid) {
+            product.bestBid = price;
             topChanged = true;
-          } else if (price === state.bestBid && previousQty !== qty) {
+          } else if (price === product.bestBid && previousQty !== qty) {
             // Same-price qty change at the BBO — match Binance bookTicker's
             // "fire on price OR quantity change at top" semantics.
             topChanged = true;
           }
         } else if (isAsk) {
-          if (state.bestAsk === null || price < state.bestAsk) {
-            state.bestAsk = price;
+          if (product.bestAsk === null || price < product.bestAsk) {
+            product.bestAsk = price;
             topChanged = true;
-          } else if (price === state.bestAsk && previousQty !== qty) {
+          } else if (price === product.bestAsk && previousQty !== qty) {
             topChanged = true;
           }
         }
       }
     }
+    if (
+      topChanged &&
+      product.bestBid !== null &&
+      product.bestAsk !== null
+    ) {
+      out.push({
+        exchange,
+        asset,
+        tsReceivedMs: Date.now(),
+        tsExchangeMs,
+        bid: product.bestBid,
+        ask: product.bestAsk,
+        mid: (product.bestBid + product.bestAsk) / 2,
+      });
+    }
   }
-  if (!topChanged || state.bestBid === null || state.bestAsk === null) {
-    return null;
-  }
-  return {
-    exchange,
-    tsReceivedMs: Date.now(),
-    tsExchangeMs: frame.timestamp ? Date.parse(frame.timestamp) : null,
-    bid: state.bestBid,
-    ask: state.bestAsk,
-    mid: (state.bestBid + state.bestAsk) / 2,
-  };
+  return out;
 }
 
 function findBest({

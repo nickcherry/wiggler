@@ -4,6 +4,11 @@ import {
 } from "@alea/lib/exchangePrices/sources/coinbase/applyCoinbaseLevel2Frame";
 import { describe, expect, it } from "bun:test";
 
+const productIdToAsset = new Map<string, "btc" | "eth">([
+  ["BTC-USD", "btc"],
+  ["ETH-USD", "eth"],
+]);
+
 function frame({
   productId = "BTC-USD",
   updates,
@@ -25,23 +30,24 @@ function frame({
 }
 
 describe("applyCoinbaseLevel2Frame", () => {
-  it("emits when the best bid/ask is established", () => {
-    const state = createCoinbaseLevel2State();
+  it("emits one tick per product whose top of book is established", () => {
+    const state = createCoinbaseLevel2State({ productIdToAsset });
 
-    const tick = applyCoinbaseLevel2Frame({
+    const ticks = applyCoinbaseLevel2Frame({
       raw: frame({
         updates: [
           { side: "bid", price_level: "100", new_quantity: "2" },
           { side: "offer", price_level: "102", new_quantity: "3" },
         ],
       }),
-      productId: "BTC-USD",
       exchange: "coinbase-spot",
       state,
     });
 
-    expect(tick).toMatchObject({
+    expect(ticks).toHaveLength(1);
+    expect(ticks[0]).toMatchObject({
       exchange: "coinbase-spot",
+      asset: "btc",
       tsExchangeMs: Date.parse("2026-05-04T12:00:00.000Z"),
       bid: 100,
       ask: 102,
@@ -50,7 +56,7 @@ describe("applyCoinbaseLevel2Frame", () => {
   });
 
   it("absorbs deeper-book updates without emitting a top-of-book tick", () => {
-    const state = createCoinbaseLevel2State();
+    const state = createCoinbaseLevel2State({ productIdToAsset });
     applyCoinbaseLevel2Frame({
       raw: frame({
         updates: [
@@ -58,7 +64,6 @@ describe("applyCoinbaseLevel2Frame", () => {
           { side: "offer", price_level: "102", new_quantity: "3" },
         ],
       }),
-      productId: "BTC-USD",
       exchange: "coinbase-spot",
       state,
     });
@@ -68,15 +73,14 @@ describe("applyCoinbaseLevel2Frame", () => {
         raw: frame({
           updates: [{ side: "bid", price_level: "99", new_quantity: "5" }],
         }),
-        productId: "BTC-USD",
         exchange: "coinbase-spot",
         state,
       }),
-    ).toBeNull();
+    ).toEqual([]);
   });
 
   it("emits on top quantity changes and recomputes top when the best level is removed", () => {
-    const state = createCoinbaseLevel2State();
+    const state = createCoinbaseLevel2State({ productIdToAsset });
     applyCoinbaseLevel2Frame({
       raw: frame({
         updates: [
@@ -85,63 +89,96 @@ describe("applyCoinbaseLevel2Frame", () => {
           { side: "offer", price_level: "102", new_quantity: "3" },
         ],
       }),
-      productId: "BTC-USD",
       exchange: "coinbase-spot",
       state,
     });
 
-    const quantityTick = applyCoinbaseLevel2Frame({
+    const quantityTicks = applyCoinbaseLevel2Frame({
       raw: frame({
         updates: [{ side: "bid", price_level: "100", new_quantity: "4" }],
       }),
-      productId: "BTC-USD",
       exchange: "coinbase-spot",
       state,
     });
-    expect(quantityTick?.bid).toBe(100);
+    expect(quantityTicks).toHaveLength(1);
+    expect(quantityTicks[0]?.bid).toBe(100);
 
-    const removalTick = applyCoinbaseLevel2Frame({
+    const removalTicks = applyCoinbaseLevel2Frame({
       raw: frame({
         updates: [{ side: "bid", price_level: "100", new_quantity: "0" }],
       }),
-      productId: "BTC-USD",
       exchange: "coinbase-spot",
       state,
     });
-    expect(removalTick).toMatchObject({
+    expect(removalTicks).toHaveLength(1);
+    expect(removalTicks[0]).toMatchObject({
       bid: 99,
       ask: 102,
       mid: 100.5,
     });
   });
 
-  it("ignores unrelated channels and products", () => {
-    const state = createCoinbaseLevel2State();
+  it("ignores unrelated channels and unknown products", () => {
+    const state = createCoinbaseLevel2State({ productIdToAsset });
 
     expect(
       applyCoinbaseLevel2Frame({
         raw: JSON.stringify({ channel: "heartbeats", events: [] }),
-        productId: "BTC-USD",
         exchange: "coinbase-spot",
         state,
       }),
-    ).toBeNull();
+    ).toEqual([]);
 
+    // SOL-USD isn't in our productIdToAsset map, so it's silently
+    // dropped and never affects either of the products we DO know.
     expect(
       applyCoinbaseLevel2Frame({
         raw: frame({
-          productId: "ETH-USD",
+          productId: "SOL-USD",
           updates: [
             { side: "bid", price_level: "100", new_quantity: "2" },
             { side: "offer", price_level: "102", new_quantity: "3" },
           ],
         }),
-        productId: "BTC-USD",
         exchange: "coinbase-spot",
         state,
       }),
-    ).toBeNull();
-    expect(state.bestBid).toBeNull();
-    expect(state.bestAsk).toBeNull();
+    ).toEqual([]);
+    expect(state.byProductId.get("BTC-USD")?.bestBid).toBeNull();
+    expect(state.byProductId.get("ETH-USD")?.bestBid).toBeNull();
+  });
+
+  it("routes top-of-book updates per product within a single frame", () => {
+    const state = createCoinbaseLevel2State({ productIdToAsset });
+    const raw = JSON.stringify({
+      channel: "l2_data",
+      timestamp: "2026-05-04T12:00:00.000Z",
+      events: [
+        {
+          type: "update",
+          product_id: "BTC-USD",
+          updates: [
+            { side: "bid", price_level: "100", new_quantity: "2" },
+            { side: "offer", price_level: "102", new_quantity: "3" },
+          ],
+        },
+        {
+          type: "update",
+          product_id: "ETH-USD",
+          updates: [
+            { side: "bid", price_level: "10", new_quantity: "50" },
+            { side: "offer", price_level: "11", new_quantity: "60" },
+          ],
+        },
+      ],
+    });
+    const ticks = applyCoinbaseLevel2Frame({
+      raw,
+      exchange: "coinbase-spot",
+      state,
+    });
+    expect(ticks.map((tick) => tick.asset)).toEqual(["btc", "eth"]);
+    expect(ticks.find((tick) => tick.asset === "btc")?.bid).toBe(100);
+    expect(ticks.find((tick) => tick.asset === "eth")?.ask).toBe(11);
   });
 });

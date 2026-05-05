@@ -60,6 +60,7 @@ export function parseBybitOrderbookFrame({
   }
   return {
     exchange,
+    asset: "btc",
     tsReceivedMs: Date.now(),
     tsExchangeMs: typeof data.ts === "number" ? data.ts : null,
     bid: state.bid,

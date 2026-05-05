@@ -2,63 +2,105 @@ import type {
   StreamHandle,
   StreamQuotesParams,
 } from "@alea/lib/exchangePrices/types";
-import type { QuoteTick } from "@alea/types/exchanges";
+import { createReconnectingWebSocket } from "@alea/lib/wsClient/createReconnectingWebSocket";
+import type { Asset } from "@alea/types/assets";
 
 const url = "wss://ws-live-data.polymarket.com";
 const topic = "crypto_prices_chainlink";
-const targetSymbol = "btc/usd";
 
 /**
  * Subscribes to Polymarket's RTDS `crypto_prices_chainlink` topic and
- * surfaces BTC/USD updates. This is a single-value reference price
- * (Chainlink-derived) — there's no real bid/ask, so we set bid = ask =
- * value so a `polymarket-chainlink` tick slots into the existing BBO
- * data shape.
+ * surfaces `<asset>/usd` reference price updates. This is a
+ * single-value Chainlink-derived reference price (not a true BBO),
+ * so we set `bid = ask = mid = value` to slot it into the existing
+ * `QuoteTick` shape.
  *
- * Subscribe shape: { action: "subscribe", subscriptions: [{ topic, type: "*" }] }.
- * Frame shape:
- *   { topic: "crypto_prices_chainlink", type: "update",
- *     payload: { symbol: "btc/usd", value: number, timestamp: number },
- *     timestamp: number }
+ * The RTDS topic carries every crypto symbol Polymarket publishes
+ * on a single connection; we filter to the requested `assets`.
  *
- * The feed publishes all crypto symbols Polymarket cares about; we filter
- * to btc/usd so this matches the rest of the BBO comparison.
+ * Defaults `assets` to `["btc"]` so the latency:capture experiments
+ * keep working unchanged.
+ *
+ * Reliability: backed by `wsClient/createReconnectingWebSocket` —
+ * auto-reconnect with backoff, stale-frame watchdog. The subscription
+ * is re-sent on every (re)connect.
+ *
+ * Polymarket is the venue we trade against; the Chainlink-derived
+ * reference IS the true settlement source for the up/down 5m markets.
+ * This is the only feed for which Polymarket and "the source of
+ * truth" coincide, so capturing it directly is critical for proxy-
+ * mismatch research (the Binance vs. Chainlink divergence that
+ * occasionally hands us wrong-side fills).
  */
 export function streamPolymarketChainlinkQuotes({
+  assets = ["btc"],
   onTick,
   onError,
   onOpen,
   onClose,
+  onConnect,
+  onDisconnect,
 }: StreamQuotesParams): StreamHandle {
-  const ws = new WebSocket(url);
+  const symbolToAsset = buildSymbolMap({ assets });
 
-  ws.addEventListener("open", () => {
-    ws.send(
-      JSON.stringify({
-        action: "subscribe",
-        subscriptions: [{ topic, type: "*" }],
-      }),
-    );
-    onOpen?.();
-  });
-  ws.addEventListener("close", () => onClose?.());
-  ws.addEventListener("error", () =>
-    onError(new Error("polymarket-chainlink websocket error")),
-  );
-  ws.addEventListener("message", (event: MessageEvent<string>) => {
-    try {
-      const tick = parseFrame(event.data);
-      if (tick) {
-        onTick(tick);
+  const handle = createReconnectingWebSocket({
+    label: "polymarket-chainlink",
+    url,
+    onOpen: (ws) => {
+      ws.send(
+        JSON.stringify({
+          action: "subscribe",
+          subscriptions: [{ topic, type: "*" }],
+        }),
+      );
+      onOpen?.();
+    },
+    onConnect,
+    onDisconnect,
+    onError,
+    onMessage: (raw) => {
+      try {
+        // RTDS sends occasional empty keep-alive frames; ignore them
+        // rather than letting JSON.parse blow up.
+        if (raw.length === 0) {
+          return;
+        }
+        const frame = JSON.parse(raw) as PolymarketRtdsFrame;
+        if (frame.topic !== topic || frame.type !== "update" || !frame.payload) {
+          return;
+        }
+        const symbol = frame.payload.symbol ?? "";
+        const asset = symbolToAsset.get(symbol);
+        if (asset === undefined) {
+          return;
+        }
+        const value = Number(frame.payload.value);
+        if (!Number.isFinite(value) || value <= 0) {
+          return;
+        }
+        const tsExchangeMs =
+          typeof frame.payload.timestamp === "number"
+            ? frame.payload.timestamp
+            : null;
+        onTick({
+          exchange: "polymarket-chainlink",
+          asset,
+          tsReceivedMs: Date.now(),
+          tsExchangeMs,
+          bid: value,
+          ask: value,
+          mid: value,
+        });
+      } catch (error) {
+        onError(error instanceof Error ? error : new Error(String(error)));
       }
-    } catch (error) {
-      onError(error instanceof Error ? error : new Error(String(error)));
-    }
+    },
   });
 
   return {
     stop: async () => {
-      ws.close();
+      await handle.stop();
+      onClose?.();
     },
   };
 }
@@ -70,33 +112,14 @@ type PolymarketRtdsFrame = {
   payload?: { symbol?: string; value?: number; timestamp?: number };
 };
 
-function parseFrame(raw: string): QuoteTick | null {
-  // RTDS sends occasional empty keep-alive frames; ignore them rather
-  // than letting JSON.parse blow up.
-  if (raw.length === 0) {
-    return null;
+function buildSymbolMap({
+  assets,
+}: {
+  readonly assets: readonly Asset[];
+}): ReadonlyMap<string, Asset> {
+  const map = new Map<string, Asset>();
+  for (const asset of assets) {
+    map.set(`${asset}/usd`, asset);
   }
-  const frame = JSON.parse(raw) as PolymarketRtdsFrame;
-  if (frame.topic !== topic || frame.type !== "update" || !frame.payload) {
-    return null;
-  }
-  if (frame.payload.symbol !== targetSymbol) {
-    return null;
-  }
-  const value = Number(frame.payload.value);
-  if (!Number.isFinite(value) || value <= 0) {
-    return null;
-  }
-  const tsExchangeMs =
-    typeof frame.payload.timestamp === "number"
-      ? frame.payload.timestamp
-      : null;
-  return {
-    exchange: "polymarket-chainlink",
-    tsReceivedMs: Date.now(),
-    tsExchangeMs,
-    bid: value,
-    ask: value,
-    mid: value,
-  };
+  return map;
 }

@@ -357,13 +357,18 @@ ATR tracker:
 
 Binance live stream:
 
-- `streamBinancePerpLive` opens one combined Binance Futures websocket for all
-  requested assets.
+- `streamBinancePerpQuotes` (in `src/lib/exchangePrices/sources/binance/`)
+  opens one combined Binance Futures websocket for all requested assets.
 - It subscribes to `<symbol>@bookTicker` and `<symbol>@kline_5m`.
 - It emits BBO ticks continuously.
 - It emits closed five-minute bars only when the kline frame has `k.x` true.
-- Reconnect delays are `[1000, 2000, 5000, 10000, 30000]` ms.
-- A stale-frame watchdog reconnects if no message lands for five seconds.
+- Reconnect delays are `[1000, 2000, 5000, 10000, 30000]` ms via the shared
+  `wsClient/createReconnectingWebSocket` helper.
+- A stale-frame watchdog reconnects if no message lands for thirty seconds.
+- The trader consumes it through a thin adapter at
+  `src/lib/livePrices/binancePerp/source.ts` that maps `QuoteTick` →
+  `LivePriceTick` for the existing tracker code; the same streamer also
+  feeds `latency:capture`, `reliability:capture`, and `data:capture`.
 
 Recent bar fetchers:
 
@@ -1977,7 +1982,8 @@ Live prices:
 - `src/lib/livePrices/fiveMinuteWindow.ts`
 - `src/lib/livePrices/fiveMinuteEmaTracker.ts`
 - `src/lib/livePrices/fiveMinuteAtrTracker.ts`
-- `src/lib/livePrices/binancePerp/streamBinancePerpLive.ts`
+- `src/lib/exchangePrices/sources/binance/streamBinancePerpQuotes.ts` (multi-asset BBO + kline + reconnect; trader consumes via the adapter at `src/lib/livePrices/binancePerp/source.ts`)
+- `src/lib/wsClient/createReconnectingWebSocket.ts` (shared auto-reconnect WS client used by every long-running stream)
 - `src/lib/livePrices/binancePerp/fetchRecentFiveMinuteBars.ts`
 
 Training:

@@ -81,6 +81,7 @@ function parseFrame(raw: string): QuoteTick | null {
     : null;
   return {
     exchange: "bitstamp-spot",
+    asset: "btc",
     tsReceivedMs: Date.now(),
     tsExchangeMs:
       tsExchangeMs && Number.isFinite(tsExchangeMs) ? tsExchangeMs : null,

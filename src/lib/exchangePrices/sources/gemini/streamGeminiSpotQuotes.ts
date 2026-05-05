@@ -119,6 +119,7 @@ function applyFrame({
 
   return {
     exchange: "gemini-spot",
+    asset: "btc",
     tsReceivedMs: Date.now(),
     tsExchangeMs: null,
     bid: bestBid,

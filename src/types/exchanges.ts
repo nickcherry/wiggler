@@ -1,4 +1,5 @@
 import { exchangeIdValues } from "@alea/constants/exchanges";
+import { assetSchema } from "@alea/types/assets";
 import { z } from "zod";
 
 /**
@@ -9,11 +10,17 @@ export const exchangeIdSchema = z.enum(exchangeIdValues);
 export type ExchangeId = z.infer<typeof exchangeIdSchema>;
 
 /**
- * One BBO observation from one exchange. `mid` is the simple `(bid + ask) / 2`
- * and is what the price-line chart plots.
+ * One BBO observation from one (exchange, asset) pair. `mid` is the
+ * simple `(bid + ask) / 2` and is what the price-line chart plots.
+ *
+ * `asset` is mandatory: most stream-starters can subscribe to many
+ * assets on a single WS connection, and the long-running market
+ * capture needs per-asset routing. Single-asset legacy paths emit
+ * `asset: "btc"` to keep the shape uniform.
  */
 export const quoteTickSchema = z.object({
   exchange: exchangeIdSchema,
+  asset: assetSchema,
   tsReceivedMs: z.number(),
   tsExchangeMs: z.number().nullable(),
   bid: z.number().finite().positive(),
