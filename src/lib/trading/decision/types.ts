@@ -54,7 +54,8 @@ export type DecisionSkipReason =
   | "too-close-to-line"
   | "no-bucket"
   | "no-bid"
-  | "thin-edge";
+  | "thin-edge"
+  | "low-confidence";
 
 export type TradeDecision =
   | {

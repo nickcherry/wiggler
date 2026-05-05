@@ -151,6 +151,26 @@ describe("evaluateDecision", () => {
     }
   });
 
+  it("returns low-confidence when chosen side's probability is below the gate", () => {
+    // Long-shot reversion shape: aligned bucket at distanceBp=10 →
+    // P(currentSide=up wins) = 0.92, so ourP_down = 0.08. With downBid
+    // = 0.01 we'd have edge_down = 0.07 (clears minEdge), but the
+    // chosen probability 0.08 is far below MIN_MODEL_PROBABILITY = 0.3
+    // so the bot must refuse the trade.
+    const decision = evaluateDecision({
+      ...baseInputs,
+      currentPrice: 100.1, // distance = 0.10 → distanceBp=10
+      upBestBid: 0.95,
+      downBestBid: 0.01,
+    });
+    expect(decision.kind).toBe("skip");
+    if (decision.kind === "skip") {
+      expect(decision.reason).toBe("low-confidence");
+      expect(decision.up?.edge).toBeCloseTo(0.92 - 0.95, 9);
+      expect(decision.down?.edge).toBeCloseTo(0.08 - 0.01, 9);
+    }
+  });
+
   it("flips aligned to false when distance < 0.5 × ATR", () => {
     const decision = evaluateDecision({
       ...baseInputs,

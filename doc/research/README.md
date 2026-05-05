@@ -51,3 +51,14 @@ contained — read it cold.
   sample-composition artifact at low bp for `distance_from_line_atr`
   that the old floor wasn't strict enough to filter out, and the
   before/after impact on calibration scores and sweet-spot ranges.
+- [2026-05-05 — Overnight dry-run iteration](./2026-05-05-overnight-dry-run-iteration.md):
+  Four iterations against live Polymarket dry-run data. Found the
+  long-shot tail of the probability surface was systematically over-
+  predicting reversion (`MIN_MODEL_PROBABILITY = 0.30` gate fixes it),
+  shallow bid queues are catastrophically adversely selected
+  (`MIN_QUEUE_AHEAD_SHARES = 20` gate eliminates ~all of the bleed),
+  and the model is regime-blind (reversion vs continuation bets switch
+  which is profitable based on trending vs choppy regime — the next
+  high-leverage lever). Filled win rate lifted +26pp, adverse-selection
+  delta from -$401 to -$42, but canonical PnL still bled in today's
+  trending regime because of the regime-blindness issue.

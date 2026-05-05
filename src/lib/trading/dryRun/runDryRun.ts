@@ -1,5 +1,6 @@
 import {
   EMA50_BOOTSTRAP_BARS,
+  MIN_QUEUE_AHEAD_SHARES,
   ORDER_CANCEL_MARGIN_MS,
   STAKE_USD,
   WINDOW_SUMMARY_DELAY_MS,
@@ -904,6 +905,29 @@ async function prepareDryOrder({
     side: prepared.side,
     limitPrice: prepared.limitPrice,
   });
+  // Queue-depth gate (iter 3 of overnight 2026-05-05). A near-empty
+  // chosen-side bid queue at our limit is over-represented in adverse
+  // fills: in the 2026-05-04 baseline the bottom queue quartile
+  // (queue<7) won at 12.5% filled / 22% all-orders and bled $143 in
+  // canonical PnL across 18 trades. Refuse to place when the bid
+  // we'd lean on is too thin. Only fires when we have an observed
+  // queue depth — `null` passes (rare, only when the book read
+  // returned no level info).
+  if (
+    queueAheadShares !== null &&
+    queueAheadShares < MIN_QUEUE_AHEAD_SHARES
+  ) {
+    record.slot = { kind: "empty" };
+    emit({
+      kind: "warn",
+      atMs: Date.now(),
+      message:
+        `${labelAsset(asset)} skip: shallow-queue ` +
+        `queue=${queueAheadShares.toFixed(2)} < ${MIN_QUEUE_AHEAD_SHARES} ` +
+        `chosen=${prepared.side}@${prepared.limitPrice.toFixed(2)}`,
+    });
+    return;
+  }
   const order = createSimulatedDryOrder({
     id: `dry-${fresh.market.vendorRef}-${prepared.outcomeRef}-${prepared.preparedAtMs}`,
     asset,

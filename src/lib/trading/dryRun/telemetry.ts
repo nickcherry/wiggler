@@ -277,6 +277,52 @@ export function buildPreEntryMarketTelemetry({
   };
 }
 
+/**
+ * Pre-entry chosen-outcome price drift over a single lookback window,
+ * used by the adverse-momentum gate. Returns `lastPrice − firstPrice`
+ * for trades on the chosen outcome strictly before placement and
+ * within `lookbackMs` of `placedAtMs`. `null` when there are fewer
+ * than two trades in the window — the gate treats `null` as "no
+ * signal, allow the trade" so a quiet period doesn't block placement.
+ *
+ * Decoupled from `buildPreEntryMarketTelemetry` so the gate can be
+ * computed in O(window) at decision time without materializing all
+ * three lookbacks. The richer telemetry is still emitted with the
+ * placed order for post-hoc analysis.
+ */
+export function computePreEntryPriceDelta({
+  trades,
+  placedAtMs,
+  lookbackMs,
+}: {
+  readonly trades: readonly MarketDataTradeEvent[];
+  readonly placedAtMs: number;
+  readonly lookbackMs: number;
+}): number | null {
+  const windowStart = placedAtMs - lookbackMs;
+  let firstPrice: number | null = null;
+  let firstAt = Number.POSITIVE_INFINITY;
+  let lastPrice: number | null = null;
+  let lastAt = Number.NEGATIVE_INFINITY;
+  for (const trade of trades) {
+    if (trade.atMs >= placedAtMs || trade.atMs < windowStart) {
+      continue;
+    }
+    if (trade.atMs < firstAt) {
+      firstAt = trade.atMs;
+      firstPrice = trade.price;
+    }
+    if (trade.atMs > lastAt) {
+      lastAt = trade.atMs;
+      lastPrice = trade.price;
+    }
+  }
+  if (firstPrice === null || lastPrice === null) {
+    return null;
+  }
+  return lastPrice - firstPrice;
+}
+
 export function buildTakerCounterfactual({
   book,
   side,

@@ -7,6 +7,7 @@ import {
   buildLeadTimeCounterfactuals,
   buildPreEntryMarketTelemetry,
   buildTakerCounterfactual,
+  computePreEntryPriceDelta,
   type DryMarketTradeHistory,
   type DryPriceHistory,
 } from "@alea/lib/trading/dryRun/telemetry";
@@ -94,6 +95,58 @@ describe("dry-run telemetry", () => {
     expect(lead.find((entry) => entry.leadMs === 10_000)?.firstCrossAtMs).toBe(
       placedAtMs + 6_000,
     );
+  });
+
+  describe("computePreEntryPriceDelta", () => {
+    const trades = [
+      trade({ price: 0.5, secondsFromPlacement: -45 }), // outside window
+      trade({ price: 0.42, secondsFromPlacement: -25 }),
+      trade({ price: 0.4, secondsFromPlacement: -10 }),
+      trade({ price: 0.38, secondsFromPlacement: -1 }),
+      trade({ price: 0.6, secondsFromPlacement: 5 }), // post-placement
+    ];
+
+    it("returns last - first within the lookback window, ignoring out-of-range trades", () => {
+      const delta = computePreEntryPriceDelta({
+        trades,
+        placedAtMs,
+        lookbackMs: 30_000,
+      });
+      // First in [-30s, 0s) is the -25s trade @0.42; last is -1s @0.38.
+      expect(delta).toBeCloseTo(0.38 - 0.42, 9);
+    });
+
+    it("returns 0 when only one trade falls in the window (last == first)", () => {
+      const delta = computePreEntryPriceDelta({
+        trades: trades.filter((t) => t.atMs >= placedAtMs - 1_500),
+        placedAtMs,
+        lookbackMs: 30_000,
+      });
+      // Only one pre-placement trade in [-1.5s, 0s) → first == last → 0.
+      expect(delta).toBe(0);
+    });
+
+    it("returns null when there are no pre-placement trades at all", () => {
+      const delta = computePreEntryPriceDelta({
+        trades: [trade({ price: 0.5, secondsFromPlacement: 5 })],
+        placedAtMs,
+        lookbackMs: 30_000,
+      });
+      expect(delta).toBeNull();
+    });
+
+    it("returns positive when chosen-outcome price drifted up", () => {
+      const upTrades = [
+        trade({ price: 0.3, secondsFromPlacement: -20 }),
+        trade({ price: 0.34, secondsFromPlacement: -5 }),
+      ];
+      const delta = computePreEntryPriceDelta({
+        trades: upTrades,
+        placedAtMs,
+        lookbackMs: 30_000,
+      });
+      expect(delta).toBeGreaterThan(0);
+    });
   });
 });
 

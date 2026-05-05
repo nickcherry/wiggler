@@ -1,4 +1,7 @@
-import { MIN_ACTIONABLE_DISTANCE_BP } from "@alea/constants/trading";
+import {
+  MIN_ACTIONABLE_DISTANCE_BP,
+  MIN_MODEL_PROBABILITY,
+} from "@alea/constants/trading";
 import { flooredRemainingMinutes } from "@alea/lib/livePrices/fiveMinuteWindow";
 import type {
   DecisionSnapshot,
@@ -196,6 +199,20 @@ export function evaluateDecision(inputs: DecisionInputs): TradeDecision {
     return {
       kind: "skip",
       reason: "thin-edge",
+      snapshot,
+      samples: lookup.samples,
+      up,
+      down,
+    };
+  }
+  // Long-shot tail of the probability surface is empirically
+  // mis-calibrated (see MIN_MODEL_PROBABILITY in constants/trading).
+  // Refuse trades where our own probability for the chosen side falls
+  // below the gate, regardless of how fat the apparent edge looks.
+  if (chosen.ourProbability < MIN_MODEL_PROBABILITY) {
+    return {
+      kind: "skip",
+      reason: "low-confidence",
       snapshot,
       samples: lookup.samples,
       up,

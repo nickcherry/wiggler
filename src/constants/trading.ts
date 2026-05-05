@@ -52,6 +52,56 @@ export const MIN_ACTIONABLE_DISTANCE_BP = 2;
 export const MIN_EDGE = 0.05;
 
 /**
+ * Minimum probability the model must give the chosen side for the bot
+ * to take a trade. Empirically the long-shot tail of the probability
+ * surface is poorly calibrated: in the 2026-05-04 dry-run session, the
+ * 0.15–0.30 model-probability buckets realized win rates of 5%–14%
+ * versus predicted ~18%–27%, while the 0.30–0.40 bucket was well
+ * calibrated (predicted 33%, actual 31%). Refusing trades below this
+ * gate prunes the long-shot tail entirely.
+ *
+ * Note: This is in addition to MIN_EDGE. A trade must clear BOTH
+ * thresholds. The gate is structural — even a fat edge over a 0.10
+ * limit price is suspect if the underlying probability estimate is
+ * unreliable in that range.
+ *
+ * Counterfactual on the 2026-05-04 dry run (115 finalized orders):
+ * - All-orders win rate: 29.6% → 41.6% (+12pp)
+ * - All-orders if-filled PnL: +$274 → +$617 (2.25×)
+ * - Filled PnL: -$127 → +$157 (positive flip)
+ */
+export const MIN_MODEL_PROBABILITY = 0.3;
+
+/**
+ * Minimum queue depth (in shares resting at our chosen-side limit
+ * price) required for the dry-run runner to actually place. Orders
+ * placed against a thin bid queue are over-represented in adverse
+ * fills: in the 2026-05-05 dry-run session at 84 orders, the bottom
+ * 42% by queue depth (queueAheadShares < 20) bled the entire run's
+ * canonical PnL — dropping them flipped canonical PnL from -$228 to
+ * +$129 ($357 swing) while raising filled win rate from 31% to 42%.
+ * A thin queue means our level isn't being defended by other resting
+ * bids; fills concentrate on price-level breaks and we get hit on the
+ * way down (the textbook adverse-fill pattern).
+ *
+ * The gate is checked AFTER the model-side `evaluateDecision` returns
+ * `trade`; it does not change which side the bot picks, only whether
+ * placement actually proceeds.
+ *
+ * Counterfactual on the 2026-05-05 iter 3 mid-run (84 orders, modelP
+ * gate already applied):
+ * - Filled win rate: 31% → 42%
+ * - All-orders win rate: 38% → 47%
+ * - Canonical PnL: -$228 → +$129 (positive flip)
+ * - All-orders PnL: +$3 → +$219
+ *
+ * Threshold history: iter 3 used 7 (too soft, fired only 26 times in
+ * 3hrs and was effectively a no-op); analysis on the larger sample
+ * showed the cleaner cut is at 20.
+ */
+export const MIN_QUEUE_AHEAD_SHARES = 20;
+
+/**
  * Number of completed 5-minute closes the live runner needs to bootstrap
  * its EMA-50 from. The EMA seed needs 50 bars; we pull a comfortable
  * margin so any single missed bar over the wire doesn't stall the seed.
