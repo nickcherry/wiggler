@@ -14,6 +14,7 @@ when the modeled edge clears the market.
 - [Directional Agreement Experiment](./doc/RELIABILITY_EXPERIMENT.md) — checking whether fast exchange-feed proxies are reliable enough for Polymarket-side training and live trading.
 - [Training Domain](./doc/TRAINING_DOMAIN.md) — historical candle analysis and threshold discovery.
 - [Trading Domain](./doc/TRADING.md) — the live money-touching runner and failure modes.
+- [Dry Trading](./doc/DRY_TRADING.md) — dry-run fill simulation, JSONL sessions, and report interpretation.
 - [Dashboards](./doc/DASHBOARDS.md) — shared visual language for HTML reports in `tmp/`.
 
 ### Engineering

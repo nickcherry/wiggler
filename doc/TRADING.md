@@ -413,32 +413,17 @@ model change shows up as a reviewable diff.
 
 `bun alea trading:dry-run` runs the live decision and maker-order
 preparation path against real feeds without signing, placing, or
-cancelling any order. It still discovers real Polymarket markets,
-hydrates real books, performs the same just-in-time book refresh before
-entry, prepares the same GTD maker BUY shape live would post, and then
-tracks whether public market trades would likely have filled it.
+cancelling any order. See [Dry Trading](./DRY_TRADING.md) for the
+fill model, JSONL ledger, Telegram behavior, and report interpretation.
 
-Dry fills are queue-aware by default:
+### `trading:dry-run-report`
 
-- A later trade below our BUY limit fills the simulated order at our
-  limit.
-- A later trade exactly at our limit fills only after observed size
-  clears the placement-time queue ahead.
-- Unknown same-price queue depth is treated conservatively as
-  unfilled, though the optimistic touch counterfactual is still logged.
-
-Each session writes `tmp/dry-trading/dry-trading_<timestamp>.jsonl`.
-The ledger appends `session_start`, `virtual_order`,
-`window_checkpoint`, `window_finalized`, and `session_stop` records.
-The console prints virtual-order lines as they are prepared and a
-multi-line dry summary after each market finalizes. The same virtual
-placement and per-window dry summary bodies are sent to Telegram using
-`TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID`; they are explicitly labelled
-as dry-run messages and no venue order is signed or posted. Finalized
-windows include canonical queue-aware fill metrics plus optimistic
-touch, all-orders-filled, and unfilled-order counterfactual PnL/win-rate
-views. Dry totals are session-to-date only, unlike live trading's
-lifetime venue PnL.
+`bun alea trading:dry-run-report` renders the newest dry-trading JSONL
+session in `tmp/dry-trading/` into a standalone Alea-styled HTML report
+under `tmp/`, with a JSON sidecar for later slicing. Pass
+`--session <path>` to render a specific dry-run session and `--no-open`
+to skip opening the HTML on macOS. See [Dry Trading](./DRY_TRADING.md)
+for the canonical report schema and metric definitions.
 
 ### `trading:live --commit`
 

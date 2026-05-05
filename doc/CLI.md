@@ -41,6 +41,7 @@ Everything that matters is reachable through one non-interactive entrypoint:
 - `trading:*`
   `trading:gen-probability-table`
   `trading:dry-run`
+  `trading:dry-run-report`
   `trading:live`
   `trading:hydrate-lifetime-pnl`
   `trading:performance`
